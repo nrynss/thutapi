@@ -37,12 +37,7 @@ load-bearing.
 | **M** Medium | Real defect with a workaround. Must fix before the track closes. |
 | **L** Low | Polish / hygiene. Must fix before the track closes. |
 
-**P3 is not exempt.** Every finding lands in a remediation file. The only
-exception: a finding so trivial that it is a single-line doc typo or a single
-type annotation that needs no review — the implementer may fix it in the same
-commit that produced the finding, and the review file must record the
-in-line fix by name and file. Anything beyond that goes through the normal
-remediation round.
+**No severity is exempt.** Every finding lands in a remediation file. The only exception: a finding so trivial that it is a single-line doc typo or a single type annotation that needs no review — the implementer may fix it in the same commit that produced the finding, and the review file must record the in-line fix by name and file. Anything beyond that goes through the normal remediation round.
 
 **APPROVE** verdict requires an explicit "zero residue" claim against every
 prior round's findings, severity by severity.

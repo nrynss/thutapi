@@ -20,9 +20,7 @@ Every track runs through this loop until **APPROVE** with **zero findings
    breaks if reverted)**. Reviewers do not remediate their own findings.
 3. **Remediate.** For each finding, write the fix into
    `dev-diary/adversarial-review/t<N>-remediation-round<K>.md` with one row
-   per finding. **P3 is not exempt.** Only truly trivial P3 fixes (a one-line
-   doc typo or type annotation that needs no review) may be committed in-line
-   with the track and recorded as a note in the round's review file.
+   per finding. **No severity is exempt.** Only truly trivial L-severity fixes (a one-line doc typo or type annotation that needs no review) may be committed in-line with the track and recorded as a note in the round's review file.
 4. **Re-review.** Re-run the same review against the new commit. Repeat 2–4
    until verdict is **APPROVE** with an explicit "zero residue" claim against
    all prior rounds.
