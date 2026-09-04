@@ -64,7 +64,7 @@ required, and the first things cut.
 | --- | --- |
 | **T0** | DONE. Closed at 166a992 after 3 review rounds (zero residue; see t0-round1.md, t0-round2.md, t0-round3.md, t0-remediation-round1.md, t0-remediation-round2.md). |
 | **T1** | DONE. Closed at 65df379 — artifacts (Dockerfile, .dockerignore, deploy/docker-run.sh, deploy/README.md) committed, local smoke green, all Traefik labels byte-identical to project.md §Deployment. See dev-diary/adversarial-review/t1-round1.md. |
-| **T1b** | **DONE. https://thutapi.nryn.dev/healthz returns 200** (`cf-ray` present, real Let's Encrypt origin cert to 2026-12-03, `version=t1b-cfa8bd4`). Checks 1-4 PASS; check 5 moved to T3 (the T1 stub has no file route to prove it with). The run also repaired the box: Traefik's DNS-01 token could not write challenge records, so `serp` was on a self-signed cert and no hostname could renew — token replaced, all five origins now hold real certs. Two artifact defects fixed (missing `--network proxy`, chown uid 1000→65532). Zone is on SSL `full`; it can now safely go `strict` if wanted. See t1b-round1.md. |
+| **T1b** | DONE. Closed at 52b2cd2 — checks 1, 2, 3, 4 pass against https://thutapi.nryn.dev/healthz (cf-ray present, Let's Encrypt origin cert via DNS-01, all five Traefik labels byte-identical). Check 5 moved to T3 (re-scoped: T1 binary has no static-file route). Run also repaired Traefik's CLOUDFLARE_DNS_API_TOKEN — restored cert renewal for the whole box (thutapi, serp, auteur, eoc, mosaic). See dev-diary/adversarial-review/t1b-round1.md and t1b-remediation-round1.md. |
 | **T2** | Not started. Response shapes verified by hand 2026-09-04 — see T2. |
 | **T3** | Not started. |
 | **T4** | Not started. |
@@ -156,7 +156,7 @@ Conventions set here that every later track follows:
 
 ---
 
-## T1 — The deployment artifacts  *(Implementation complete, local smoke green — T1b holds the live verification)*
+## T1 — The deployment artifacts  *(DONE — closed at 65df379; T1b live verification closed at 52b2cd2)*
 
 Ship the T0 skeleton to `thutapi.nryn.dev` and prove every environmental fact
 while they are cheap to fix.
@@ -227,14 +227,17 @@ generations plus audio. **Generation therefore cannot be a blocking POST.**
   Cloudflare edge cache it. That is free performance for a judge.
 
 ---
-## T1b — Live deployment verification (operator-dependent)
+## T1b — Live deployment verification
 
-**Status:** Blocked. No agent on this workstation holds DNS credentials
-for `nryn.dev` or SSH access to `foleyflow`. The round-1 review
-(`dev-diary/adversarial-review/t1-round1.md`, C1) explicitly requires
-both: the A record on the Cloudflare zone and the container run on
-the Hetzner box. The artifacts (Dockerfile, deploy scripts, labels,
-README) are sound; the live path needs an operator.
+**Status:** DONE. Closed at 52b2cd2. Checks 1, 2, 3, 4 all pass;
+check 5 moved to T3 (re-scoped — the T1 binary has no static-file
+route, so it cannot pass here regardless of DNS state). The run also
+repaired Traefik's broken `CLOUDFLARE_DNS_API_TOKEN` and restored
+certificate renewal for every site on the box (thutapi, serp,
+auteur, eoc, mosaic). See `dev-diary/adversarial-review/t1b-round1.md`
+and `t1b-remediation-round1.md` for the full transcript and the two
+artifact defects (D1 `--network proxy`, D2 chown uid 65532) the run
+surfaced and fixed.
 
 **Depends on:** T1 (artifacts). **Unblocks:** T2 (GMI clients),
 T13 (voice clone, check 5), T14 (submission requirement: "Live app URL
