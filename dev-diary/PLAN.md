@@ -155,7 +155,7 @@ Conventions set here that every later track follows:
 
 ---
 
-## T1 — The deployment path, end to end, before there is anything to deploy
+## T1 — The deployment path, end to end, before there is anything to deploy  *(DONE — smoke verified locally; live URL checks remain)*
 
 Ship the T0 skeleton to `thutapi.nryn.dev` and prove every environmental fact
 while they are cheap to fix.

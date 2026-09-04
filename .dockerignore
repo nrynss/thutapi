@@ -1,0 +1,53 @@
+# Thutapi — Docker build context exclusions.
+#
+# Keeping the build context lean makes `docker build` fast and stops generated
+# artefacts, secrets, local DBs and the dev diary from being baked into the
+# image. The image only needs the Go module, the cmd/ source, and the
+# static/ tree.
+
+# VCS
+.git/
+.gitignore
+.gitattributes
+
+# Dev diary — spec, plan, review loop. Never compiled into the binary.
+dev-diary/
+
+# Generated / runtime data — kept on the box on a Docker volume, never in the
+# image. See deploy/README.md.
+data/
+media/
+
+# Local SQLite databases
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Local env / secrets — GMI_API_KEY MUST NOT reach the repo, even via build
+# context. See AGENTS.md §Safety and data rules.
+.env
+.env.*
+!.env.example
+GMI_API_KEY
+*.key
+*.pem
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Build artefacts (Go)
+/bin/
+/dist/
+/tmp/
+/thutapi
+*.test
+*.out
+
+# Node / frontend build artefacts, if any sneak in from later tracks
+node_modules/
+package-lock.json
