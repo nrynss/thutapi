@@ -1,0 +1,52 @@
+# Verification only. Never builds or publishes an image.
+#
+# Skips doc-only changes: the dev-diary and the markdown around it change
+# far more often than the code, and a green tick on a prose edit tells you
+# nothing while still costing a queue slot and burying real signal.
+name: verify
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'dev-diary/**'
+      - '.env.example'
+      - '.gitignore'
+  pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'dev-diary/**'
+      - '.env.example'
+      - '.gitignore'
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test -race
+        run: go test ./... -race
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l cmd/)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed on:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: shell syntax
+        run: bash -n deploy/docker-run.sh

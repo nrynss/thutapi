@@ -1,18 +1,27 @@
-# Build the Thutapi image and publish it to GitHub Container Registry.
+# Build and publish the image to GHCR. MANUAL ONLY.
 #
-# Why this exists: the first deployment to the Hetzner box was an image
-# built on a workstation and shipped with `docker save | ssh docker load`.
-# That works, but nothing about it is reproducible — the box could not
-# rebuild its own image, and the artifact existed in exactly two places.
+# Deliberately not wired to `push`. An image is a deployment artifact, and
+# producing one on every commit means the registry fills with builds
+# nobody asked for and `latest` drifts under the box without anyone
+# deciding it should. Publishing is a decision, so it takes a button.
 #
-# The published image is public, so the box pulls it anonymously and needs
-# no registry credentials.
+# Run it from the Actions tab, or:
+#   gh workflow run image.yml
+#   gh workflow run image.yml -f tag=t2-clients
 name: image
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Optional extra tag (the commit SHA is always published)'
+        required: false
+        type: string
+      latest:
+        description: 'Also move the `latest` tag to this build'
+        required: false
+        type: boolean
+        default: false
 
 env:
   REGISTRY: ghcr.io
@@ -28,8 +37,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Verify before publishing. An image that fails vet or tests should
-      # never reach a tag the box might pull.
+      # Verify before publishing. A build that fails tests must never
+      # reach a tag the box could pull.
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -41,13 +50,6 @@ jobs:
       - name: go test -race
         run: go test ./... -race
 
-      - name: gofmt
-        run: |
-          unformatted=$(gofmt -l cmd/)
-          if [ -n "$unformatted" ]; then
-            echo "gofmt needed on:"; echo "$unformatted"; exit 1
-          fi
-
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v3
@@ -56,8 +58,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Tags: the commit SHA is the one to deploy — it names exactly one
-      # build. `latest` is a convenience for humans, never for the box.
       - name: Metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -65,7 +65,8 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=sha,format=short,prefix=
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ inputs.tag }},enable=${{ inputs.tag != '' }}
+            type=raw,value=latest,enable=${{ inputs.latest }}
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -77,3 +78,10 @@ jobs:
           build-args: VERSION=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Summary
+        run: |
+          echo "### Published" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY

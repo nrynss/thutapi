@@ -21,10 +21,26 @@ the box already does this` and the build plan is `dev-diary/PLAN.md §T1`.
 
 ## Image
 
-CI builds and publishes the image on every push to `main`
-(`.github/workflows/image.yml`). It runs `go vet`, `go test -race` and a
-`gofmt` check first, so a failing commit never reaches a tag the box could
-pull. Two tags are published:
+Image publishing is **manual**. `.github/workflows/image.yml` runs only on
+`workflow_dispatch` — an image is a deployment artifact, and producing one
+on every commit fills the registry with builds nobody asked for and lets
+`latest` drift under the box without anyone deciding it should.
+
+```
+gh workflow run image.yml                      # publishes the SHA tag
+gh workflow run image.yml -f latest=true       # also moves `latest`
+gh workflow run image.yml -f tag=t2-clients    # plus a named tag
+```
+
+It runs `go vet` and `go test -race` before pushing, so a failing build
+never reaches a tag the box could pull.
+
+Separately, `.github/workflows/verify.yml` runs vet, tests, `gofmt` and a
+shell syntax check on every code push and PR. It never builds an image,
+and it skips doc-only changes — the dev-diary moves far more often than
+the code, and a green tick on a prose edit is noise.
+
+Tags published by `image.yml`:
 
 | Tag | Use |
 |---|---|
