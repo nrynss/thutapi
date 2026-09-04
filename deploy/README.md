@@ -121,13 +121,14 @@ SSL mode on the zone is **`full`, not `strict`** — measured 2026-09-04,
 Traefik's HTTPS redirect is an infinite redirect loop, so `full` is the
 safe setting here.
 
-**Do not "upgrade" this to Full (strict).** Full encrypts to the origin
-without validating the origin certificate, and that is currently
-load-bearing: `thutapi` and `serp` both serve Traefik's self-signed
-`CN=TRAEFIK DEFAULT CERT` because DNS-01 issuance is failing. Under strict
-they would return 526 immediately, and `auteur`/`eoc`/`mosaic` would
-follow as their certs lapse. Repair the Traefik `CLOUDFLARE_DNS_API_TOKEN`
-first, confirm a real cert at every origin, and only then consider strict.
+Full encrypts to the origin without validating the origin certificate.
+That was load-bearing until 2026-09-04, when `thutapi` and `serp` were
+both serving Traefik's self-signed `CN=TRAEFIK DEFAULT CERT` because the
+DNS-01 token could not write challenge records. The token has been
+replaced and all five origins now hold real Let's Encrypt certificates, so
+**strict is now safe** — it is simply not enabled, and nothing requires
+it. If you do enable it, check every origin cert first: any hostname still
+on the default cert returns 526 the instant strict is on.
 
 ### Certificates — DNS-01, and two certs not one
 

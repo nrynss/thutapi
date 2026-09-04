@@ -43,15 +43,24 @@ api() {  # api <method> <path> [body]
 }
 
 echo "=== 0. verify token ==="
-if ! api GET /user/tokens/verify | grep -q '"success":true'; then
-  echo "FAIL: token rejected by Cloudflare. Nothing changed." >&2
-  api GET /user/tokens/verify >&2; exit 1
-fi
-echo "token OK"
-
+# Deliberately NOT `GET /user/tokens/verify`. Cloudflare account-owned
+# tokens (cfat_ prefix) return {"code":1000,"message":"Invalid API Token"}
+# at that endpoint even when perfectly healthy — verified 2026-09-04
+# against a token that then wrote DNS successfully. Test the capability
+# we actually need instead: read the zone, and list its DNS records.
 ZONE=$(api GET "/zones?name=${ZONE_NAME}" | grep -oE '"id":"[a-f0-9]{32}"' | head -1 | cut -d'"' -f4)
-[[ -n "${ZONE}" ]] || { echo "FAIL: no zone id for ${ZONE_NAME} (token may lack zone read)" >&2; exit 1; }
+if [[ -z "${ZONE}" ]]; then
+  echo "FAIL: token cannot read the ${ZONE_NAME} zone. Nothing changed." >&2
+  api GET "/zones?name=${ZONE_NAME}" >&2; exit 1
+fi
 echo "zone: ${ZONE}"
+
+if ! api GET "/zones/${ZONE}/dns_records?type=A&per_page=1" | grep -q '"success":true'; then
+  echo "FAIL: token cannot read DNS records; it will not pass DNS-01." >&2
+  echo "      Needs Zone -> DNS -> Edit on ${ZONE_NAME}. Nothing changed." >&2
+  exit 1
+fi
+echo "token can read zone DNS — proceeding"
 
 echo
 echo "=== 1. install token into Traefik and recreate ==="
@@ -65,6 +74,13 @@ echo "=== 1. install token into Traefik and recreate ==="
 # This restarts the edge proxy: auteur, mosaic, eoc and serp all go down
 # for the few seconds it takes to come back. Nothing else on the box is
 # touched.
+#
+# acme.json holds every existing certificate and the ACME account key. It
+# survives the recreate because /opt/traefik/acme is a bind mount, but it
+# is the one file here whose loss would be expensive (Let's Encrypt rate
+# limits make re-issuing five hostnames slow), so take a copy first.
+cp -a /opt/traefik/acme/acme.json "/opt/traefik/acme/acme.json.bak-$(date -u +%Y%m%dT%H%M%SZ)" 2>/dev/null \
+  && echo "acme.json backed up" || echo "warning: no acme.json to back up"
 docker rm -f traefik >/dev/null
 docker run -d --name traefik --restart unless-stopped \
   --network proxy \

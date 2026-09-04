@@ -8,22 +8,40 @@
 
 ## Status
 
-**RUN 2026-09-04 15:20-15:30 UTC. The live URL is up.**
-**https://thutapi.nryn.dev/healthz returns 200.**
+**RUN 2026-09-04 15:20-15:40 UTC. T1b is complete.**
+**https://thutapi.nryn.dev/healthz returns 200 over a real certificate.**
 
 | Check | Verdict |
 |---|---|
 | 1 — Traefik picks the container up | **PASS** |
 | 2 — DNS A record | **PASS** — proxied A record created |
-| 3 — Let's Encrypt certificate issued | **FAIL** — DNS-01 401s; origin serves `CN=TRAEFIK DEFAULT CERT` |
+| 3 — Let's Encrypt certificate issued | **PASS** — after repairing Traefik's DNS-01 token |
 | 4 — Live curl with `cf-ray` | **PASS** |
-| 5 — Public file fetchable by a third party | **MIS-SCOPED** — belongs to T3; the T1 stub has no file route |
+| 5 — Public file fetchable by a third party | **MOVED to T3** — the T1 stub has no file route |
 
-Check 4 passes *despite* check 3 failing, and the reason matters — see
-"Full, not Full (strict)" below. T1b's purpose was to prove the
-environmental facts cheaply, and it did: the live URL works, and it
-surfaced one real defect in the box's cert posture that would otherwise
-have been discovered on Sunday.
+Every check that T1b can answer is answered. Check 5 was mis-scoped onto
+this track and moves to T3; nothing about it is outstanding here.
+
+**The run also repaired the box.** `serp.nryn.dev` had been silently
+serving `CN=TRAEFIK DEFAULT CERT` and now holds a real certificate, and
+certificate renewal — broken for every hostname on the box — works again.
+That failure was invisible from outside and would have surfaced as an
+outage when `auteur`/`eoc`/`mosaic` came up for renewal in November.
+
+Origin certificates after the fix, read on the box:
+
+```
+thutapi   subject=CN=thutapi.nryn.dev  notAfter=Dec  3 14:40:32 2026 GMT
+serp      subject=CN=serp.nryn.dev     notAfter=Dec  3 14:40:06 2026 GMT
+auteur    subject=CN=auteur.nryn.dev   notAfter=Nov 11 18:23:46 2026 GMT
+mosaic    subject=CN=mosaic.nryn.dev   notAfter=Nov 11 19:00:33 2026 GMT
+eoc       subject=CN=eoc.nryn.dev      notAfter=Nov 11 18:41:30 2026 GMT
+```
+
+All four sibling sites answered normally after the edge restart
+(`auteur`/`mosaic`/`eoc` 200; `serp` 403 from the relay's own auth, which
+is its expected response to an unauthenticated request — no
+`cf-mitigated` header, so not a Cloudflare block).
 
 Routing itself is proven: the container answers correctly both directly
 and through Traefik at the origin (transcripts under check 1). Everything
@@ -101,12 +119,17 @@ The lego 401 above is unaffected and remains the sound evidence — it is
 Traefik failing the actual write, not a verification proxy for it. The
 conclusion stands; one of the two arguments for it did not.
 
-**Fix:** install a token with `Zone → DNS → Edit` on `nryn.dev` into the
-Traefik container's `CLOUDFLARE_DNS_API_TOKEN` and recreate it. That
-issues the origin cert for `thutapi`, repairs `serp`, and restores renewal
-for `auteur`/`eoc`/`mosaic`. It is **not** needed for the live URL, which
-already works — it is needed before the zone can safely go to Full
-(strict), and before the existing certs expire.
+**Fixed 2026-09-04** by `deploy/finish-t1b.sh`: a token with
+`Zone → DNS → Edit` on `nryn.dev` was installed into the Traefik
+container's `CLOUDFLARE_DNS_API_TOKEN` and the container recreated
+(matching the run command in `hetzner-hosting/RUNBOOK.md §1`, with
+`acme.json` copied first). This issued the origin cert for `thutapi`,
+repaired `serp`, and restored renewal for `auteur`/`eoc`/`mosaic`.
+
+**The zone can now safely move to Full (strict)** — all five origins
+present real Let's Encrypt certificates. That change is left to the
+operator; it is a zone-wide setting outside T1b's scope, and the current
+`full` setting is not failing anything.
 
 ## Five live checks (paste each command + output below)
 
@@ -233,19 +256,32 @@ ssh foleyflow "echo | openssl s_client -servername thutapi.nryn.dev -connect 127
 Expected: subject `CN=thutapi.nryn.dev` (or SAN containing it); issuer
 `Let's Encrypt ... R3/R10/R11`; `notAfter` in the future.
 
-**FAIL 2026-09-04.** The origin serves Traefik's built-in placeholder,
-because DNS-01 could not write the challenge record:
+**Initially FAILED, then PASSED after repairing the token.** The first
+run returned Traefik's built-in placeholder, because DNS-01 could not
+write the challenge record:
 
 ```
-$ echo | openssl s_client -servername thutapi.nryn.dev -connect 127.0.0.1:443 2>/dev/null \
-    | openssl x509 -noout -subject -issuer
 subject=CN=TRAEFIK DEFAULT CERT
 issuer=CN=TRAEFIK DEFAULT CERT
 ```
 
-Masked from the public by the Cloudflare edge cert and tolerated by the
-zone's Full (non-strict) SSL mode — see the two sections above. This is
-the one check still open, and it is infrastructure work, not Thutapi work.
+`deploy/finish-t1b.sh` installed a working `CLOUDFLARE_DNS_API_TOKEN` into
+the Traefik container and recreated it (`acme.json` backed up first).
+Issuance took about 45 seconds:
+
+```
+  attempt 1/20: still TRAEFIK DEFAULT CERT, retrying in 15s
+  attempt 2/20: still TRAEFIK DEFAULT CERT, retrying in 15s
+  attempt 3/20: still TRAEFIK DEFAULT CERT, retrying in 15s
+subject=CN=thutapi.nryn.dev
+issuer=C=US, O=Let's Encrypt, CN=YR1
+notBefore=Sep  4 14:40:33 2026 GMT
+notAfter=Dec  3 14:40:32 2026 GMT
+```
+
+**PASS.** Note the issuer intermediate is `YR1`, not the `R3/R10/R11` this
+check originally predicted — Let's Encrypt has rotated intermediates since
+that expectation was written. Match on `O=Let's Encrypt`, not on the CN.
 
 > **Corrected 2026-09-04.** This check previously probed
 > `thutapi.nryn.dev:443` from the public internet and expected a Let's

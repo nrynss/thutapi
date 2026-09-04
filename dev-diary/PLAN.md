@@ -64,7 +64,7 @@ required, and the first things cut.
 | --- | --- |
 | **T0** | DONE. Closed at 166a992 after 3 review rounds (zero residue; see t0-round1.md, t0-round2.md, t0-round3.md, t0-remediation-round1.md, t0-remediation-round2.md). |
 | **T1** | DONE. Closed at 65df379 — artifacts (Dockerfile, .dockerignore, deploy/docker-run.sh, deploy/README.md) committed, local smoke green, all Traefik labels byte-identical to project.md §Deployment. See dev-diary/adversarial-review/t1-round1.md. |
-| **T1b** | **Live. https://thutapi.nryn.dev/healthz returns 200 (`cf-ray` present, `version=t1b-cfa8bd4`).** Checks 1, 2 and 4 PASS; check 3 FAILS (origin serves `CN=TRAEFIK DEFAULT CERT` — Traefik's DNS-01 token 401s); check 5 moved to T3. Tolerated because the zone is on SSL `full`, not `strict` — **do not switch to strict** until the Traefik token is repaired, or every site on the box 526s. T2/T14's live-URL dependency is satisfied. Two artifact defects fixed (missing `--network proxy`, chown uid 1000→65532). See t1b-round1.md. |
+| **T1b** | **DONE. https://thutapi.nryn.dev/healthz returns 200** (`cf-ray` present, real Let's Encrypt origin cert to 2026-12-03, `version=t1b-cfa8bd4`). Checks 1-4 PASS; check 5 moved to T3 (the T1 stub has no file route to prove it with). The run also repaired the box: Traefik's DNS-01 token could not write challenge records, so `serp` was on a self-signed cert and no hostname could renew — token replaced, all five origins now hold real certs. Two artifact defects fixed (missing `--network proxy`, chown uid 1000→65532). Zone is on SSL `full`; it can now safely go `strict` if wanted. See t1b-round1.md. |
 | **T2** | Not started. Response shapes verified by hand 2026-09-04 — see T2. |
 | **T3** | Not started. |
 | **T4** | Not started. |
@@ -216,11 +216,13 @@ generations plus audio. **Generation therefore cannot be a blocking POST.**
 > **Measured 2026-09-04: the zone is on `full`, NOT `strict`.** The
 > assertion above that it "should already be correct" was wrong. Full
 > encrypts to the origin but does not validate the origin certificate,
-> which is the only reason `thutapi` and `serp` serve 200 while Traefik
-> hands out a self-signed `CN=TRAEFIK DEFAULT CERT`. **Do not switch the
-> zone to strict until the Traefik DNS-01 token is repaired and every
-> origin presents a real certificate** — flipping it first returns 526 on
-> every site on the box. See t1b-round1.md.
+> which was the only reason `thutapi` and `serp` served 200 while Traefik
+> handed out a self-signed `CN=TRAEFIK DEFAULT CERT`. That is now fixed —
+> the Traefik DNS-01 token was repaired and all five origins hold real
+> Let's Encrypt certificates, so the zone **can** safely move to strict.
+> It has been left on `full`, which fails nothing. If you do switch it,
+> confirm every origin cert first: a hostname on the default cert returns
+> 526 the instant strict is on. See t1b-round1.md.
 * Generated media is immutable, so serve it with a long `max-age` and let the
   Cloudflare edge cache it. That is free performance for a judge.
 
