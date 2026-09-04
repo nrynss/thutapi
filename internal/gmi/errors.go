@@ -7,13 +7,21 @@
 //
 //	var err error
 //	resp, err = client.Chat(ctx, req)
-//	if errors.Is(err, gmi.ErrRateLimited) { ... retry with backoff ... }
-//	if errors.Is(err, gmi.ErrUnauthorized) { ... refresh key, surface ... }
+//	if errors.Is(err, gmi.ErrBadRequest)    { ... fix payload, do not retry ... }
+//	if errors.Is(err, gmi.ErrRateLimited)   { ... retry with backoff ... }
+//	if errors.Is(err, gmi.ErrUnauthorized)  { ... refresh key, surface ... }
 //	if errors.Is(err, gmi.ErrModelNotFound) { ... the model id is wrong ... }
-//	if errors.Is(err, gmi.ErrTransient) { ... transport blip, retry ... }
+//	if errors.Is(err, gmi.ErrTransient)     { ... transport blip, retry ... }
 package gmi
 
 import "errors"
+
+// ErrBadRequest is returned on HTTP 400 and 422 against either endpoint.
+// The caller payload was malformed (unsupported field, missing required
+// field, image too large, model id wrong format even when the model
+// exists, etc). Fix the payload; do not retry — the same bytes will fail
+// the same way.
+var ErrBadRequest = errors.New("gmi: bad request")
 
 // ErrUnauthorized is returned when GMI rejects the request with HTTP 401
 // or 403. The most likely cause is a missing or expired GMI_API_KEY — the

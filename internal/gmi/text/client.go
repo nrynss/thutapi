@@ -227,9 +227,16 @@ func classifyStatus(code int, body io.Reader) error {
 		return fmt.Errorf("%w: %s", gmi.ErrRateLimited, msg)
 	case code == http.StatusNotFound:
 		return fmt.Errorf("%w: %s", gmi.ErrModelNotFound, msg)
+	case code == http.StatusBadRequest || code == http.StatusUnprocessableEntity:
+		// 400/422 = caller payload is wrong. Do not retry — the same
+		// bytes fail the same way.
+		return fmt.Errorf("%w: %s", gmi.ErrBadRequest, msg)
 	case code >= 500:
 		return fmt.Errorf("%w: %s", gmi.ErrTransient, msg)
 	default:
+		// Anything else (3xx not followed, other 4xx, etc) is unknown;
+		// treat as transient so the caller's retry loop has a chance
+		// to observe recovery.
 		return fmt.Errorf("%w: %s", gmi.ErrTransient, msg)
 	}
 }

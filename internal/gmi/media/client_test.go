@@ -246,6 +246,31 @@ func TestUnauthorized(t *testing.T) {
 	}
 }
 
+// TestBadRequest_400 pins M1 on the media path: a 400 must surface as
+// gmi.ErrBadRequest, NOT gmi.ErrTransient.
+func TestBadRequest_400(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"prompt rejected by safety filter"}`))
+	}))
+	defer srv.Close()
+
+	t.Setenv("GMI_API_KEY", "any-key")
+	t.Setenv("GMI_MEDIA_BASE_URL", srv.URL)
+
+	c := New()
+	_, err := c.GenerateImage(context.Background(), "x", "")
+	if err == nil {
+		t.Fatal("GenerateImage returned nil error on 400")
+	}
+	if !errors.Is(err, gmi.ErrBadRequest) {
+		t.Errorf("err = %v, want errors.Is(.., gmi.ErrBadRequest)", err)
+	}
+	if errors.Is(err, gmi.ErrTransient) {
+		t.Errorf("err = %v, must NOT also be errors.Is(.., gmi.ErrTransient)", err)
+	}
+}
+
 // TestMissingAPIKey verifies the media client fails closed when the
 // env var is absent.
 func TestMissingAPIKey(t *testing.T) {

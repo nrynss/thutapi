@@ -242,6 +242,10 @@ func classifyStatus(code int, body []byte) error {
 		return fmt.Errorf("%w: %s", gmi.ErrRateLimited, msg)
 	case code == http.StatusNotFound:
 		return fmt.Errorf("%w: %s", gmi.ErrModelNotFound, msg)
+	case code == http.StatusBadRequest || code == http.StatusUnprocessableEntity:
+		return fmt.Errorf("%w: %s", gmi.ErrBadRequest, msg)
+	case code >= 500:
+		return fmt.Errorf("%w: %s", gmi.ErrTransient, msg)
 	default:
 		return fmt.Errorf("%w: %s", gmi.ErrTransient, msg)
 	}

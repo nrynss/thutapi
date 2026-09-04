@@ -161,6 +161,36 @@ func TestChat_Unauthorized_401(t *testing.T) {
 	}
 }
 
+// TestChat_BadRequest_400 pins M1: a 400 must surface as gmi.ErrBadRequest,
+// NOT gmi.ErrTransient, so a caller retry loop will not spin. Mirrors
+// the 401 test; the body shape is identical (free-form), the only thing
+// that changes is the status code.
+func TestChat_BadRequest_400(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"unsupported field: foo"}}`))
+	}))
+	defer srv.Close()
+
+	t.Setenv("GMI_API_KEY", "any-key")
+	t.Setenv("GMI_TEXT_BASE_URL", srv.URL)
+
+	c := New()
+	_, err := c.Chat(context.Background(), ChatRequest{
+		Model:    "MiniMaxAI/MiniMax-M3",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err == nil {
+		t.Fatal("Chat returned nil error on 400")
+	}
+	if !errors.Is(err, gmi.ErrBadRequest) {
+		t.Errorf("err = %v, want errors.Is(.., gmi.ErrBadRequest)", err)
+	}
+	if errors.Is(err, gmi.ErrTransient) {
+		t.Errorf("err = %v, must NOT also be errors.Is(.., gmi.ErrTransient)", err)
+	}
+}
+
 // TestChat_RateLimited_429 verifies a 429 surfaces as gmi.ErrRateLimited.
 func TestChat_RateLimited_429(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
