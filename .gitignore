@@ -2,7 +2,7 @@
 /bin/
 /dist/
 /tmp/
-
+/thutapi
 # Go vendoring junk
 *.test
 *.out
