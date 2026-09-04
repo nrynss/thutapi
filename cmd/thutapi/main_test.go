@@ -157,9 +157,11 @@ func TestParseFlagsBadFlagReturnsError(t *testing.T) {
 //  3. Issue a request that holds its Content-Length body open forever.
 //  4. Call srv.Shutdown(ctxWithTimeout(cfg.timeout)) and require nil.
 //
-// With the fix, ReadTimeout fires at cfg.timeout-1s, the handler's body
-// read errors out, the handler exits, Shutdown sees the connection drained,
-// and returns nil within the cfg.timeout budget.
+// With the fix, ReadTimeout fires at cfg.timeout - min(2s, cfg.timeout/2)
+// (8s for the cfg.timeout=10s default — a deterministic headroom window for
+// Shutdown to drain), the handler's body read errors out, the handler exits,
+// Shutdown sees the connection drained, and returns nil within the cfg.timeout
+// budget.
 //
 // Mutation: restore ReadTimeout to > cfg.timeout (the old 30s default).
 // The body read then does not fire inside the cfg.timeout budget, the
@@ -188,10 +190,10 @@ func TestShutdownDeadlineIsHonouredAgainstSlowBody(t *testing.T) {
 		close(handlerEntered)
 		// Read the body one byte at a time so the handler stays
 		// alive until ReadTimeout fires. With the fix, the read
-		// returns a timeout error after cfg.timeout-1s and the
-		// handler exits; without it (the Mutation), the read is
-		// still going when cfg.timeout expires and Shutdown returns
-		// DeadlineExceeded.
+		// returns a timeout error after cfg.timeout - min(2s, cfg.timeout/2)
+		// (8s for the cfg.timeout=10s default) and the handler exits; without
+		// it (the Mutation), the read is still going when cfg.timeout expires
+		// and Shutdown returns DeadlineExceeded.
 		buf := make([]byte, 1)
 		for {
 			if _, err := r.Body.Read(buf); err != nil {
@@ -238,7 +240,7 @@ func TestShutdownDeadlineIsHonouredAgainstSlowBody(t *testing.T) {
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		t.Fatalf("Shutdown = %v after %v; default ReadTimeout must be ≤ cfg.timeout=%v so the slow body is force-closed before the shutdown deadline (H1)", err, cfg.timeout, cfg.timeout)
-}
+	}
 }
 
 // ---------------------------------------------------------------------
@@ -309,7 +311,6 @@ func TestNewHTTPServerReadTimeoutIsAlwaysPositive(t *testing.T) {
 		})
 	}
 }
-
 
 // ---------------------------------------------------------------------
 // H3 — Pin: TestParseFlagsRejectsNonPositiveTimeout
@@ -403,7 +404,6 @@ func TestShutdownLogRecordsSignalName(t *testing.T) {
 	// synthetic SIGTERM is consumed and the Pin fails for an
 	// unrelated environmental reason.
 	t.Setenv("ADDR", "127.0.0.1:0")
-
 
 	var logBuf bytes.Buffer
 	log := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))

@@ -72,3 +72,33 @@ The H1 Pin no longer duplicates the round-1 structural assertion; the L2 fix is 
 | **Commit SHA** | `c9e25b69ed34edbb1f5e72e16b4db9c3f7fe5b62` |
 | **Verification (Pin on fixed)** | `go test ./cmd/thutapi -run TestNewHTTPServerReadTimeoutIsAlwaysPositive -count=1 -v -timeout 30s`: `--- PASS: TestNewHTTPServerReadTimeoutIsAlwaysPositive (0.00s)`, `--- PASS: TestNewHTTPServerReadTimeoutIsAlwaysPositive/1s_floor (0.00s)`, `--- PASS: TestNewHTTPServerReadTimeoutIsAlwaysPositive/2s_floor (0.00s)`, `--- PASS: TestNewHTTPServerReadTimeoutIsAlwaysPositive/10s_default (0.00s)`. The existing `TestShutdownDeadlineIsHonouredAgainstSlowBody` continues to pass against `cfg.timeout=10s` (8.92s). The full suite also passes: `go test ./... -count=1 -race -timeout 120s` → `ok thutapi/cmd/thutapi 10.016s`. |
 | **Verification (Pin on Mutation)** | After restoring the round-2 derivation in `newHTTPServer` (`readTimeout := cfg.timeout - 2*time.Second; if readTimeout < 0 { readTimeout = 0 }`), `go test ./cmd/thutapi -run TestNewHTTPServerReadTimeoutIsAlwaysPositive -count=1 -v -timeout 30s` produces: `main_test.go:304: ReadTimeout = 0s for cfg.timeout=1s; want > 0 (H1 floor: ReadTimeout=0 is Go's 'no timeout' and silently re-opens H1 for legal -shutdown-timeout=1s and -shutdown-timeout=2s)`, `main_test.go:304: ReadTimeout = 0s for cfg.timeout=2s; want > 0 (H1 floor: ReadTimeout=0 is Go's 'no timeout' and silently re-opens H1 for legal -shutdown-timeout=1s and -shutdown-timeout=2s)`, the 10s_default subtest still PASSes (8s<10s, masking the regression), then `--- FAIL: TestNewHTTPServerReadTimeoutIsAlwaysPositive (0.00s)`. After reverting the Mutation the Pin passes again in 0.00s across all three subtests. The Mutation transcript is the named floor reason the Pin encodes. |
+## Round 3 follow-up
+
+Two L-severity findings from t0-round3.md, mechanically verifiable. No
+reviewer-agent round needed — `gofmt -l` and `grep -n` are exact checks.
+
+### L1 — gofmt drift across the remediation series
+
+| Field | Value |
+|---|---|
+| **Severity** | L |
+| **Where** | `cmd/thutapi/main.go`, `cmd/thutapi/main_test.go`. |
+| **What** | Across the remediation series (round 1 → round 2 → round 3), both Go files drifted from `gofmt`'s canonical form: stray `//` before `func newHTTPServer` (main.go:165, introduced at `80ebe3e`); closing brace at column 0 ending the Shutdown assertion (main_test.go:241, from `5a7e7169`); double blank lines at main_test.go:312-313 and 406-407 (from `80ebe3e`/`521d4ef`); missing trailing newline on main.go (predates the series, swept in this fix). AGENTS.md names `gofmt` as the repo's style-leveler; a public repo cannot ship with `gofmt -l` listing source files. |
+| **Pin** | `gofmt -l cmd/thutapi/` — must print nothing on the fixed tree. |
+| **Mutation** | Re-introduce any of the four deformations (stray `//`, column-0 closing brace, double blank line, missing trailing newline); `gofmt -l cmd/thutapi/` must list the file again. |
+| **Commit SHA** | `f96d6494ac1718f9d2b7458d1bfe4b6a36b12e33` |
+| **Verification (Pin on fixed)** | `gofmt -l cmd/thutapi/` → empty (no output, exit 0). `go test ./... -count=1 -race -timeout 120s` → `ok thutapi/cmd/thutapi 10.031s`. |
+| **Verification (Pin on Mutation)** | Any of the four deformations re-listed by `gofmt -l`. |
+
+### L2 — stale `cfg.timeout-1s` comments in the H1 pin
+
+| Field | Value |
+|---|---|
+| **Severity** | L |
+| **Where** | `cmd/thutapi/main_test.go` lines 160 and 191. |
+| **What** | The H1 pin's comment block says `ReadTimeout` fires at `cfg.timeout-1s`. The shipped formula at `c9e25b6` is `ReadTimeout = cfg.timeout - min(2s, cfg.timeout/2)`, which yields 8s at the pinned 10s default — i.e. `cfg.timeout-2s`, not `-1s`. Leftover from the abandoned 1s-headroom iteration recorded in t0-remediation-round2.md; the comment was wrong at `80ebe3e` and survived `c9e25b6` unchanged. |
+| **Pin** | `grep -n 'cfg.timeout-1s' cmd/thutapi/main_test.go` — must return zero hits on the fixed tree. |
+| **Mutation** | Restore `-1s` on either line; `grep -n` must hit again. |
+| **Commit SHA** | `f96d6494ac1718f9d2b7458d1bfe4b6a36b12e33` |
+| **Verification (Pin on fixed)** | `grep -n 'cfg.timeout-1s' cmd/thutapi/main_test.go` → exit 1, no output. `go test ./... -count=1 -race -timeout 120s` → `ok thutapi/cmd/thutapi 10.031s`. |
+| **Verification (Pin on Mutation)** | Restoring `-1s` on either comment line is caught by the grep. |

@@ -162,7 +162,6 @@ func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 // IdleTimeout > cfg.timeout is fine — idle connections are not blocking
 // Shutdown and they need to live longer than the shutdown budget to
 // remain reusable across the deadline.
-//
 func newHTTPServer(cfg config, h http.Handler) *http.Server {
 	headroom := 2 * time.Second
 	if cfg.timeout/2 < headroom {
