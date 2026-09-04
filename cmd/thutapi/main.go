@@ -135,17 +135,28 @@ func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 //
 // ReadTimeout therefore must expire strictly before the graceful-shutdown
 // deadline (cfg.timeout), so the slow body is force-closed in time. We set
-// ReadTimeout = cfg.timeout - 2s so Shutdown has a deterministic 2s window
-// to observe the connection drained after the body read errors. One second
-// of headroom left a 30% flake rate under our local scheduler — production
-// still benefits from the same wider margin. ReadHeaderTimeout (5s) is
-// independent and protects the header parse separately.
+// ReadTimeout = cfg.timeout - headroom, where headroom is the smaller of
+// 2s and cfg.timeout/2. Two properties matter:
+//
+//   - Strict ordering. ReadTimeout < cfg.timeout always, so Shutdown has
+//     a deterministic window to observe the drained connection before its
+//     own deadline fires. One second alone left a 30% flake rate under our
+//     local scheduler; production still benefits from the wider margin.
+//   - Positive by construction. ReadTimeout > 0 for every legal
+//     cfg.timeout (including 1s and 2s), because headroom is bounded by
+//     cfg.timeout/2. Go's http.Server treats ReadTimeout: 0 as "no
+//     timeout", so a naive cfg.timeout - 2s that clamped to 0 would
+//     silently re-open H1 for legal flag values like -shutdown-timeout=1s.
+//     The min() floor is what prevents that re-introduction.
+//
+// ReadHeaderTimeout (5s) is independent and protects the header parse
+// separately.
 //
 // WriteTimeout is 0 by design. project.md §Pipeline folds SSE into the
 // architecture for the interview turns and TTS streams (text streams while
-// audio lands); a non-zero WriteTimeout force-closes every long-lived SSE
-// stream, which is the wrong behaviour for this product. The slow-body
-// case H1 is actually about is fully bounded by ReadTimeout, so leaving
+// audio lands); a non-zero WriteTimeout would force-close every long-lived
+// SSE stream and is the wrong default for this product. The slow-body case
+// H1 is actually about is fully bounded by ReadTimeout, so leaving
 // WriteTimeout at 0 does not re-open H1.
 //
 // IdleTimeout > cfg.timeout is fine — idle connections are not blocking
@@ -153,10 +164,11 @@ func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 // remain reusable across the deadline.
 //
 func newHTTPServer(cfg config, h http.Handler) *http.Server {
-	readTimeout := cfg.timeout - 2*time.Second
-	if readTimeout < 0 {
-		readTimeout = 0
+	headroom := 2 * time.Second
+	if cfg.timeout/2 < headroom {
+		headroom = cfg.timeout / 2
 	}
+	readTimeout := cfg.timeout - headroom
 
 	return &http.Server{
 		Addr:              cfg.addr,
@@ -167,7 +179,6 @@ func newHTTPServer(cfg config, h http.Handler) *http.Server {
 		IdleTimeout:       cfg.idleTimeout,
 	}
 }
-
 
 // run is the testable body of main(). It wires the parsed config to an
 // http.Server, blocks until either the server errors out or a shutdown
