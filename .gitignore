@@ -1,0 +1,34 @@
+# Build output
+/bin/
+/dist/
+/tmp/
+
+# Go vendoring junk
+*.test
+*.out
+
+# Local env / secrets — never in repo
+.env
+.env.*
+!.env.example
+GMI_API_KEY
+*.key
+*.pem
+
+# Local SQLite DBs
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Generated media (kept on the box, not in the repo)
+data/
+media/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
