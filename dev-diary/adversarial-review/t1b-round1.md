@@ -16,11 +16,16 @@
 | 2 — DNS A record | **BLOCKED** — cannot write the record; token invalid |
 | 3 — Let's Encrypt certificate issued | **FAIL** — DNS-01 returns HTTP 401 |
 | 4 — Live curl with `cf-ray` | **BLOCKED** on 2 and 3 |
-| 5 — Public file fetchable by a third party | **BLOCKED** on 2 and 3 |
+| 5 — Public file fetchable by a third party | **MIS-SCOPED** — belongs to T3; the T1 stub has no file route |
 
 Routing itself is proven: the container answers correctly both directly
-and through Traefik at the origin (transcripts under check 1). What is
-missing is entirely on the Cloudflare side.
+and through Traefik at the origin (transcripts under check 1). Everything
+still missing is on the Cloudflare side, except check 5, which was written
+against a capability T1 was never going to have.
+
+`deploy/finish-t1b.sh` drives checks 2-4 to a verdict in one run once a
+valid token exists. It verifies the token *before* touching anything, so
+a bad token changes nothing on the box.
 
 ## The blocker — `CLOUDFLARE_DNS_API_TOKEN` on foleyflow is invalid
 
@@ -208,6 +213,22 @@ curl -fsS -i "$URL"
 
 Expected: 200 OK with body `thutapi-t13-smoke`. This is the exact
 mechanism Speech 2.8's `source_audio` will rely on at T14.
+
+> **Mis-scoped — found 2026-09-04.** This check cannot pass at T1b no
+> matter what Cloudflare does. The T1 binary registers exactly one route,
+> `s.mux.HandleFunc("GET /healthz", ...)` (`cmd/thutapi/main.go:117`).
+> There is no static-file handler, so a file dropped in `/srv/thutapi/data`
+> is not reachable over HTTP by anything. Serving it is **T3's** job —
+> "Media on a Docker volume, served with `http.ServeContent` so Range
+> requests work". Check 5 therefore depends on T3, not on T1, and belongs
+> in T3's review round.
+>
+> This does not weaken the reason the check exists. The `source_audio`
+> fetchability question is still the one environmental fact T13 cannot
+> proceed without, and it is still worth answering early — it just cannot
+> be answered until there is a route to answer it with. Once checks 2-4
+> pass, the Cloudflare edge in front of `/media/...` is proven by check 4,
+> and what remains for T3 is only the handler itself.
 
 ## When all five pass
 

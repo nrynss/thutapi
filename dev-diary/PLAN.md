@@ -238,8 +238,12 @@ against `https://thutapi.nryn.dev/healthz`:
 3. Let's Encrypt **DNS-01** (Cloudflare token) issues the origin cert.
 4. `curl https://thutapi.nryn.dev/healthz` returns 200 JSON with
    `cf-ray` present.
-5. A dummy MP3 at a signed path is fetchable by a third party
-   (proves the `source_audio` mechanism Speech 2.8 needs at T14).
+5. ~~A dummy MP3 at a signed path is fetchable by a third party~~
+   **Moved to T3.** The T1 binary serves only `GET /healthz` — there is
+   no static-file route for a probe file to be reachable through, so this
+   can never pass at T1b. It is T3's `http.ServeContent` handler that
+   makes it answerable. The reason for the check is unchanged and still
+   blocks T13; it just moves one track later.
 
 **Operator runbook:**
 
@@ -523,7 +527,8 @@ is explicitly *picture and sound as a single output*.
 
 ## T13 — Voice clone (optional)
 
-**Depends on:** T8, and on T1 check 5 passing.
+**Depends on:** T8, and on the public-fetchability check (originally T1
+check 5, **moved to T3** — the T1 stub has no file route to prove it with).
 
 `minimax-audio-voice-clone-speech-2.8-turbo`, one synchronous call. Where a
 sample is supplied, one short recording can voice the whole cast — narrator
