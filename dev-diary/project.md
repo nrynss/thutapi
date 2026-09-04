@@ -248,7 +248,7 @@ errors a reviewer can catch mechanically.
 - Small language surface, one idiomatic way to do most things.
 - The stdlib covers this entire app: `net/http`, `encoding/json`,
   `html/template`, `sync`. Almost nothing to hallucinate.
-- No framework churn. Go 1.24 code looks like Go 1.16 code, so training data
+- No framework churn. Go 1.27.1 code looks like Go 1.16 code, so training data
   does not rot.
 - **`go build` and `go vet` are the feedback loop.** Errors are immediate,
   precise and machine-readable — an agent iterates against a compiler.

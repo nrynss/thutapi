@@ -125,7 +125,7 @@ must commit both edits together.
 **Mutation:** restore the P3 phrase in either file; the grep must
 return hits.
 
-### M1 — `go.mod` pins Go 1.27.1; spec mandates 1.24
+### M1 — `go.mod` pins Go 1.27.1; spec said 1.24 — WAIVED BY USER 2026-09-04
 
 **Where:** `go.mod:3`.
 
@@ -141,7 +141,12 @@ pin propagates to judges.
 must still pass on Go 1.27.1 after the downgrade.
 
 **Mutation:** `go 1.27.1` → `go 1.24`; `go test ./...` must still be
-green on the box.
+
+**Status (2026-09-04):** User waived this finding in the same session.
+`go.mod` stays at `go 1.27.1`. `AGENTS.md` and `dev-diary/project.md` are
+updated in commit `<this-commit>` to refer to Go 1.27.1. No
+remediation row will be written; this row stays as an audit-trail
+record.
 
 ### M2 — flag parsing silently drops flags after a positional operand
 
@@ -211,17 +216,16 @@ the new test must fail.
 | `go test ./... -count=1 -race` clean | **Yes** | 8 tests, 1.009 s |
 | Graceful SIGTERM exits 0 | **Partial** | Fast path yes; slow-body path **exits 1 (H1)** |
 | `.gitignore` excludes build artifact | **No** | H2 |
-| Go toolchain pin matches spec | **No** | M1 (1.27.1 vs 1.24) |
+| Go toolchain pin matches spec | **Yes** | 1.27.1 (M1 waived 2026-09-04) |
 | Flag parsing is unambiguous | **No** | M2, H3 |
-| README and AGENTS.md agree on C/H/M/L | **No** | H4 |
+| README and AGENTS.md agree on C/H/M/L | **Closed** | H4 closed in round-1 commit |
 
 ## Go-signal matrix
 
 | Downstream | Unblocked? | Condition |
-|---|---|---|
-| **T1** Deployment path | **Conditional** | Unblocked on the `cmd/thutapi` binary; gated on H1 (slow-body shutdown) so a `docker run` SIGTERM under Traefik does not exit 1; H2 (artifact ignore) so a `docker build` does not pick up an untracked binary; M1 (toolchain pin) so the distroless image built on Go 1.24 succeeds. |
-| **T2** GMI clients | **Yes** | T0's HTTP seam (`server`, `ServeHTTP`) is enough to host `/healthz` and later `/v1/*`; no T2 path depends on timeouts. M1 matters only at go.mod-edit time. |
-| **T3** Store and media | **Yes** | None of the seven findings gate the SQLite / Docker-volume / Range-seam path. |
+| **T1** Deployment path | **Conditional** | Unblocked on the `cmd/thutapi` binary; gated on H1 (slow-body shutdown) so a `docker run` SIGTERM under Traefik does not exit 1; H2 (artifact ignore) so a `docker build` does not pick up an untracked binary. Toolchain pin is 1.27.1 (M1 waived). |
+| **T2** GMI clients | **Yes** | T0's HTTP seam (`server`, `ServeHTTP`) is enough to host `/healthz` and later `/v1/*`; no T2 path depends on timeouts. |
+| **T3** Store and media | **Yes** | None of the remaining findings gate the SQLite / Docker-volume / Range-seam path. |
 | **T4** Interview loop | **Yes** | Independent of the timeout surface. |
 
 ## Recommended actions (ordered)
@@ -232,16 +236,14 @@ the new test must fail.
 2. **H2** — add `thutapi` to `.gitignore`; pin with `git check-ignore`.
 3. **H3** — `parseFlags` rejects `-shutdown-timeout<=0` with a typed
    error; pin with `TestParseFlagsRejectsNonPositiveTimeout`.
-4. **H4** — drop every `\bP3\b` reference in
-   `dev-diary/adversarial-review/README.md` and `AGENTS.md`; commit both
-   in one focused commit.
-5. **M1** — downgrade `go 1.27.1` to `go 1.24` in `go.mod`; re-run tests.
-6. **M2** — make `parseFlags` reject extra positional args after the
+4. **M2** — make `parseFlags` reject extra positional args after the
    flag set is parsed, with an error; pin with the new test.
-7. **L1** — log the actual signal name (`SIGTERM` / `SIGINT`) instead
+5. **L1** — log the actual signal name (`SIGTERM` / `SIGINT`) instead
    of `ctx.Err().Error()`; pin with the signal-name test.
 
-After all seven remediations land on `main`, this reviewer runs round 2
+(M1 is waived by user 2026-09-04; Go 1.27.1 stays.)
+
+After all five remediations land on `main`, this reviewer runs round 2
 against the same commits and verifies zero residue.
 
 ---

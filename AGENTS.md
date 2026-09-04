@@ -54,7 +54,7 @@ part is false, stop and propose a contract change in the review file.
 
 These are frozen and reviewed on sight:
 
-- **Backend: Go 1.24, stdlib-first.** `net/http`, `encoding/json`,
+- **Backend: Go 1.27.1, stdlib-first.** `net/http`, `encoding/json`,
   `html/template`, `sync`, `golang.org/x/sync/errgroup`. Build with
   `CGO_ENABLED=0 go build -trimpath -ldflags="-s -w"`. Ship on
   `gcr.io/distroless/base-debian12:nonroot`, `EXPOSE 8080`, listen on
