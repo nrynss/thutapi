@@ -29,7 +29,12 @@
 
 set -euo pipefail
 
-IMAGE="${IMAGE:-thutapi:local}"
+# Default to the image CI publishes. It is a public package, so the box
+# pulls it anonymously — no docker login, no registry credential on the
+# host. Prefer pinning a commit SHA over `latest` for anything you intend
+# to be able to reproduce:
+#   IMAGE=ghcr.io/nrynss/thutapi:1a2b3c4 ./deploy/docker-run.sh
+IMAGE="${IMAGE:-ghcr.io/nrynss/thutapi:latest}"
 NAME="${NAME:-thutapi}"
 DATA_DIR="${DATA_DIR:-/srv/thutapi/data}"
 HOST_PORT="${HOST_PORT:-}"
@@ -107,9 +112,20 @@ if [[ -n "${HOST_PORT}" ]]; then
 fi
 
 echo "Starting ${NAME} from ${IMAGE}..."
+# Pull explicitly so a moving tag like `latest` actually moves, and so a
+# registry failure surfaces here rather than as a stale container.
+if [[ "${IMAGE}" == *"/"* ]]; then
+  docker pull "${IMAGE}"
+fi
 docker run "${DOCKER_ARGS[@]}" "${IMAGE}"
 
 echo
+# Record exactly what ran. A tag is ambiguous over time; the digest is not.
+echo
+echo "Image digest actually running:"
+docker inspect "${NAME}" --format '  {{.Image}}' 2>/dev/null || true
+docker image inspect "${IMAGE}" --format '  {{index .RepoDigests 0}}' 2>/dev/null || true
+
 echo "Container started. Useful follow-ups:"
 echo "  docker logs -f ${NAME}"
 echo "  curl -fsS https://thutapi.nryn.dev/healthz"

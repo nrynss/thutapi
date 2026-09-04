@@ -21,16 +21,35 @@ the box already does this` and the build plan is `dev-diary/PLAN.md §T1`.
 
 ## Image
 
-Build on the workstation:
+CI builds and publishes the image on every push to `main`
+(`.github/workflows/image.yml`). It runs `go vet`, `go test -race` and a
+`gofmt` check first, so a failing commit never reaches a tag the box could
+pull. Two tags are published:
+
+| Tag | Use |
+|---|---|
+| `ghcr.io/nrynss/thutapi:<short-sha>` | **Deploy this.** Names exactly one build, forever. |
+| `ghcr.io/nrynss/thutapi:latest` | Convenience for humans. Moves. |
+
+The package is public, so the box pulls anonymously — there is no
+`docker login` on the host and no registry credential to manage.
 
 ```
-docker build -t thutapi:local .
+docker pull ghcr.io/nrynss/thutapi:<short-sha>
 ```
 
-Push to the registry the box pulls from, then on the box:
+To build locally instead (for a smoke test, or if CI is unavailable):
 
 ```
-docker pull <registry>/thutapi:<sha-or-tag>
+docker build --build-arg VERSION=$(git rev-parse --short HEAD) -t thutapi:local .
+IMAGE=thutapi:local ./deploy/docker-run.sh
+```
+
+Shipping a workstation build straight to the box still works and is the
+fallback if GHCR is unreachable:
+
+```
+docker save thutapi:local | ssh <box> 'docker load'
 ```
 
 The Dockerfile is multi-stage: a `golang:1.27.1-bookworm` builder compiles
