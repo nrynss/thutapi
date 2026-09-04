@@ -190,11 +190,19 @@ At 8 pages plus ~2 reference sheets, the spread across the entire catalog is
 about **23 cents a book**. Price is noise. Put the provider behind a one-line
 switch and pick on how well the character holds.
 
+> **Read the unit before quoting a number from this table.** The column is
+> **per book (~10 images)**, not per image. Per *image* the same models are
+> ~$0.01; the pipeline diagram above uses the per-image unit and this table
+> uses the per-book one. A T2 docstring already conflated the two while
+> justifying a forbidden model — see `adversarial-review/t2-round3.md` L5.
+> Also note four models tie at $0.10, so **price cannot select between them.**
+> That is the point of the heading.
+
 | Model | Per book (10 imgs) | i2i |
 |---|---|---|
 | Z-Image / Flux2-Klein / GLM-Image / Flux2-Dev | **$0.10** | yes |
 | Z-Image-Turbo-Fun-Controlnet-Union-2.1 | $0.10 | yes + controlnet |
-| ~~Qwen-Image-2512~~ | $0.10 | **no — t2i only, cannot take the reference** |
+| ~~Qwen-Image-2512~~ **— FORBIDDEN, do not use anywhere** | $0.10 | **no — t2i only, cannot take the reference. An i2i call succeeds and silently ignores the reference.** |
 | gemini-2.5-flash-image | $0.39 | yes |
 | seedream-5.0-lite / gemini-3.1-flash-lite-image | $0.35 | yes |
 

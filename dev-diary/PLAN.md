@@ -65,7 +65,7 @@ required, and the first things cut.
 | **T0** | DONE. Closed at 166a992 after 3 review rounds (zero residue; see t0-round1.md, t0-round2.md, t0-round3.md, t0-remediation-round1.md, t0-remediation-round2.md). |
 | **T1** | DONE. Closed at 65df379 — artifacts (Dockerfile, .dockerignore, deploy/docker-run.sh, deploy/README.md) committed, local smoke green, all Traefik labels byte-identical to project.md §Deployment. See dev-diary/adversarial-review/t1-round1.md. |
 | **T1b** | DONE. Closed at 52b2cd2 — checks 1, 2, 3, 4 pass against https://thutapi.nryn.dev/healthz (cf-ray present, Let's Encrypt origin cert via DNS-01, all five Traefik labels byte-identical). Check 5 moved to T3 (re-scoped: T1 binary has no static-file route). Run also repaired Traefik's CLOUDFLARE_DNS_API_TOKEN — restored cert renewal for the whole box (thutapi, serp, auteur, eoc, mosaic). Full infrastructure record (incident, resolution, token-replacement procedure) is in `~/work/hetzner/docs/foleyflow-server.md` §5, deliberately kept out of this repo. |
-| **T2** | DONE. Closed at a209226 after 2 review rounds. Implementation at 3695375; M1 (4xx → ErrBadRequest) fixed at 1c61d7e with two Pin tests; L1 (docstring 'in GMI's API') disposition recorded as false-positive on inspection. Wire shape verified end-to-end: 14 subtests pass -race; live endpoint probes reached both production hosts (Cloudflare-fronted text, APISIX-fronted media); auth layer exercised and routes 401 → `ErrUnauthorized` correctly. Operator-side note: bearer key in `apikey.txt` is rejected by both providers (shape `sk-or-v1-…` looks OpenRouter, not GMI); replace before T6/T8 live-call gates. See dev-diary/adversarial-review/t2-round1.md, t2-remediation-round1.md, and t2-round2.md. |
+| **T2** | **REMEDIATE — reopened 2026-09-04 at round 3.** Was DONE at `a209226`; that close is withdrawn. Round 3 re-reviewed T2 against the whole of its `Done when` (rounds 1–2 scoped to round-1 residue plus a diff audit, and were correct within that scope) and found **2 × H, 4 × M, 5 × L**. The H's: `EditImage` defaults to `Qwen-Image-2512`, which project.md:197 strikes out as t2i-only and unable to take the reference image — it silently breaks the character lock T6 depends on; and the `Retry:` contract below is unimplemented while `internal/gmi/errors.go:48` tells callers one internal retry exists. Prior rounds missed both because every media test passes an explicit model id, so the `model == ""` default path is never executed. Round-1 M1/L1 residue re-checked and still zero. Next step: `t2-remediation-round3.md`, then round 4. Operator-side blocker unchanged: the bearer key in `apikey.txt` is rejected by both providers (shape `sk-or-v1-…` looks OpenRouter, not GMI); replace before T6/T8 live-call gates. See dev-diary/adversarial-review/t2-round3.md. |
 | **T3** | Not started. |
 | **T4** | Not started. |
 | **T5** | Not started. |
@@ -80,6 +80,67 @@ required, and the first things cut.
 | **T14** | Not started. Never cut. |
 
 ---
+
+---
+
+## Architectural invariants
+
+Rules that hold across every track. Breaking one is a **plan change**, not an
+implementation detail — propose it in the track's review file first
+(`AGENTS.md` §Read order, pre-flight assertion).
+
+1. **`internal/gmi` is the only thing that talks to GMI.** No track builds its
+   own HTTP call to `api.gmi-serving.com` or `console.gmicloud.ai`. If the
+   client cannot do what a track needs, the client changes — the track does not
+   route around it.
+2. **Config flows down from `main`; packages do not read the environment.**
+   `cmd/thutapi/main.go` already does this properly with `config` +
+   `parseFlags`. **`internal/gmi` currently violates it** — `New()` reads
+   `GMI_*_BASE_URL` at construction and both clients read `GMI_API_KEY` on
+   every call. The cost is concrete and already paid: any test that needs a key
+   must use `t.Setenv`, and `t.Setenv` makes `t.Parallel` panic, so the gmi
+   suites can never run in parallel. Recorded as a known deviation, not a
+   licence — **new packages take a config struct.**
+3. **Consumers declare interfaces; producers return concrete types.** T4 should
+   depend on a one-method interface *it* declares (`type chatter interface {
+   Chat(context.Context, text.ChatRequest) (*text.ChatResponse, error) }`), not
+   on `*text.Client`. Otherwise every downstream package needs `httptest` to
+   test a code path that has nothing to do with HTTP.
+4. **The request queue is a queue.** `console.gmicloud.ai/.../requests` returns
+   `{request_id, status}` for image work; T2 ships one POST and hands back raw
+   bytes, so **the polling layer does not exist yet**. Whoever needs it first
+   builds it *inside* `internal/gmi/media` — not privately in `internal/illustrate`
+   and again in `internal/audio`.
+5. **`newServer` in `cmd/thutapi/main.go` is a shared seam, and the only one.**
+   A track that adds a route appends its `s.mux.HandleFunc` line there and
+   nothing else; the handler itself lives in that track's package. `main.go`
+   stays free of business logic (§T0 conventions). Expect to touch this file
+   from a track that does not own it — that is the one sanctioned exception to
+   the `Owns` rule, and it is one line.
+6. **Nothing blocks longer than 100 seconds.** Cloudflare kills a proxied
+   request at 100s with a 524 (§T1). Long work is started by a short POST that
+   returns a job id and observed over SSE. This is an architectural constraint,
+   not a tuning knob.
+7. **Persist GMI output on receipt.** Response URLs point at
+   `storage.googleapis.com` and are assumed to expire (§T3).
+8. **Errors cross a package boundary as a sentinel**, matched with
+   `errors.Is` — an `internal/gmi` sentinel, or one the track declares itself.
+   Never a matched substring of a provider message.
+
+---
+
+## Unowned seams
+
+Things the task graph assumes exist, that no track's `Owns` line covers.
+**Assign each one before the track that depends on it starts.**
+
+| Seam | Assumed by | Status |
+| --- | --- | --- |
+| **SSE broker** (`internal/stream`) | §T4 *"Turns stream over the T1 SSE channel"*, T9, T10, and invariant 6 — i.e. the entire non-blocking architecture | **Unowned.** T1 shipped deployment artifacts and a `/healthz`; no SSE code exists anywhere in the tree, so "the T1 SSE channel" refers to something that was never built. project.md §Lift from Mosaic names `internal/stream/broker.go` (223 lines) as directly reusable. **Proposed as T3b**, parallel with T3 and blocking T4 — needs sign-off before T4 starts. |
+| **Job orchestration** (start → job id → progress events → result) | T4, T5, T6, T8, and every SSE consumer | **Unowned.** Invariant 6 describes the shape but no track builds the runner. Natural home is T3b alongside the broker, or a thin `internal/job` T3 owns. |
+| **Request-queue polling** | T6, T8 | **Unowned.** See invariant 4. Cheapest fix is to fold it into T2's remediation scope; otherwise it lands twice. |
+| **`internal/web`** (shell template, book template) | T9, T10 | Now named in T9's and T10's `Owns`. Previously implied by AGENTS.md's file layout and by nothing else. |
+
 
 ## The deadline's timezone
 
@@ -133,6 +194,8 @@ common enough to write down.
 
 ## T0 — Repo and skeleton
 
+**Owns:** `cmd/thutapi/**`, `go.mod`, `go.sum`, `AGENTS.md`, `.gitignore`.
+
 `go mod init`, module layout, `AGENTS.md`, a `Dockerfile`, and a `/healthz` that
 returns 200. One binary. No cleverness — a skeleton written before there is
 anything to link against gets rewritten.
@@ -157,6 +220,8 @@ Conventions set here that every later track follows:
 ---
 
 ## T1 — The deployment artifacts  *(DONE — closed at 65df379; T1b live verification closed at 52b2cd2)*
+
+**Owns:** `Dockerfile`, `.dockerignore`, `deploy/**`, `.github/workflows/**`, `.env.example`.
 
 Ship the T0 skeleton to `thutapi.nryn.dev` and prove every environmental fact
 while they are cheap to fix.
@@ -231,6 +296,8 @@ generations plus audio. **Generation therefore cannot be a blocking POST.**
 
 ---
 ## T1b — Live deployment verification
+
+**Owns:** **no repo paths.** Operator track: it changes DNS, the box, and `~/work/hetzner/docs/`, and writes back only its status row here.
 
 **Status:** DONE. Closed at 52b2cd2. Checks 1, 2, 3, 4 all pass;
 check 5 moved to T3 (re-scoped — the T1 binary has no static-file
@@ -308,6 +375,12 @@ mark T1b status DONE in the table above, and the chain to T2/T13/T14
 opens. Until then T1b stays `Blocked`.
 
 
+---
+
+## T2 — GMI clients  *(REMEDIATE — reopened at round 3, see t2-round3.md)*
+
+**Owns:** `internal/gmi/**` (`errors.go`, `text/`, `media/`).
+
 Two clients, because GMI has two APIs with different shapes.
 
 **Depends on:** T1. **Done when:** an integration test hits both endpoints live
@@ -339,6 +412,8 @@ a 4xx. Every call carries a context deadline.
 
 ## T3 — Store and media
 
+**Owns:** `internal/store/**`, `internal/mediastore/**`, plus the `/media/` route line in `newServer`.
+
 **Depends on:** T0. **Done when:** a book survives a container restart and its
 media still serves.
 
@@ -356,6 +431,8 @@ media still serves.
 ---
 
 ## T4 — The interview (Phase A)
+
+**Owns:** `internal/interview/**`, plus its route lines in `newServer`.
 
 The differentiator. One system prompt and a loop; resist making it more.
 
@@ -379,11 +456,16 @@ House style, enforced in the system prompt:
 **`thinking` is OFF here.** Short conversational questions; a child watching a
 spinner is a usability failure, and usability is a third of the score.
 
-Turns stream over the T1 SSE channel.
+Turns stream over the SSE channel — **which does not exist yet.** T1 shipped
+deployment artifacts and `/healthz`, not a broker; see §Unowned seams. Do not
+start T4 until that seam has an owner, or T4 will grow a private streaming
+implementation that T9 and T10 then have to be rewritten around.
 
 ---
 
 ## T5 — Structuring (Phase B)
+
+**Owns:** `internal/story/**` (the Phase-B schema and its validator).
 
 One call over the whole transcript. M3's 1M context means no summarisation and
 no state to marshal.
@@ -411,6 +493,8 @@ half-render a book.
 
 ## T6 — Illustration
 
+**Owns:** `internal/illustrate/**`.
+
 **Depends on:** T5. **Done when:** eight pages render with a recognisably
 constant cast.
 
@@ -425,6 +509,19 @@ changes on page 4. Three locks:
 3. **Style lock.** One constant suffix on every prompt — *"flat 2D children's
    picture book illustration, thick outlines, gouache texture, soft palette"*.
 
+**Forbidden model ids.** These are wrong answers, not merely suboptimal ones,
+and an agent that reaches for one gets a silently-degraded book rather than an
+error:
+
+| Model id | Why it is forbidden | Where it bites |
+| --- | --- | --- |
+| `Qwen-Image-2512` | **t2i only — it cannot take a reference image.** An i2i call against it succeeds and ignores the reference. | The image lock, i.e. the whole of §T6 |
+| `H3` / any video model | Not free; explicitly out of scope (project.md §Scope) | Budget |
+
+`Qwen-Image-2512` is not a hypothetical: it shipped as the default for both
+`GenerateImage` and `EditImage` in T2 and survived two review rounds
+(t2-round3.md, H1/M2). Grep for it before closing any track that renders.
+
 **Provider behind a one-line switch.** Start on **Flux2-Klein** or **Z-Image**
 ($0.01). If characters drift, switch to `gemini-2.5-flash-image` ($0.0387) — the
 spread across the whole catalog is about 23 cents a book, so choose on
@@ -436,6 +533,8 @@ Fan out with `errgroup`, bounded to ~4 concurrent.
 ---
 
 ## T7 — Consistency verification
+
+**Owns:** `internal/illustrate/verify.go` (same package as T6 — it is T6's closing loop, not a separate seam).
 
 **Depends on:** T6. **Done when:** a deliberately drifted page is caught and
 regenerated.
@@ -458,6 +557,8 @@ with something other than call volume.
 
 ## T8 — Audio
 
+**Owns:** `internal/audio/**`.
+
 **Depends on:** T2, T5. **Done when:** questions speak, and a finished book
 reads itself.
 
@@ -474,6 +575,8 @@ reads itself.
 ---
 
 ## T9 — Frontend shell and the interview UI
+
+**Owns:** `static/**` (including `static/vendor/`), `internal/web/**` templates, plus its route lines in `newServer`.
 
 **Depends on:** T4, T8. **Done when:** an interview is completable by tapping,
 on a real phone.
@@ -508,6 +611,8 @@ Responsive, **tablet-first**:
 
 ## T10 — The book
 
+**Owns:** `static/book/**` and the book template under `internal/web/**`.
+
 **Depends on:** T6, T8, T9. **Done when:** a book reads and turns on a phone and
 on a laptop, and its URL opens cold.
 
@@ -522,6 +627,8 @@ on a laptop, and its URL opens cold.
 ---
 
 ## T11 — Hardening
+
+**Owns:** `internal/gate/**`, the retention sweep in `internal/mediastore/`, and the prewarm fixtures.
 
 **Depends on:** T10. **Done when:** the four items below are true.
 
@@ -540,6 +647,8 @@ on a laptop, and its URL opens cold.
 
 ## T12 — Music bed (optional)
 
+**Owns:** `internal/audio/music.go`.
+
 **Depends on:** T10. Confirmed free. One `minimax-music-3.0` call plus one
 looping `<audio>` at ~0.15 under the narration — perhaps half an hour. Puts a
 third MiniMax model on the form and strengthens the "sound" half of a track that
@@ -550,6 +659,8 @@ is explicitly *picture and sound as a single output*.
 ---
 
 ## T13 — Voice clone (optional)
+
+**Owns:** `internal/audio/clone.go`.
 
 **Depends on:** T8, and on the public-fetchability check (originally T1
 check 5, **moved to T3** — the T1 stub has no file route to prove it with).
@@ -567,6 +678,8 @@ Optional throughout. The library voice is the default path.
 ---
 
 ## T14 — Submission
+
+**Owns:** `README.md` and the submission assets. Touches no `internal/` package.
 
 **Depends on:** T11, plus T12/T13 if they landed. **Starts 16:00 IST Sunday
 regardless of state; submits by 20:00 IST.** Never cut, never deferred — an

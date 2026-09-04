@@ -38,12 +38,45 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # One test run, reused by the coverage gate below -- -race and -cover
+      # together, teed so the gate parses the same output the log shows.
       - name: go test -race
-        run: go test ./... -race
+        run: set -o pipefail; go test ./... -race -cover | tee test.out
 
+      # Coverage floor. A package below this is almost always one whose error
+      # branches or default-value paths are untested -- see AGENTS.md
+      # "Testing -- what 'enough' means". The floor catches an untested
+      # PACKAGE; it does not catch an untested DECISION (T2 shipped the wrong
+      # model constant at 85.1%, because no test exercised the default path).
+      # The per-track rules in AGENTS.md are what catch those.
+      - name: coverage floor
+        env:
+          MIN: '75.0'
+        run: |
+          awk -v min="$MIN" '
+            /\[no test files\]/ { print "warn " $2 ": no test files"; next }
+            /coverage:/ {
+              pct = ""
+              for (i = 1; i <= NF; i++) if ($i == "coverage:") { pct = $(i+1); break }
+              if (pct == "") next
+              sub("%", "", pct)
+              if (pct + 0 < min + 0) { printf "FAIL %s: %s%% < %s%%\n", $2, pct, min; bad = 1 }
+              else printf "ok   %s: %s%%\n", $2, pct
+            }
+            END {
+              if (bad) { print "Coverage floor is " min "% per package (AGENTS.md)."; exit 1 }
+            }
+          ' test.out
+
+      # gofmt over the WHOLE tree, not just cmd/. Every remaining track
+      # (T3-T13) writes under internal/, which the old `gofmt -l cmd/` never
+      # inspected -- see adversarial-review/t2-round3.md M4. gofmt is the
+      # mechanism AGENTS.md relies on to remove style drift between three
+      # different agents; scoping it to one directory switched it off for the
+      # tree that actually matters.
       - name: gofmt
         run: |
-          unformatted=$(gofmt -l cmd/)
+          unformatted=$(gofmt -l .)
           if [ -n "$unformatted" ]; then
             echo "gofmt needed on:"; echo "$unformatted"; exit 1
           fi

@@ -35,6 +35,65 @@ M = real defect with workaround. L = polish. Per
 `lambo_derive` / `lambo_record_action` after each meaningful change. Use one
 stable `agent_id` for the session so locks and attribution are coherent.
 
+## Agentic development — the orchestrator and its agents
+
+The loop above is executed by **four distinct roles**. They are separate on
+purpose: an agent that reviews its own work is not adversarial, and an agent
+that both finds and fixes a defect will quietly narrow the finding until the
+fix it already wrote is sufficient.
+
+| Role | Does | Never does |
+| --- | --- | --- |
+| **Orchestrator** | Picks the track. Dispatches the other three. Gates the loop and refuses to advance on a non-clean verdict. Lands the commit. Fixes trivially-exempt defects itself (below). | Implement a track. Write a review verdict. Decide that a finding "isn't worth it". |
+| **Implementation agent** | Implements the track inside its `Owns` paths (PLAN.md). Stays in the seam. Raises a contract change in the review file rather than reaching outside it. | Review its own work. Mark the track done. |
+| **Review agent** | Reads the diff against the spec. Writes `t<N>-round<K>.md` with a verdict, findings counted by severity, and Where / What / Pin / Mutation per finding. | Fix anything it found. Soften a finding because the fix looks expensive. |
+| **Remediation agent** | Fixes every finding. Writes `t<N>-remediation-round<K>.md`, one row per finding. | Change the verdict. Fix things nobody found (that is scope creep, and it arrives unreviewed). |
+
+**A fresh agent per role per round.** The round-2 reviewer should not be the
+round-1 reviewer, and neither should have been the implementer. Re-using an
+agent across roles is how a review round becomes a formality — and T2 is the
+worked example: rounds 1 and 2 were sound within the scope they took, but
+nobody re-opened the full `Done when`, and two H-severity defects sat behind an
+APPROVE for a day (`adversarial-review/t2-round3.md`).
+
+**The cycle does not end early.** implement → review → remediate → review →
+… → **APPROVE with 0/0/0 and an explicit zero-residue claim against every
+prior round**. A verdict of REMEDIATE always costs another full round; there is
+no "fixed it, close it out" path.
+
+**Every severity gets fixed.** C, H, M and L all land a row in the remediation
+file. "It's only an L" is not a disposition. A reviewer may record a finding as
+a **false positive** — round 1's L1 was, correctly — but that is a judgement
+about whether the defect is real, not about whether a real defect is worth
+fixing.
+
+*(If you are working in P0–P3 vocabulary: P0 = C, P1 = H, P2 = M, P3 = L.
+This repo writes C/H/M/L; use it in review files so the counts stay
+comparable across rounds.)*
+
+### The one exemption — the orchestrator's fast path
+
+An **L (P3)** finding that is a doc typo, a comment fix, or a similar triviality
+**that cannot change behaviour** may be fixed by the orchestrator directly, in
+the same commit, without a remediation agent and without another review round.
+The orchestrator then closes the track and moves on.
+
+Conditions, all four required:
+
+1. The finding is **L**. Never M or above, whatever the fix looks like.
+2. The fix **cannot alter behaviour** — prose, a comment, a name in a doc. If
+   the change touches a value, a branch, or a signature, it is not exempt.
+3. It is **recorded by name and file** in that round's review file, so the
+   audit trail shows who fixed what without a remediation round.
+4. **If it is arguable, it is not trivial.** The exemption is for cases with no
+   judgement in them at all.
+
+**A comment that misdescribes behaviour is not a doc defect.** It carries the
+severity of the behaviour it misdescribes, because the next agent will code
+against it — see §Go style, "Docs about behaviour must match the behaviour". A
+docstring claiming a retry that does not exist is an H, not an exempt typo,
+and it goes through the full cycle like anything else.
+
 ## Read order
 
 Before changing a file, read these in order:
@@ -71,6 +130,113 @@ These are frozen and reviewed on sight:
   link works without JS.
 - **No Tailwind.** Reintroduces a build step we don't want.
 
+## Go style — enforced, not suggested
+
+Three different models write Go here. These rules exist so a reviewer can
+reject drift mechanically instead of arguing taste. `gofmt` and `go vet` catch
+none of them, which is exactly why they are written down.
+
+**Types and pointers**
+
+* **No pointer to a pointer.** `**T` never appears. If you think you need one,
+  you want to return a value, or the caller wants a different type.
+* **No pointer to a slice, map, channel, or func.** `*[]T` and `*map[K]V` are
+  already-reference types behind a second indirection; they are a bug or a
+  sign the function should return the value.
+* **No pointer to an interface.** `*io.Reader` is almost always a mistake —
+  interfaces hold pointers already.
+* **`any`, not `interface{}`.** Go 1.18 renamed it; keep one spelling.
+* **`any` is not a data model.** Every GMI response shape is a named struct in
+  `internal/gmi` — never `map[string]any` at a call site. If a union genuinely
+  needs `any` on the wire, give the type an `UnmarshalJSON` that resolves it
+  into typed fields, and never document a field as holding a named struct that
+  `encoding/json` cannot actually produce. (Cost of getting this wrong:
+  `t2-round3.md` L1.)
+* **Small structs go by value.** Below ~64 bytes a pointer parameter buys
+  nothing and costs nil-checks.
+* **Zero value usable, or a constructor that makes it so.** Not both halves
+  optional.
+
+**Functions and APIs**
+
+* **`ctx context.Context` is the first parameter of anything that does I/O.**
+  Never stored in a struct field. Never `context.TODO()` in committed code.
+* **Accept interfaces, return concrete types** — and the interface is declared
+  by the *consumer*, one or two methods wide. A package does not export a
+  `Client` interface for its own struct. (See PLAN.md §Architectural
+  invariants 3.)
+* **Never return a non-nil value alongside a non-nil error.** A caller must be
+  able to trust that `err != nil` means the rest is meaningless.
+  (`t2-round3.md` L3.)
+* **No naked returns.** Named results only when a deferred function assigns to
+  them.
+* **Every exported identifier has a doc comment starting with its own name.**
+* **No `panic` and no `log.Fatal` outside `func main`.** A library returns
+  errors.
+
+**Errors**
+
+* One sentinel per distinct condition; wrap with `%w`; compare with
+  `errors.Is` / `errors.As`. **Never match a substring of a provider's error
+  message.**
+* Error strings are lowercase, no trailing period, no error code the user sees
+  (child-facing strings are governed separately, below).
+* `_ = f()` requires a comment on the same line saying why the error cannot
+  matter.
+* **A retry classification is part of the error's contract.** If a sentinel
+  says "retryable" in its doc comment, every status mapped to it must actually
+  be safe to retry — mapping unknown 4xx to a retryable sentinel is a defect,
+  not a default. (`t2-round3.md` M1.)
+
+**Concurrency**
+
+* Every goroutine has a defined exit path. Fan-out uses
+  `golang.org/x/sync/errgroup` with `SetLimit`, never an unbounded `go` loop.
+* `go test -race` is mandatory and non-negotiable; a race is a C-severity
+  finding.
+
+**Docs about behaviour must match the behaviour.** A comment that describes a
+retry, a fallback, or a default that the code does not implement is a defect at
+the severity of the behaviour it misdescribes — not a typo. Two docstrings in
+the same package contradicting each other is an automatic finding.
+(`t2-round3.md` H2.)
+
+## Testing — what "enough" means
+
+Statement coverage is a floor, not the target. T2 sat at 85.1% on
+`internal/gmi/media` while shipping the wrong model constant, because the two
+statements that carried it were the `if model == "" { ... }` defaults and every
+test passed an explicit model. Coverage counted the lines and missed the
+decision.
+
+So, per track:
+
+1. **Every exported function has at least one test.**
+2. **Every default value is exercised through its default path.** If a
+   function substitutes a value when an argument is empty, a test calls it with
+   that argument empty and asserts what reached the wire. This is the single
+   rule that would have caught `t2-round3.md` H1 two rounds earlier.
+3. **Every error branch has a test asserting the sentinel** with `errors.Is` —
+   including the branches you expect never to fire, which are where the wrong
+   classification hides.
+4. **Every documented upstream quirk gets a raw-wire pin test, named for the
+   quirk.** `TestSynthesizeSpeech_TypoPinnedInRawJSON` is the model: it asserts
+   against the marshalled JSON bytes, not against a Go struct, so a rename
+   cannot silently unfix it. The `MiniMaxAI/` prefix, the `thinking` body
+   field, the `need_volumn_normalization` typo and the five Traefik labels all
+   need one.
+5. **Table-driven past two cases.** `t.Setenv`, never `os.Setenv`. `httptest`,
+   never a live call — live probes are transcripts pasted into a review file,
+   and they are evidence, never a CI gate.
+6. **A `Done when` line must be mechanically checkable from a clean tree.**
+   If it says "an integration test does X", such a test exists and runs. If the
+   check can only be performed by an operator, it goes in a `b`-suffixed track
+   (the T1/T1b split is the precedent), not in prose.
+7. **Coverage floor: 75% of statements per package**, enforced in
+   `verify.yml`. It rises to 85% once T2's round-3 remediation lands. The floor
+   exists to catch an untested *package*; rules 1–4 are what catch an untested
+   *decision*.
+
 ## GMI endpoints — both clients must live
 
 - **Text.** `https://api.gmi-serving.com/v1/chat/completions`,
@@ -87,10 +253,18 @@ These are frozen and reviewed on sight:
 
 ## CI and images
 
-* **`verify.yml` runs on code pushes and PRs** — `go vet`, `go test -race`,
-  `gofmt`, `bash -n` on the deploy script. It ignores doc-only changes; the
-  dev-diary moves far more often than the code and a green tick on prose is
-  noise.
+* **`verify.yml` runs on code pushes and PRs** — `go vet ./...`,
+  `go test ./... -race -cover`, a **75%-per-package coverage floor**,
+  **`gofmt -l .` across the whole tree**, and `bash -n` on the deploy script.
+  It ignores doc-only changes; the dev-diary moves far more often than the code
+  and a green tick on prose is noise.
+  * The gofmt step was scoped to `cmd/` until 2026-09-04, which meant every
+    line under `internal/` — i.e. every remaining track — went unchecked by
+    the mechanism §Stack relies on to remove drift between three agents. If
+    you narrow it again, you switch that off (`t2-round3.md` M4).
+  * The coverage floor catches an untested *package*. It does not catch an
+    untested *decision* — T2 shipped the wrong model constant at 85.1%. See
+    §Testing for the rules that do.
 * **`image.yml` is `workflow_dispatch` only.** Publishing an image is a
   deliberate act, never a side effect of committing — otherwise the
   registry fills with builds nobody asked for and `latest` drifts under the
@@ -132,7 +306,15 @@ A track is done when **all** of the following are true:
 3. The track's `Done when` line in `dev-diary/PLAN.md` is met end-to-end.
 4. The acceptance test or smoke test cited in the review's `Pin` column
    passes from a clean tree on a fresh checkout.
-5. The track is committed to `main`.
+5. `go vet ./...`, `go test ./... -race`, `gofmt -l .` and the coverage floor
+   are all green — i.e. `verify.yml` would pass on the track's own paths.
+6. The track's new code satisfies §Go style and §Testing: default paths
+   exercised, every error branch asserted with `errors.Is`, and a raw-wire pin
+   test for every upstream quirk the track encodes.
+7. Every path the track touched is inside its `Owns` list in `PLAN.md`, with
+   the single sanctioned exception of one route line in `newServer`
+   (PLAN.md §Architectural invariants 5).
+8. The track is committed to `main`.
 
 ## File layout
 
