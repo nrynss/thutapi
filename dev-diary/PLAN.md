@@ -65,7 +65,7 @@ required, and the first things cut.
 | **T0** | DONE. Closed at 166a992 after 3 review rounds (zero residue; see t0-round1.md, t0-round2.md, t0-round3.md, t0-remediation-round1.md, t0-remediation-round2.md). |
 | **T1** | DONE. Closed at 65df379 — artifacts (Dockerfile, .dockerignore, deploy/docker-run.sh, deploy/README.md) committed, local smoke green, all Traefik labels byte-identical to project.md §Deployment. See dev-diary/adversarial-review/t1-round1.md. |
 | **T1b** | DONE. Closed at 52b2cd2 — checks 1, 2, 3, 4 pass against https://thutapi.nryn.dev/healthz (cf-ray present, Let's Encrypt origin cert via DNS-01, all five Traefik labels byte-identical). Check 5 moved to T3 (re-scoped: T1 binary has no static-file route). Run also repaired Traefik's CLOUDFLARE_DNS_API_TOKEN — restored cert renewal for the whole box (thutapi, serp, auteur, eoc, mosaic). Full infrastructure record (incident, resolution, token-replacement procedure) is in `~/work/hetzner/docs/foleyflow-server.md` §5, deliberately kept out of this repo. |
-| **T2** | Not started. Response shapes verified by hand 2026-09-04 — see T2. |
+| **T2** | Implementation complete, ready for review. |
 | **T3** | Not started. |
 | **T4** | Not started. |
 | **T5** | Not started. |

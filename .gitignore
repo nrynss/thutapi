@@ -23,7 +23,7 @@ GMI_API_KEY
 
 # Generated media (kept on the box, not in the repo)
 data/
-media/
+data/media/
 
 # Editor
 .vscode/
