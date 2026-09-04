@@ -4,7 +4,7 @@
 |---|---|
 | **Target** | One M finding (M1) and one L finding (L1) in `dev-diary/adversarial-review/t2-round1.md`. Verdict was APPROVE w/ residue (0C/0H/1M/1L). |
 | **Date** | 2026-09-04 |
-| **Commit** | `4a176a2` — single focused commit covering the M1 fix and tests; L1 disposition is recorded here and the line is left as-is (see below). |
+| **Commit** | This remediation lands in its own commit; `git log --grep='T2 round 1 remediation'` finds it. The single commit covers the M1 fix (errors.go + both classifyStatus functions + both Pin tests) and records the L1 disposition. L1's "in GMI's API" line in `internal/gmi/media/client.go` is left as-is — see the L1 row. |
 | **Round file** | `dev-diary/adversarial-review/t2-round1.md` is unchanged. |
 | **Verification methodology** | (a) the Pin test passes on the fixed code; (b) applying the row's Mutation makes the Pin test fail; (c) reverting the Mutation restores the pass. Both directions run below. |
 
@@ -19,7 +19,7 @@
 | **What** | Both clients had a four-case switch (401/403, 429, 404, default→`ErrTransient`). Any 4xx payload error (HTTP 400, 422) surfaced as `ErrTransient`. Downstream retry loops branch on `errors.Is(err, gmi.ErrTransient)` and would spin on a 400/422 that does not recover. The fix introduces a fifth typed sentinel, `ErrBadRequest`, and routes both 400 and 422 to it. The default branch is left covering other 4xx classes (3xx not followed, 418, etc.) as transient — they are not "fix the payload" and not "the server is broken", so the retry-with-caution stance is right. |
 | **Pin** | `TestChat_BadRequest_400` in `internal/gmi/text/client_test.go` and `TestBadRequest_400` in `internal/gmi/media/client_test.go`. Each spins up a httptest server that returns HTTP 400 with a free-form error body, calls the client, asserts `errors.Is(err, gmi.ErrBadRequest) == true` AND `errors.Is(err, gmi.ErrTransient) == false`. |
 | **Mutation** | In either client's `classifyStatus`, remove the new `case code == http.StatusBadRequest || code == http.StatusUnprocessableEntity:` branch so the default catches it. The Pin goes red: `errors.Is(err, gmi.ErrBadRequest) == false` (sentinel never matched) AND `errors.Is(err, gmi.ErrTransient) == true` (the regression class). |
-| **Commit SHA** | `4a176a2` |
+| **Commit SHA** | The commit that contains this record (the remediation commit itself). Use `git log --grep='T2 round 1 remediation'` from `main`. |
 | **Verification (Pin on fixed)** | `go test ./internal/gmi/... -count=1 -race -v`: `TestChat_BadRequest_400 PASS`, `TestBadRequest_400 PASS`. Full suite: `go test ./... -count=1 -race -timeout 120s` → `ok thutapi/cmd/thutapi 9.897s`, `ok thutapi/internal/gmi/media 1.016s` (8 subtests, was 7), `ok thutapi/internal/gmi/text 1.015s` (6 subtests, was 5). gofmt -l . clean. |
 | **Verification (Pin on Mutation)** | Restoring the pre-fix four-case switch (so the default case catches the 400) makes both Pins fail: the `errors.Is(err, gmi.ErrBadRequest) == true` assertion fails (sentinel never wrapped), and the negative `errors.Is(err, gmi.ErrTransient) == false` assertion fails (the regression class is back). |
 
