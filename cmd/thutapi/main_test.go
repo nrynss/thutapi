@@ -241,6 +241,75 @@ func TestShutdownDeadlineIsHonouredAgainstSlowBody(t *testing.T) {
 }
 }
 
+// ---------------------------------------------------------------------
+// H1 floor (round 2 follow-up) — Pin: TestNewHTTPServerReadTimeoutIsAlwaysPositive
+//
+// The round-2 H1 fix derived ReadTimeout = cfg.timeout - 2*time.Second
+// and clamped any negative result to 0. Go's http.Server treats
+// ReadTimeout: 0 as "no timeout", so legal flag values like
+// -shutdown-timeout=1s or -shutdown-timeout=2s would silently re-open
+// H1: the slow body would never be force-closed, srv.Shutdown would
+// return context.DeadlineExceeded, the process would exit 1, and the
+// Hetzner Traefik orchestrator would restart-loop the deploy.
+//
+// The follow-up fix replaces the fixed 2s headroom with the smaller of
+// 2s and cfg.timeout/2, so readTimeout = cfg.timeout - headroom is
+// strictly positive for every legal cfg.timeout. This Pin encodes that
+// property directly: for cfg.timeout in {1s, 2s} ReadTimeout must be
+// > 0, and for the production default cfg.timeout = 10s ReadTimeout
+// must be strictly less than cfg.timeout (the round-1 ordering that
+// H1 protects). The existing slow-body Pin
+// (TestShutdownDeadlineIsHonouredAgainstSlowBody) continues to pin the
+// shutdown behaviour against the 10s default; this Pin pins the floor
+// under smaller legal timeouts where the original derivation silently
+// collapsed to 0.
+//
+// Mutation: restore the naive derivation in newHTTPServer, e.g.
+//     readTimeout := cfg.timeout - 2*time.Second
+//     if readTimeout < 0 { readTimeout = 0 }
+// Then cfg.timeout=1s yields ReadTimeout=0 (no timeout), cfg.timeout=2s
+// yields ReadTimeout=0 (no timeout), and the Pin fails with the named
+// floor reason. cfg.timeout=10s still satisfies the strict-ordering
+// half but the floor half exposes the regression. See
+// dev-diary/adversarial-review/t0-remediation-round2.md for the
+// verification transcripts.
+// ---------------------------------------------------------------------
+
+func TestNewHTTPServerReadTimeoutIsAlwaysPositive(t *testing.T) {
+	cases := []struct {
+		name            string
+		timeout         time.Duration
+		wantPositive    bool
+		wantStrictOrder bool
+	}{
+		{name: "1s floor", timeout: 1 * time.Second, wantPositive: true},
+		{name: "2s floor", timeout: 2 * time.Second, wantPositive: true},
+		{name: "10s default", timeout: 10 * time.Second, wantPositive: true, wantStrictOrder: true},
+	}
+
+	handler := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config{
+				addr:        "127.0.0.1:0",
+				timeout:     tc.timeout,
+				idleTimeout: 120 * time.Second,
+			}
+			srv := newHTTPServer(cfg, handler)
+			if srv == nil {
+				t.Fatalf("newHTTPServer returned nil for cfg.timeout=%v", tc.timeout)
+			}
+			if tc.wantPositive && srv.ReadTimeout <= 0 {
+				t.Fatalf("ReadTimeout = %v for cfg.timeout=%v; want > 0 (H1 floor: ReadTimeout=0 is Go's 'no timeout' and silently re-opens H1 for legal -shutdown-timeout=1s and -shutdown-timeout=2s)", srv.ReadTimeout, tc.timeout)
+			}
+			if tc.wantStrictOrder && srv.ReadTimeout >= tc.timeout {
+				t.Fatalf("ReadTimeout = %v for cfg.timeout=%v; want < cfg.timeout (H1 strict ordering: ReadTimeout must expire before the shutdown deadline so srv.Shutdown can drain the slow body in time)", srv.ReadTimeout, tc.timeout)
+			}
+		})
+	}
+}
+
 
 // ---------------------------------------------------------------------
 // H3 — Pin: TestParseFlagsRejectsNonPositiveTimeout
