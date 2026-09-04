@@ -75,10 +75,10 @@ loop does not permit — a track is done when a review round says so
   ssh: Could not resolve hostname foleyflow: Name or service not known (255)
   # ~/.ssh/config holds only a github.com Host entry — no box alias.
   $ for u in root nryn narayan; do ssh -o BatchMode=yes -o ConnectTimeout=6 \
-      $u@167.233.247.107 'echo OK'; done
-  root@167.233.247.107: Permission denied (publickey,password).
-  nryn@167.233.247.107: Permission denied (publickey,password).
-  narayan@167.233.247.107: Permission denied (publickey,password).
+      $u@${ORIGIN_IP} 'echo OK'; done
+  root@${ORIGIN_IP}: Permission denied (publickey,password).
+  nryn@${ORIGIN_IP}: Permission denied (publickey,password).
+  narayan@${ORIGIN_IP}: Permission denied (publickey,password).
   ```
   The box work therefore must be done by (or with) an operator holding the
   `foleyflow` key; this reviewer cannot run it from here.
@@ -244,7 +244,7 @@ All five asked-for operator facts present. PASS.
 | # | Check | Status |
 |---|---|---|
 | 1 | Traefik picks it up (container + five labels live) | **NOT MET** — no container on the box is reachable from here; unverifiable, and DNS says the router target does not exist |
-| 2 | DNS A record `thutapi.nryn.dev` → `167.233.247.107`, proxied | **FAIL** — NXDOMAIN (workstation resolver and `1.1.1.1`) |
+| 2 | DNS A record `thutapi.nryn.dev` → `${ORIGIN_IP}`, proxied | **FAIL** — NXDOMAIN (workstation resolver and `1.1.1.1`) |
 | 3 | Let's Encrypt HTTP-01 through the proxy | **BLOCKED** by #1/#2 |
 | 4 | `curl https://thutapi.nryn.dev/healthz` → 200 with `cf-ray` | **FAIL** — cannot resolve (exit 6) |
 | 5 | Dummy MP3 fetchable by a third party (`source_audio` mechanism) | **NOT ATTEMPTED** — blocked by #1/#2; no upload/media path exists yet (T0 skeleton serves only `/healthz`) |
@@ -282,7 +282,7 @@ reason T1 exists before T2.
 ## Recommended actions (ordered)
 
 1. **Stand up the live path (operator with the `foleyflow` key).** Add the
-   proxied A record `thutapi` → `167.233.247.107`; on the box pull/build
+   proxied A record `thutapi` → `${ORIGIN_IP}`; on the box pull/build
    `thutapi`, run `GMI_API_KEY=… ./deploy/docker-run.sh`; verify
    `curl -fsS -i https://thutapi.nryn.dev/healthz` returns 200 with `cf-ray`;
    place a dummy file at an unguessable path and fetch it from a third party

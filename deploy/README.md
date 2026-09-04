@@ -114,7 +114,15 @@ A single record, **proxied** through Cloudflare (matching `auteur`,
 
 | Type | Name | Target | Proxy |
 |---|---|---|---|
-| A | `thutapi.nryn.dev` | `167.233.247.107` | Proxied |
+| A | `thutapi.nryn.dev` | `${ORIGIN_IP}` | Proxied |
+
+`${ORIGIN_IP}` is the box's real address, kept out of this repo on purpose.
+It lives in the gitignored `.env` at the repo root (see `.env.example`),
+and authoritatively in `~/work/hetzner/docs/foleyflow-server.md`.
+Publishing it would defeat the orange cloud: with the origin address,
+anyone can reach the box directly via `curl --resolve`, bypassing
+Cloudflare's WAF, bot challenge and DDoS absorption — the host firewall
+allows 80/443 from anywhere and Traefik routes purely on the Host header.
 
 SSL mode on the zone is **`full`, not `strict`** — measured 2026-09-04,
 `GET /zones/$ZONE/settings/ssl` returns `"value":"full"`. Flexible plus

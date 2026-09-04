@@ -64,7 +64,7 @@ required, and the first things cut.
 | --- | --- |
 | **T0** | DONE. Closed at 166a992 after 3 review rounds (zero residue; see t0-round1.md, t0-round2.md, t0-round3.md, t0-remediation-round1.md, t0-remediation-round2.md). |
 | **T1** | DONE. Closed at 65df379 — artifacts (Dockerfile, .dockerignore, deploy/docker-run.sh, deploy/README.md) committed, local smoke green, all Traefik labels byte-identical to project.md §Deployment. See dev-diary/adversarial-review/t1-round1.md. |
-| **T1b** | DONE. Closed at 52b2cd2 — checks 1, 2, 3, 4 pass against https://thutapi.nryn.dev/healthz (cf-ray present, Let's Encrypt origin cert via DNS-01, all five Traefik labels byte-identical). Check 5 moved to T3 (re-scoped: T1 binary has no static-file route). Run also repaired Traefik's CLOUDFLARE_DNS_API_TOKEN — restored cert renewal for the whole box (thutapi, serp, auteur, eoc, mosaic). See dev-diary/adversarial-review/t1b-round1.md and t1b-remediation-round1.md. |
+| **T1b** | DONE. Closed at 52b2cd2 — checks 1, 2, 3, 4 pass against https://thutapi.nryn.dev/healthz (cf-ray present, Let's Encrypt origin cert via DNS-01, all five Traefik labels byte-identical). Check 5 moved to T3 (re-scoped: T1 binary has no static-file route). Run also repaired Traefik's CLOUDFLARE_DNS_API_TOKEN — restored cert renewal for the whole box (thutapi, serp, auteur, eoc, mosaic). Full infrastructure record (incident, resolution, token-replacement procedure) is in `~/work/hetzner/docs/foleyflow-server.md` §5, deliberately kept out of this repo. |
 | **T2** | Not started. Response shapes verified by hand 2026-09-04 — see T2. |
 | **T3** | Not started. |
 | **T4** | Not started. |
@@ -182,8 +182,10 @@ on this workstation holds.
    traefik.http.routers.thutapi.tls.certresolver=letsencrypt
    traefik.http.services.thutapi.loadbalancer.server.port=8080
    ```
-2. **DNS.** An A record for `thutapi.nryn.dev` → `167.233.247.107`, **proxied**,
-   matching `auteur` / `mosaic` / `eoc` / `serp`.
+2. **DNS.** An A record for `thutapi.nryn.dev` → `${ORIGIN_IP}`, **proxied**,
+   matching `auteur` / `mosaic` / `eoc` / `serp`. The literal address is in
+   the gitignored `.env`; it is never committed, because publishing the
+   origin defeats the proxy that hides it.
 3. **Certificate issues.** Traefik issues by **DNS-01** via a Cloudflare
    token (`/opt/traefik/static.yml`), not HTTP-01 — so the proxy is
    irrelevant to validation and the origin IP need not be publicly
@@ -222,7 +224,7 @@ generations plus audio. **Generation therefore cannot be a blocking POST.**
 > Let's Encrypt certificates, so the zone **can** safely move to strict.
 > It has been left on `full`, which fails nothing. If you do switch it,
 > confirm every origin cert first: a hostname on the default cert returns
-> 526 the instant strict is on. See t1b-round1.md.
+> 526 the instant strict is on. See `~/work/hetzner` §5.1.
 * Generated media is immutable, so serve it with a long `max-age` and let the
   Cloudflare edge cache it. That is free performance for a judge.
 
@@ -234,8 +236,8 @@ check 5 moved to T3 (re-scoped — the T1 binary has no static-file
 route, so it cannot pass here regardless of DNS state). The run also
 repaired Traefik's broken `CLOUDFLARE_DNS_API_TOKEN` and restored
 certificate renewal for every site on the box (thutapi, serp,
-auteur, eoc, mosaic). See `dev-diary/adversarial-review/t1b-round1.md`
-and `t1b-remediation-round1.md` for the full transcript and the two
+auteur, eoc, mosaic). See `~/work/hetzner/docs/foleyflow-server.md` §5
+for the full transcript and the two
 artifact defects (D1 `--network proxy`, D2 chown uid 65532) the run
 surfaced and fixed.
 
@@ -247,7 +249,7 @@ on the Hetzner container").
 against `https://thutapi.nryn.dev/healthz`:
 
 1. Traefik on `foleyflow` picks up the container with the five labels.
-2. DNS A record `thutapi.nryn.dev` → `167.233.247.107`, proxied
+2. DNS A record `thutapi.nryn.dev` → `${ORIGIN_IP}`, proxied
    (matching `auteur`/`mosaic`/`eoc`/`serp`).
 3. Let's Encrypt **DNS-01** (Cloudflare token) issues the origin cert.
 4. `curl https://thutapi.nryn.dev/healthz` returns 200 JSON with
@@ -288,13 +290,13 @@ curl -fsS -i https://thutapi.nryn.dev/healthz
 * Cloudflare SSL mode for the zone is **`full`, not `strict`** (measured
   2026-09-04). Flexible plus Traefik's HTTPS redirect is an infinite
   redirect loop, so `full` is safe; `strict` is not, until every origin
-  has a real cert. Do not "fix" this setting — see t1b-round1.md.
+  has a real cert. Do not "fix" this setting — see `~/work/hetzner` §5.1.
 * If `curl /healthz` returns 524, Cloudflare's 100s proxy timeout
   fired — but `/healthz` is sub-second, so the cause is upstream
   (Traefik not picking the container; check labels and Traefik logs).
 
 **When done:** paste the five transcripts (or a single one with all
-five signal-bearing lines) into `dev-diary/adversarial-review/t1b-round1.md`,
+five signal-bearing lines) into `~/work/hetzner/docs/foleyflow-server.md`,
 mark T1b status DONE in the table above, and the chain to T2/T13/T14
 opens. Until then T1b stays `Blocked`.
 
@@ -563,7 +565,9 @@ Optional throughout. The library voice is the default path.
 regardless of state; submits by 20:00 IST.** Never cut, never deferred — an
 unsubmitted project scores zero.
 
-* **Public repository**, public for the whole judging period, with a license.
+* **Public repository**, public for the whole judging period. **No license
+  is required** — confirmed 2026-09-04; an earlier draft of this plan
+  asserted one. Thutapi ships proprietary, all rights reserved.
 * **Demo video, 3 minutes max.** Lead with the interview — a child answering
   short questions, and the book assembling itself from the answers.
 * Track **Multimodality**. Tick **M3 + Speech 2.8** (+ Music 3.0 if T12 landed).

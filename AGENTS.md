@@ -124,7 +124,6 @@ A track is done when **all** of the following are true:
 ```
 /
 ├── AGENTS.md                            ← this file
-├── LICENSE                              ← Apache 2.0
 ├── Dockerfile                           ← distroless static, multi-stage
 ├── go.mod / go.sum
 ├── cmd/thutapi/                         ← process entry
