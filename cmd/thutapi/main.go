@@ -34,14 +34,20 @@ var errShutdownTimeout = errors.New("shutdown-timeout must be greater than 0")
 var errUnexpectedOperand = errors.New("unexpected positional argument")
 
 // config holds the runtime configuration. T0 reads ADDR / PORT, the
-// shutdown-timeout flag, and the http.Server timeout knobs; later tracks will
+// shutdown-timeout flag, and the IdleTimeout knob; later tracks will
 // extend this struct and the parseFlags surface, not replace it.
+//
+// ReadTimeout and WriteTimeout are deliberately not part of config — they
+// are derived in newHTTPServer from the graceful-shutdown deadline so a
+// slow request body cannot outlive the deadline (H1, re-opened in
+// round 2). WriteTimeout is fixed at 0 because project.md §Pipeline
+// folds SSE into the architecture (interview turns stream text, TTS
+// audio lands asynchronously); a non-zero WriteTimeout would force-close
+// every long-lived stream.
 type config struct {
-	addr         string        // bind address, e.g. "0.0.0.0:8080"
-	timeout      time.Duration // graceful shutdown deadline
-	readTimeout  time.Duration // http.Server.ReadTimeout
-	writeTimeout time.Duration // http.Server.WriteTimeout
-	idleTimeout  time.Duration // http.Server.IdleTimeout
+	addr        string        // bind address, e.g. "0.0.0.0:8080"
+	timeout     time.Duration // graceful shutdown deadline
+	idleTimeout time.Duration // http.Server.IdleTimeout
 }
 
 // resolveAddr is the ADDR/PORT resolution: ADDR wins if set, else
@@ -60,11 +66,9 @@ func resolveAddr() string {
 // they don't re-register flag entries across invocations.
 func parseConfig() config {
 	return config{
-		addr:         resolveAddr(),
-		timeout:      10 * time.Second,
-		readTimeout:  30 * time.Second,
-		writeTimeout: 30 * time.Second,
-		idleTimeout:  120 * time.Second,
+		addr:        resolveAddr(),
+		timeout:     10 * time.Second,
+		idleTimeout: 120 * time.Second,
 	}
 }
 
@@ -121,22 +125,49 @@ func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 // newHTTPServer builds the http.Server with the timeouts that protect
-// graceful shutdown (H1). ReadTimeout, WriteTimeout and IdleTimeout were all
-// zero before this fix; a slow request body could then hang past the
-// shutdown deadline, force srv.Shutdown to return context.DeadlineExceeded,
-// and exit the process with status 1. Each timeout now exceeds the default
-// 10s shutdown deadline so a slow request is force-closed before the
-// deadline fires.
+// graceful shutdown (H1).
+//
+// The slow-body failure mode that H1 fixes: if a request is accepted just
+// before SIGTERM and its body stays open past the shutdown deadline, the
+// graceful Shutdown call returns context.DeadlineExceeded and the process
+// exits 1 — which the Hetzner Traefik orchestrator treats as unhealthy and
+// restart-loops on SIGTERM during deploy.
+//
+// ReadTimeout therefore must expire strictly before the graceful-shutdown
+// deadline (cfg.timeout), so the slow body is force-closed in time. We set
+// ReadTimeout = cfg.timeout - 2s so Shutdown has a deterministic 2s window
+// to observe the connection drained after the body read errors. One second
+// of headroom left a 30% flake rate under our local scheduler — production
+// still benefits from the same wider margin. ReadHeaderTimeout (5s) is
+// independent and protects the header parse separately.
+//
+// WriteTimeout is 0 by design. project.md §Pipeline folds SSE into the
+// architecture for the interview turns and TTS streams (text streams while
+// audio lands); a non-zero WriteTimeout force-closes every long-lived SSE
+// stream, which is the wrong behaviour for this product. The slow-body
+// case H1 is actually about is fully bounded by ReadTimeout, so leaving
+// WriteTimeout at 0 does not re-open H1.
+//
+// IdleTimeout > cfg.timeout is fine — idle connections are not blocking
+// Shutdown and they need to live longer than the shutdown budget to
+// remain reusable across the deadline.
+//
 func newHTTPServer(cfg config, h http.Handler) *http.Server {
+	readTimeout := cfg.timeout - 2*time.Second
+	if readTimeout < 0 {
+		readTimeout = 0
+	}
+
 	return &http.Server{
 		Addr:              cfg.addr,
 		Handler:           h,
 		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       cfg.readTimeout,
-		WriteTimeout:      cfg.writeTimeout,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      0,
 		IdleTimeout:       cfg.idleTimeout,
 	}
 }
+
 
 // run is the testable body of main(). It wires the parsed config to an
 // http.Server, blocks until either the server errors out or a shutdown

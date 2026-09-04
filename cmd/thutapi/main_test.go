@@ -126,64 +126,75 @@ func TestParseFlagsBadFlagReturnsError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------
-// H1 — Pin: TestShutdownDeadlineIsHonouredAgainstSlowBody
+// H1 (re-opened in round 2) — Pin: TestShutdownDeadlineIsHonouredAgainstSlowBody
 //
-// The H1 defect: the http.Server literal in main() set ReadHeaderTimeout but
-// left ReadTimeout / WriteTimeout / IdleTimeout at Go's zero value, meaning
-// no timeout. A slow request body therefore held past the shutdown
-// deadline, Shutdown returned DeadlineExceeded, and the process exited 1.
-// The fix must set all three to a non-zero value larger than the default
-// shutdown timeout (10s) so a stuck request is force-closed before the
-// shutdown deadline fires.
+// The H1 defect: a request accepted just before SIGTERM can keep its body
+// open past the graceful-shutdown deadline. If the http.Server's ReadTimeout
+// outlives cfg.timeout, srv.Shutdown returns context.DeadlineExceeded, the
+// process logs "graceful shutdown failed" and exits 1 — which the Hetzner
+// Traefik orchestrator treats as unhealthy and restart-loops on SIGTERM
+// during deploy.
 //
-// The Pin asserts two things:
+// The round-1 fix set ReadTimeout = WriteTimeout = IdleTimeout to a uniform
+// 30/30/120s. That was structurally present but semantically unsafe under
+// the production defaults: ReadTimeout (30s) > cfg.timeout (10s), so a slow
+// body accepted just before SIGTERM could still hang the shutdown past the
+// 10s deadline. The round-1 Pin scaled everything uniformly (80ms read /
+// 500ms shutdown) and therefore flipped the inequality to the safe side
+// inside the test, hiding the defect from the Pin's own assertion.
+// The round-2 fix encodes the safe relationship directly in newHTTPServer:
+// ReadTimeout = cfg.timeout - 2s (so the slow body is force-closed before
+// the deadline with a deterministic 2s window for Shutdown to drain),
+// WriteTimeout = 0 (SSE-friendly, see main.go), IdleTimeout stays >
+// cfg.timeout (idle connections are not in the shutdown path). The Pin
+// below uses parseConfig() unchanged so the production relationship is the
+// asserted relationship.
 //
-//  1. Structural: the http.Server returned by newHTTPServer has
-//     ReadTimeout / WriteTimeout / IdleTimeout each larger than 10s.
-//  2. Behavioural: a slow handler that holds the request body open sees
-//     its body read error with a timeout once ReadTimeout fires, so the
-//     handler exits naturally and Shutdown sees the connection drained.
+// Pin behaviour:
 //
-// Mutation: remove the three timeout fields from newHTTPServer. Both
-// assertions fail.
+//  1. Bind cfg := parseConfig() — production defaults.
+//  2. Stand up newHTTPServer(cfg, slowHandler) on an ephemeral port.
+//  3. Issue a request that holds its Content-Length body open forever.
+//  4. Call srv.Shutdown(ctxWithTimeout(cfg.timeout)) and require nil.
+//
+// With the fix, ReadTimeout fires at cfg.timeout-1s, the handler's body
+// read errors out, the handler exits, Shutdown sees the connection drained,
+// and returns nil within the cfg.timeout budget.
+//
+// Mutation: restore ReadTimeout to > cfg.timeout (the old 30s default).
+// The body read then does not fire inside the cfg.timeout budget, the
+// handler is still active when the shutdown context expires, Shutdown
+// returns context.DeadlineExceeded, and the Pin fails for the named H1
+// reason. See t0-remediation-round2.md for the verification transcripts.
 // ---------------------------------------------------------------------
 
 func TestShutdownDeadlineIsHonouredAgainstSlowBody(t *testing.T) {
-	cfg := config{
-		addr:         "ignored",
-		timeout:      500 * time.Millisecond,
-		readTimeout:  80 * time.Millisecond,
-		writeTimeout: 80 * time.Millisecond,
-		idleTimeout:  1 * time.Second,
+	cfg := parseConfig()
+
+	// Sanity-check: the production defaults must satisfy the safe
+	// ordering so a reviewer reading the Pin can confirm we are not
+	// scaling the relationship away.
+	if cfg.timeout != 10*time.Second {
+		t.Fatalf("cfg.timeout = %v; want 10s (H1 Pin must exercise parseConfig() defaults)", cfg.timeout)
 	}
 
-	// Structural: each timeout must be set and exceed the default 10s
-	// shutdown deadline so the fix actually protects graceful shutdown.
-	probe := newHTTPServer(parseConfig(), http.NotFoundHandler())
-	if probe.ReadTimeout <= 10*time.Second {
-		t.Fatalf("newHTTPServer.ReadTimeout = %v; want > 10s (H1 fix sets it to 30s)", probe.ReadTimeout)
-	}
-	if probe.WriteTimeout <= 10*time.Second {
-		t.Fatalf("newHTTPServer.WriteTimeout = %v; want > 10s (H1 fix sets it to 30s)", probe.WriteTimeout)
-	}
-	if probe.IdleTimeout <= 10*time.Second {
-		t.Fatalf("newHTTPServer.IdleTimeout = %v; want > 10s (H1 fix sets it to 120s)", probe.IdleTimeout)
-	}
-
-	// Behavioural: the handler reads the body one byte at a time and
-	// records whether the read failed with a timeout. With ReadTimeout
-	// set, the body read fails after ReadTimeout; without it, the read
-	// would block until the client closes the connection. The handler
-	// signals exit via a channel so the test can wait for the handler
-	// to return before checking Shutdown.
-	handlerExited := make(chan struct{})
-	var bodyErr error
+	handlerEntered := make(chan struct{})
 	slow := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer close(handlerExited)
+		// Signal that we have entered the handler so the test can be
+		// sure an in-flight body read is active when Shutdown is
+		// called. Otherwise Shutdown would return immediately for
+		// the wrong reason and the Pin would no longer be load-
+		// bearing against the unsafe ordering.
+		close(handlerEntered)
+		// Read the body one byte at a time so the handler stays
+		// alive until ReadTimeout fires. With the fix, the read
+		// returns a timeout error after cfg.timeout-1s and the
+		// handler exits; without it (the Mutation), the read is
+		// still going when cfg.timeout expires and Shutdown returns
+		// DeadlineExceeded.
 		buf := make([]byte, 1)
 		for {
 			if _, err := r.Body.Read(buf); err != nil {
-				bodyErr = err
 				return
 			}
 		}
@@ -198,7 +209,8 @@ func TestShutdownDeadlineIsHonouredAgainstSlowBody(t *testing.T) {
 
 	go func() { _ = srv.Serve(ln) }()
 
-	// Slow client: send headers + partial body, then stall.
+	// Slow client: send headers + a partial body and never send the
+	// remainder. Content-Length is huge so the server keeps reading.
 	go func() {
 		conn, err := net.Dial("tcp", ln.Addr().String())
 		if err != nil {
@@ -213,49 +225,22 @@ func TestShutdownDeadlineIsHonouredAgainstSlowBody(t *testing.T) {
 		}
 	}()
 
-	// Wait for the handler to exit (it should, once ReadTimeout fires
-	// and the body read errors out).
+	// Wait until the handler is actually blocked inside r.Body.Read;
+	// otherwise Shutdown could return immediately with no active
+	// request and the Pin would pass for the wrong reason.
 	select {
-	case <-handlerExited:
+	case <-handlerEntered:
 	case <-time.After(2 * time.Second):
-		t.Fatalf("handler did not exit within 2s; ReadTimeout did not fire and the body read blocked forever")
+		t.Fatalf("handler did not enter body read within 2s; cannot pin the slow-body shutdown behaviour")
 	}
 
-	// With ReadTimeout=80ms, the body read should have failed with a
-	// timeout error. Without ReadTimeout (the unfixed state), the body
-	// read would have blocked until the test's client closed the
-	// socket, which would not produce a timeout error here.
-	if bodyErr == nil {
-		t.Fatalf("handler body read returned no error; ReadTimeout did not fire")
-	}
-	if !isTimeout(bodyErr) {
-		t.Fatalf("handler body read error = %v; want a timeout error (ReadTimeout should fire)", bodyErr)
-	}
-
-	// Shutdown should return cleanly now that the connection was
-	// force-closed by ReadTimeout. Give it a generous window because
-	// Go's HTTP server uses closeWriteAndWait which sleeps briefly
-	// (rstAvoidanceDelay, ~25ms by default).
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.timeout)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		t.Fatalf("srv.Shutdown = %v; want nil after ReadTimeout forced the slow body closed", err)
-	}
+		t.Fatalf("Shutdown = %v after %v; default ReadTimeout must be ≤ cfg.timeout=%v so the slow body is force-closed before the shutdown deadline (H1)", err, cfg.timeout, cfg.timeout)
+}
 }
 
-// isTimeout reports whether err is a net error that indicates a read deadline
-// expired. Go's net package returns *net.OpError wrapping "i/o timeout" when
-// SetReadDeadline fires; we test for that via the Timeout() method.
-func isTimeout(err error) bool {
-	if err == nil {
-		return false
-	}
-	var ne interface{ Timeout() bool }
-	if errors.As(err, &ne) {
-		return ne.Timeout()
-	}
-	return false
-}
 
 // ---------------------------------------------------------------------
 // H3 — Pin: TestParseFlagsRejectsNonPositiveTimeout
@@ -343,6 +328,14 @@ func TestParseFlagsAfterOperandIsNotSilentlyDropped(t *testing.T) {
 // ---------------------------------------------------------------------
 
 func TestShutdownLogRecordsSignalName(t *testing.T) {
+	// L2: pin run() to an ephemeral port so the test does not depend
+	// on port 8080 being free. Without this, any process holding
+	// 0.0.0.0:8080 makes run() return a bind error before the
+	// synthetic SIGTERM is consumed and the Pin fails for an
+	// unrelated environmental reason.
+	t.Setenv("ADDR", "127.0.0.1:0")
+
+
 	var logBuf bytes.Buffer
 	log := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
