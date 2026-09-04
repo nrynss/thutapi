@@ -164,7 +164,8 @@ while they are cheap to fix.
 **Depends on:** T0. **Done when:** the Dockerfile, `.dockerignore`,
 `deploy/docker-run.sh`, and `deploy/README.md` are committed; a local
 `docker build -t thutapi:local . && docker run --rm -p 18080:8080 -e
-PORT=8080 thutapi:local` succeeds; `curl http://127.0.0.1:18080/healthz`
+PORT=8080 thutapi:local` succeeds (a local smoke test — the deploy path
+itself is the GHCR image, see project.md §Packaging); `curl http://127.0.0.1:18080/healthz`
 returns 200 JSON with the version field; `docker ps` shows no dangling
 container after smoke; `go vet ./...`, `go test ./... -race`, and
 `gofmt -l cmd/thutapi/` are clean; and the five Traefik labels in
@@ -264,9 +265,15 @@ against `https://thutapi.nryn.dev/healthz`:
 **Operator runbook:**
 
 ```bash
-# On workstation, push the image the artifacts ship:
-docker build -t thutapi:local .
-docker save thutapi:local | ssh foleyflow 'docker load'
+# Publish an image from CI (manual — image.yml is workflow_dispatch only):
+gh workflow run image.yml -f latest=true
+# The box pulls it anonymously; docker-run.sh does the pull itself.
+#
+# Fallback if GHCR is unreachable — a workstation build, shipped directly.
+# Not reproducible: the box cannot rebuild this image.
+#   docker build --build-arg VERSION=$(git rev-parse --short HEAD) -t thutapi:local .
+#   docker save thutapi:local | ssh foleyflow 'docker load'
+#   then: IMAGE=thutapi:local /srv/thutapi/deploy/docker-run.sh
 
 # On foleyflow (via SSH), prepare the data dir and run the deploy:
 ssh foleyflow

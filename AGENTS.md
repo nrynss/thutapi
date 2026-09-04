@@ -85,6 +85,21 @@ These are frozen and reviewed on sight:
 - **`source_audio`** for voice clone must be a public URL GMI can fetch;
   images take inline base64 in the text client.
 
+## CI and images
+
+* **`verify.yml` runs on code pushes and PRs** — `go vet`, `go test -race`,
+  `gofmt`, `bash -n` on the deploy script. It ignores doc-only changes; the
+  dev-diary moves far more often than the code and a green tick on prose is
+  noise.
+* **`image.yml` is `workflow_dispatch` only.** Publishing an image is a
+  deliberate act, never a side effect of committing — otherwise the
+  registry fills with builds nobody asked for and `latest` drifts under the
+  running box. `gh workflow run image.yml -f latest=true`.
+* **Deploy a SHA tag, not `latest`**, for anything you need to reproduce.
+* **Secrets never enter the repo or an image layer.** `GMI_API_KEY` flows
+  shell env → `docker run -e` → container. The origin IP of the box is in
+  the gitignored `.env` as `ORIGIN_IP`; the repo is public.
+
 ## Safety and data rules
 
 - `GMI_API_KEY` is **never in the repo.** Pass by `docker run -e`. The repo
@@ -124,7 +139,15 @@ A track is done when **all** of the following are true:
 ```
 /
 ├── AGENTS.md                            ← this file
+├── README.md                            ← public-facing; what this is
 ├── Dockerfile                           ← distroless static, multi-stage
+├── .env.example                         ← copy to .env (gitignored)
+├── .github/workflows/
+│   ├── verify.yml                       ← vet/test/gofmt on code changes
+│   └── image.yml                        ← GHCR publish, MANUAL only
+├── deploy/
+│   ├── docker-run.sh                    ← the five Traefik labels + proxy net
+│   └── README.md                        ← operator notes for the box
 ├── go.mod / go.sum
 ├── cmd/thutapi/                         ← process entry
 ├── internal/                            ← packages (stream, gmi, store, …)

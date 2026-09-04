@@ -306,6 +306,20 @@ Follow the Mosaic Dockerfile pattern minus the Node stage: build with
 `gcr.io/distroless/base-debian12:nonroot`, `EXPOSE 8080`, listen on
 `0.0.0.0:${PORT}`.
 
+**Where images come from.** GitHub Actions publishes to
+`ghcr.io/nrynss/thutapi` as a public package, so the box pulls anonymously
+and holds no registry credential. Publishing is **manual**
+(`gh workflow run image.yml`) — an image is a deployment artifact, not a
+byproduct of committing. Two tags: the commit SHA, which names one build
+forever and is what you deploy, and `latest`, which moves and is a
+convenience for humans. `VERSION` is injected as a build arg and surfaces
+at `/healthz`, so a running instance is traceable to its source commit.
+
+The first deployment was a workstation build shipped with
+`docker save | ssh docker load`. That still works as a fallback when the
+registry is unreachable, but nothing about it is reproducible — the box
+cannot rebuild its own image that way.
+
 ### M3 phase settings
 
 | Phase | `thinking` | Why |
@@ -421,7 +435,8 @@ Hetzner box `foleyflow`, Ubuntu 26.04. **Traefik v3** holds 80/443 with a
 `serp` on `*.nryn.dev`. Containers are started with plain `docker run` and
 labels — there is no compose project on the box.
 
-Adding this app is a DNS A record for `thutapi.nryn.dev` plus five labels:
+Adding this app is a DNS A record for `thutapi.nryn.dev`, **attachment to
+the `proxy` Docker network**, plus five labels:
 
 ```
 traefik.enable=true
@@ -431,9 +446,21 @@ traefik.http.routers.thutapi.tls.certresolver=letsencrypt
 traefik.http.services.thutapi.loadbalancer.server.port=8080
 ```
 
-TLS, routing and renewal are therefore not work, and the public-HTTPS
-requirement for `source_audio` is satisfied by the edge that is already
-running.
+**The `proxy` network is not optional.** Traefik's docker provider runs
+`exposedByDefault: false` with `network: proxy`; a container carrying the
+labels but sitting outside that network is discovered and then unroutable,
+which surfaces as a 404 or 502 rather than an obvious error. Every sibling
+is on `proxy` and nothing else.
+
+Routing and the public-HTTPS requirement for `source_audio` are satisfied
+by the edge that is already running. **TLS and renewal are nearly free but
+not zero:** issuance is DNS-01 against a Cloudflare token held by Traefik,
+and on 2026-09-04 that token was found to have lapsed — `serp` had silently
+fallen back to a self-signed origin certificate and nothing on the box
+could renew. The zone's SSL mode is `full`, which does not validate the
+origin certificate, so it stayed invisible. Treat certificate health as
+something to check, not assume. The full record is in the private
+infrastructure notes (`~/work/hetzner`), not this repo.
 
 Headroom: 23G disk free, 2.9Gi RAM available. Ample for an API orchestrator —
 nothing runs locally now that speech input is cut — but generated images and

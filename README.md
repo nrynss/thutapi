@@ -1,0 +1,87 @@
+# Thutapi
+
+A child is interviewed, and the answers become an illustrated, narrated
+picture book.
+
+Thutapi asks one short question at a time — *what colour is the dragon?*,
+*is she brave, or is she sneaky?* — accepts whatever the child says
+without correcting it, and stops when it has enough. Then it structures
+the transcript into a cast and a page list, illustrates the pages with a
+consistent cast, narrates them, and assembles a book you can turn.
+
+Built for MiniMax Week × GMI Cloud, Multimodality track.
+
+> **Thutapi** (തുത്താപ്പി) is what Kunjupaathumma affectionately calls
+> Aisha in Vaikom Muhammad Basheer's *Ntuppuppakkoranendarnnu* — a term of
+> endearment for a small girl, on a product where a small girl tells the
+> story.
+
+## Status
+
+Early. `/healthz` serves; the pipeline is being built track by track.
+Per-track status is in [`dev-diary/PLAN.md`](dev-diary/PLAN.md).
+
+## Run it
+
+```bash
+go build ./... && go test ./...
+go run ./cmd/thutapi          # serves :8080
+curl -s localhost:8080/healthz
+```
+
+Or the container:
+
+```bash
+docker build --build-arg VERSION=$(git rev-parse --short HEAD) -t thutapi:local .
+docker run --rm -p 18080:8080 thutapi:local
+curl -s localhost:18080/healthz
+```
+
+`/healthz` reports the commit the binary was built from, so a running
+instance is always traceable to source.
+
+## Configuration
+
+All configuration is environment. Copy [`.env.example`](.env.example) to
+`.env` (gitignored) and fill it in.
+
+| Variable | Required | Default | Notes |
+|---|---|---|---|
+| `PORT` | no | `8080` | Listen port. |
+| `DATA_DIR` | no | `/data` | SQLite and generated media. |
+| `GMI_API_KEY` | yes (from T2) | — | GMI Cloud inference key. Never committed. |
+| `UPLOAD_TOKEN` | no | random | Bearer for the voice-sample upload path. |
+
+## Images and deployment
+
+Images are published to GHCR **manually**, never automatically on commit —
+an image is a deployment artifact, not a byproduct of committing:
+
+```bash
+gh workflow run image.yml -f latest=true
+```
+
+Deployment runs behind an existing Traefik v3 edge. The operator-facing
+details are in [`deploy/README.md`](deploy/README.md).
+
+`.github/workflows/verify.yml` runs `go vet`, `go test -race`, `gofmt` and
+a shell syntax check on code changes, and skips doc-only commits.
+
+## Layout
+
+```
+cmd/thutapi/     process entry
+internal/        packages (stream, gmi, store, …)
+static/          vendored Preact shell, no build step
+deploy/          Dockerfile companion: run script + operator notes
+dev-diary/       product spec, build plan, review records
+```
+
+Conventions binding on every contributor, human or agent, are in
+[`AGENTS.md`](AGENTS.md).
+
+## License
+
+None. **Copyright © 2026. All rights reserved.**
+This source is published for review and judging. It is not open source,
+and no permission to use, copy, modify or distribute is granted.
