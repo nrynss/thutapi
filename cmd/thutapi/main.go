@@ -22,6 +22,11 @@ import (
 	"time"
 )
 
+// version is stamped at link time via -X main.version=<v>. Default "dev"
+// keeps a clean `go build .` working when no -X flag is supplied. The
+// build to ops dashboards and the README's curl smoke is meaningful.
+var version = "dev"
+
 // errShutdownTimeout is returned by parseFlags when the caller asks for a
 // non-positive graceful-shutdown deadline (H3). It is typed so callers and
 // tests can errors.Is against it.
@@ -121,7 +126,7 @@ func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, `{"status":"ok","uptime_seconds":%d}`, int(time.Since(s.start).Seconds()))
+	fmt.Fprintf(w, `{"status":"ok","uptime_seconds":%d,"version":%q}`, int(time.Since(s.start).Seconds()), version)
 }
 
 // newHTTPServer builds the http.Server with the timeouts that protect

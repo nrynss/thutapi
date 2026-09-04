@@ -40,6 +40,7 @@ func TestHealthzReturnsOK(t *testing.T) {
 	var body struct {
 		Status        string `json:"status"`
 		UptimeSeconds int    `json:"uptime_seconds"`
+		Version       string `json:"version"`
 	}
 	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
 		t.Fatalf("decode body: %v", err)
@@ -49,6 +50,9 @@ func TestHealthzReturnsOK(t *testing.T) {
 	}
 	if body.UptimeSeconds < 0 {
 		t.Fatalf("uptime_seconds = %d, want >= 0", body.UptimeSeconds)
+	}
+	if body.Version == "" {
+		t.Fatalf("version = %q, want non-empty (stamped via -X main.version at build time)", body.Version)
 	}
 }
 

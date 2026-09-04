@@ -48,8 +48,10 @@ fi
 # Speech 2.8 source_audio fetches the resulting URL. Short-lived and
 # unguessable keeps a child's voice off any directory listing.
 UPLOAD_TOKEN="${UPLOAD_TOKEN:-$(openssl rand -hex 16)}"
-
 mkdir -p "${DATA_DIR}"
+printf '%s' "${UPLOAD_TOKEN}" > "${DATA_DIR}/upload-token"
+chmod 0600 "${DATA_DIR}/upload-token"
+
 
 # Build the docker run command. -e flags pass through to the binary's
 # parseConfig (cmd/thutapi/main.go: parseConfig reads environment only).
@@ -97,6 +99,5 @@ echo "Container started. Useful follow-ups:"
 echo "  docker logs -f ${NAME}"
 echo "  curl -fsS https://thutapi.nryn.dev/healthz"
 echo "  curl -fsS http://127.0.0.1:8080/healthz     # if HOST_PORT=8080"
-echo
-echo "UPLOAD_TOKEN (short-lived voice-sample bearer) for this run:"
-echo "  ${UPLOAD_TOKEN}"
+echo "Voice-sample bearer (UPLOAD_TOKEN) — see ${DATA_DIR}/upload-token for the token; not echoed to stdout."
+

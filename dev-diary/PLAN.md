@@ -62,8 +62,8 @@ required, and the first things cut.
 
 | ID | Status |
 | --- | --- |
-| **T0** | Not started. |
-| **T1** | Not started. |
+| **T0** | DONE. Closed at 166a992 after 3 review rounds (zero residue; see t0-round1.md, t0-round2.md, t0-round3.md, t0-remediation-round1.md, t0-remediation-round2.md). |
+| **T1** | Implementation complete, local smoke green. Live verification (DNS A record + foleyflow deploy + curl) requires operator with box access; round-1 review at commit 294439d recorded 1 C + 3 L; C1 awaiting operator. See dev-diary/adversarial-review/t1-round1.md. |
 | **T2** | Not started. Response shapes verified by hand 2026-09-04 — see T2. |
 | **T3** | Not started. |
 | **T4** | Not started. |
@@ -155,7 +155,7 @@ Conventions set here that every later track follows:
 
 ---
 
-## T1 — The deployment path, end to end, before there is anything to deploy  *(DONE — smoke verified locally; live URL checks remain)*
+## T1 — The deployment path, end to end, before there is anything to deploy  *(Implementation complete, local smoke green — awaiting operator for live verification)*
 
 Ship the T0 skeleton to `thutapi.nryn.dev` and prove every environmental fact
 while they are cheap to fix.
