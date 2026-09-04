@@ -88,9 +88,14 @@ const (
 // the text client. The HTTP timeout is 120s because image generation
 // and TTS are slower than text — the request-queue API can take up to
 // ~15s for a single synchronous image call, with headroom for retries.
+//
+// Since T3b the methods drive a call to a terminal state: a submit POST,
+// then (when the queue answers queued/processing) the poll loop in
+// polling.go, paced by the Client's PollConfig.
 type Client struct {
 	baseURL    string
 	httpClient *http.Client
+	poll       PollConfig
 }
 
 // New returns a Client whose base URL is GMI_MEDIA_BASE_URL when set,
@@ -140,7 +145,7 @@ func (c *Client) GenerateImage(ctx context.Context, prompt, model string) ([]byt
 	payload := map[string]interface{}{
 		"prompt": prompt,
 	}
-	return c.post(ctx, model, acceptJSON, payload)
+	return c.drive(ctx, model, acceptJSON, payload)
 }
 
 // EditImage runs an image-to-image call. refImage is the reference
@@ -181,7 +186,7 @@ func (c *Client) EditImage(ctx context.Context, refImage []byte, prompt, model s
 		"prompt": prompt,
 		"image":  dataURI,
 	}
-	return c.post(ctx, model, acceptJSON, payload)
+	return c.drive(ctx, model, acceptJSON, payload)
 }
 
 // SynthesizeSpeech runs a TTS call and returns the raw audio bytes.
@@ -211,7 +216,7 @@ func (c *Client) SynthesizeSpeech(ctx context.Context, text, voice, model string
 		"need_noise_reduction":      true,
 		"need_volumn_normalization": true, // sic — see project.md §4
 	}
-	return c.post(ctx, model, acceptAudio, payload)
+	return c.drive(ctx, model, acceptAudio, payload)
 }
 
 // post sends one envelope to the request-queue endpoint. The whole
@@ -289,18 +294,20 @@ func (c *Client) attempt(ctx context.Context, endpoint, accept, apiKey string, b
 	// stay raw for the caller (T6/T8) — and retry it like a 5xx. TTS
 	// returns audio bytes, which are not JSON; the peek then no-ops.
 	var status queueStatus
-	if err := json.Unmarshal(raw, &status); err == nil && status.Status == "failed" {
+	if err := json.Unmarshal(raw, &status); err == nil && strings.ToLower(status.Status) == "failed" {
 		return nil, fmt.Errorf("%w: request queue reported failed: %s", gmi.ErrTransient, strings.TrimSpace(string(raw)))
 	}
 	return raw, nil
 }
 
 // queueStatus is the minimal peek at a request-queue body: the
-// {"status":...} field the API reports on a 200 ("completed",
-// "failed", ...). Only Status is decoded; the response is otherwise
-// handed to callers as raw bytes.
+// {"request_id","status"} fields the API reports. Status steers the
+// retry contract in attempt and the poll loop in polling.go; RequestID
+// is what the poll loop polls. Only these two fields are decoded; the
+// response is otherwise handed to callers as raw bytes.
 type queueStatus struct {
-	Status string `json:"status"`
+	RequestID string `json:"request_id"`
+	Status    string `json:"status"`
 }
 
 // classifyStatus maps an HTTP error code to a typed sentinel. Same
