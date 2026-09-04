@@ -8,15 +8,22 @@
 
 ## Status
 
-**RUN 2026-09-04 15:20 UTC. BLOCKED at check 2 on a dead Cloudflare token.**
+**RUN 2026-09-04 15:20-15:30 UTC. The live URL is up.**
+**https://thutapi.nryn.dev/healthz returns 200.**
 
 | Check | Verdict |
 |---|---|
 | 1 — Traefik picks the container up | **PASS** |
-| 2 — DNS A record | **BLOCKED** — cannot write the record; token invalid |
-| 3 — Let's Encrypt certificate issued | **FAIL** — DNS-01 returns HTTP 401 |
-| 4 — Live curl with `cf-ray` | **BLOCKED** on 2 and 3 |
+| 2 — DNS A record | **PASS** — proxied A record created |
+| 3 — Let's Encrypt certificate issued | **FAIL** — DNS-01 401s; origin serves `CN=TRAEFIK DEFAULT CERT` |
+| 4 — Live curl with `cf-ray` | **PASS** |
 | 5 — Public file fetchable by a third party | **MIS-SCOPED** — belongs to T3; the T1 stub has no file route |
+
+Check 4 passes *despite* check 3 failing, and the reason matters — see
+"Full, not Full (strict)" below. T1b's purpose was to prove the
+environmental facts cheaply, and it did: the live URL works, and it
+surfaced one real defect in the box's cert posture that would otherwise
+have been discovered on Sunday.
 
 Routing itself is proven: the container answers correctly both directly
 and through Traefik at the origin (transcripts under check 1). Everything
@@ -27,18 +34,34 @@ against a capability T1 was never going to have.
 valid token exists. It verifies the token *before* touching anything, so
 a bad token changes nothing on the box.
 
-## The blocker — `CLOUDFLARE_DNS_API_TOKEN` on foleyflow is invalid
+## Full, not Full (strict) — why check 4 passes over a self-signed origin
 
-The token in the Traefik container's environment is rejected by Cloudflare.
-It is 53 characters, matches `^[A-Za-z0-9_-]+$`, and has no leading or
-trailing whitespace, so this is not a quoting artefact — it is dead:
+`dev-diary/PLAN.md`, `deploy/README.md` and `project.md` all state that the
+zone's SSL mode "must be Full (strict)" and that it "should already be
+correct". **It is not.** The zone is on plain **Full**:
 
 ```
-$ curl -sS https://api.cloudflare.com/client/v4/user/tokens/verify -H "Authorization: Bearer $CLOUDFLARE_DNS_API_TOKEN"
-{"success":false,"errors":[{"code":1000,"message":"Invalid API Token"}],"messages":[],"result":null}
+$ curl -sS https://api.cloudflare.com/client/v4/zones/$ZONE/settings/ssl -H "Authorization: Bearer $CF"
+{"result":{"id":"ssl","value":"full","certificate_status":"active","editable":true},"success":true}
 ```
 
-Traefik's own ACME run confirms it independently. Starting the container
+Full encrypts Cloudflare→origin but **does not validate the origin
+certificate**. That is precisely why `https://thutapi.nryn.dev/healthz`
+returns 200 while Traefik is serving a self-signed
+`CN=TRAEFIK DEFAULT CERT`. Under Full (strict) the same request would be a
+**526**.
+
+**This is a loaded gun, and it points at every site on the box.** Anyone
+who reads the plan, notices the zone is not on strict, and "corrects" it
+takes down `thutapi` *and* `serp` immediately — both are on the default
+cert — and takes down `auteur`, `eoc` and `mosaic` the moment their Let's
+Encrypt certs lapse. The zone setting is not the bug; the broken DNS-01
+token is. **Fix the token first, confirm real certs at every origin, and
+only then move the zone to strict.**
+
+## The cert blocker — Traefik's `CLOUDFLARE_DNS_API_TOKEN` cannot write DNS
+
+Traefik's own ACME run is the evidence. Starting the container
 made lego attempt issuance immediately, and it failed writing the
 challenge record:
 
@@ -62,11 +85,28 @@ fronts it. `auteur`, `eoc` and `mosaic` hold Let's Encrypt certs issued
 about three weeks ago and will fail the same way when they come up for
 renewal.
 
-**Fix:** mint a Cloudflare API token with `Zone → DNS → Edit` on the
-`nryn.dev` zone, recreate the Traefik container with it in
-`CLOUDFLARE_DNS_API_TOKEN`, then add the `thutapi` A record and re-run
-checks 2–5. This unblocks T1b and repairs renewal for the other four
-sites at the same time.
+### A correction to this round's own method
+
+An earlier draft of this file cited
+`GET /user/tokens/verify` returning `code 1000 Invalid API Token` as proof
+the Traefik token was dead. **That test was the wrong endpoint and its
+result was a false negative.** Cloudflare account-owned tokens (`cfat_`
+prefix) verify at `/accounts/{account_id}/tokens/verify`; they return
+`Invalid API Token` at the `/user/` endpoint even when perfectly healthy.
+Confirmed the same afternoon: the operator's working token fails
+`/user/tokens/verify` and passes the account endpoint, and then writes DNS
+successfully.
+
+The lego 401 above is unaffected and remains the sound evidence — it is
+Traefik failing the actual write, not a verification proxy for it. The
+conclusion stands; one of the two arguments for it did not.
+
+**Fix:** install a token with `Zone → DNS → Edit` on `nryn.dev` into the
+Traefik container's `CLOUDFLARE_DNS_API_TOKEN` and recreate it. That
+issues the origin cert for `thutapi`, repairs `serp`, and restores renewal
+for `auteur`/`eoc`/`mosaic`. It is **not** needed for the live URL, which
+already works — it is needed before the zone can safely go to Full
+(strict), and before the existing certs expire.
 
 ## Five live checks (paste each command + output below)
 
@@ -166,6 +206,21 @@ Expected: a Cloudflare-proxied answer — `104.21.x` / `172.67.x`, matching
 > orange cloud). Confirm the record is proxied at the API/dashboard, not
 > by reading `dig`.
 
+**PASS 2026-09-04.** Record created via the Cloudflare API:
+
+```
+$ curl -X POST ".../zones/$ZONE/dns_records" --data \
+    '{"type":"A","name":"thutapi.nryn.dev","content":"167.233.247.107","proxied":true,"ttl":1}'
+success: True
+  thutapi.nryn.dev -> 167.233.247.107 proxied=True id=5b4f8e6dccd94e8bb0a1c4c4aa5462e6
+
+$ dig +short thutapi.nryn.dev A @1.1.1.1
+104.21.60.113
+172.67.195.231
+```
+
+Proxied answers, matching `auteur`/`mosaic`/`eoc`/`serp` exactly.
+
 ### Check 3 — Let's Encrypt certificate issued
 
 Run this **on the box**, against the origin — not from the public internet:
@@ -177,6 +232,20 @@ ssh foleyflow "echo | openssl s_client -servername thutapi.nryn.dev -connect 127
 
 Expected: subject `CN=thutapi.nryn.dev` (or SAN containing it); issuer
 `Let's Encrypt ... R3/R10/R11`; `notAfter` in the future.
+
+**FAIL 2026-09-04.** The origin serves Traefik's built-in placeholder,
+because DNS-01 could not write the challenge record:
+
+```
+$ echo | openssl s_client -servername thutapi.nryn.dev -connect 127.0.0.1:443 2>/dev/null \
+    | openssl x509 -noout -subject -issuer
+subject=CN=TRAEFIK DEFAULT CERT
+issuer=CN=TRAEFIK DEFAULT CERT
+```
+
+Masked from the public by the Cloudflare edge cert and tolerated by the
+zone's Full (non-strict) SSL mode — see the two sections above. This is
+the one check still open, and it is infrastructure work, not Thutapi work.
 
 > **Corrected 2026-09-04.** This check previously probed
 > `thutapi.nryn.dev:443` from the public internet and expected a Let's
@@ -195,6 +264,24 @@ Expected: subject `CN=thutapi.nryn.dev` (or SAN containing it); issuer
 ```bash
 curl -fsS -i https://thutapi.nryn.dev/healthz
 ```
+
+**PASS 2026-09-04 15:29 UTC.**
+
+```
+HTTP/2 200
+content-type: application/json
+cf-cache-status: DYNAMIC
+server: cloudflare
+cf-ray: a35e07d26d497f45-MAA
+alt-svc: h3=":443"; ma=86400
+
+{"status":"ok","uptime_seconds":571,"version":"t1b-cfa8bd4"}
+```
+
+`cf-ray` and `server: cloudflare` confirm the proxy; the body confirms it
+reached the container and not an error page. This is the end-to-end fact
+T1b existed to establish, and T2/T14's "live app URL" dependency is now
+satisfied.
 
 Expected: `HTTP/2 200`, `cf-ray:` header present, body
 `{"status":"ok","uptime_seconds":...,"version":"dev"}` (version field

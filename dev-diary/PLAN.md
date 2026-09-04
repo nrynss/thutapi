@@ -64,7 +64,7 @@ required, and the first things cut.
 | --- | --- |
 | **T0** | DONE. Closed at 166a992 after 3 review rounds (zero residue; see t0-round1.md, t0-round2.md, t0-round3.md, t0-remediation-round1.md, t0-remediation-round2.md). |
 | **T1** | DONE. Closed at 65df379 — artifacts (Dockerfile, .dockerignore, deploy/docker-run.sh, deploy/README.md) committed, local smoke green, all Traefik labels byte-identical to project.md §Deployment. See dev-diary/adversarial-review/t1-round1.md. |
-| **T1b** | **Blocked on a dead Cloudflare token.** Run 2026-09-04: container deployed to foleyflow and check 1 PASSES (up on the `proxy` network, five labels byte-identical, HTTP/2 200 through Traefik at the origin with `version=t1b-cfa8bd4`). Checks 2–5 blocked: `CLOUDFLARE_DNS_API_TOKEN` in the Traefik container is invalid (`code 1000`), so DNS-01 401s and no A record can be written. Blast radius is box-wide — `serp` is already failing issuance; `auteur`/`eoc`/`mosaic` will fail at renewal. Needs a new Zone:DNS:Edit token on `nryn.dev`. Two artifact defects found and fixed (missing `--network proxy`, wrong chown uid). See t1b-round1.md. |
+| **T1b** | **Live. https://thutapi.nryn.dev/healthz returns 200 (`cf-ray` present, `version=t1b-cfa8bd4`).** Checks 1, 2 and 4 PASS; check 3 FAILS (origin serves `CN=TRAEFIK DEFAULT CERT` — Traefik's DNS-01 token 401s); check 5 moved to T3. Tolerated because the zone is on SSL `full`, not `strict` — **do not switch to strict** until the Traefik token is repaired, or every site on the box 526s. T2/T14's live-URL dependency is satisfied. Two artifact defects fixed (missing `--network proxy`, chown uid 1000→65532). See t1b-round1.md. |
 | **T2** | Not started. Response shapes verified by hand 2026-09-04 — see T2. |
 | **T3** | Not started. |
 | **T4** | Not started. |
@@ -212,6 +212,15 @@ generations plus audio. **Generation therefore cannot be a blocking POST.**
 * **SSL mode must be Full (strict).** Flexible plus Traefik's HTTPS redirect is
   an infinite redirect loop. It is zone-wide and the existing sites work, so
   this should already be correct — verify, do not assume.
+
+> **Measured 2026-09-04: the zone is on `full`, NOT `strict`.** The
+> assertion above that it "should already be correct" was wrong. Full
+> encrypts to the origin but does not validate the origin certificate,
+> which is the only reason `thutapi` and `serp` serve 200 while Traefik
+> hands out a self-signed `CN=TRAEFIK DEFAULT CERT`. **Do not switch the
+> zone to strict until the Traefik DNS-01 token is repaired and every
+> origin presents a real certificate** — flipping it first returns 526 on
+> every site on the box. See t1b-round1.md.
 * Generated media is immutable, so serve it with a long `max-age` and let the
   Cloudflare edge cache it. That is free performance for a judge.
 
@@ -271,9 +280,10 @@ curl -fsS -i https://thutapi.nryn.dev/healthz
   resolver to check).
 * Let's Encrypt rate limit if a sibling cert was issued in the last
   five minutes — retry.
-* Cloudflare SSL mode for the zone is `Full (strict)`; Flexible plus
-  Traefik's HTTPS redirect is an infinite redirect loop. Verify, do not
-  assume.
+* Cloudflare SSL mode for the zone is **`full`, not `strict`** (measured
+  2026-09-04). Flexible plus Traefik's HTTPS redirect is an infinite
+  redirect loop, so `full` is safe; `strict` is not, until every origin
+  has a real cert. Do not "fix" this setting — see t1b-round1.md.
 * If `curl /healthz` returns 524, Cloudflare's 100s proxy timeout
   fired — but `/healthz` is sub-second, so the cause is upstream
   (Traefik not picking the container; check labels and Traefik logs).

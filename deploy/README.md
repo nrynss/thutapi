@@ -116,9 +116,18 @@ A single record, **proxied** through Cloudflare (matching `auteur`,
 |---|---|---|---|
 | A | `thutapi.nryn.dev` | `167.233.247.107` | Proxied |
 
-SSL mode on the zone is **Full (strict)** — Flexible plus Traefik's HTTPS
-redirect is an infinite redirect loop. This is zone-wide and the existing
-sites work, so it should already be correct; verify before going live.
+SSL mode on the zone is **`full`, not `strict`** — measured 2026-09-04,
+`GET /zones/$ZONE/settings/ssl` returns `"value":"full"`. Flexible plus
+Traefik's HTTPS redirect is an infinite redirect loop, so `full` is the
+safe setting here.
+
+**Do not "upgrade" this to Full (strict).** Full encrypts to the origin
+without validating the origin certificate, and that is currently
+load-bearing: `thutapi` and `serp` both serve Traefik's self-signed
+`CN=TRAEFIK DEFAULT CERT` because DNS-01 issuance is failing. Under strict
+they would return 526 immediately, and `auteur`/`eoc`/`mosaic` would
+follow as their certs lapse. Repair the Traefik `CLOUDFLARE_DNS_API_TOKEN`
+first, confirm a real cert at every origin, and only then consider strict.
 
 ### Certificates — DNS-01, and two certs not one
 
