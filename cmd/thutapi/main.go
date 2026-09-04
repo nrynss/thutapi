@@ -18,8 +18,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
+
+	"thutapi/internal/mediastore"
+	"thutapi/internal/store"
 )
 
 // version is stamped at link time via -X main.version=<v>. Default "dev"
@@ -39,8 +43,10 @@ var errShutdownTimeout = errors.New("shutdown-timeout must be greater than 0")
 var errUnexpectedOperand = errors.New("unexpected positional argument")
 
 // config holds the runtime configuration. T0 reads ADDR / PORT, the
-// shutdown-timeout flag, and the IdleTimeout knob; later tracks will
-// extend this struct and the parseFlags surface, not replace it.
+// shutdown-timeout flag, and the IdleTimeout knob; T3 adds the data
+// dir (DATA_DIR or -data-dir) the SQLite file and the media blobs
+// live under. Later tracks extend this struct and the parseFlags
+// surface, they do not replace it.
 //
 // ReadTimeout and WriteTimeout are deliberately not part of config — they
 // are derived in newHTTPServer from the graceful-shutdown deadline so a
@@ -53,6 +59,7 @@ type config struct {
 	addr        string        // bind address, e.g. "0.0.0.0:8080"
 	timeout     time.Duration // graceful shutdown deadline
 	idleTimeout time.Duration // http.Server.IdleTimeout
+	dataDir     string        // SQLite file + media blobs live here (T3)
 }
 
 // resolveAddr is the ADDR/PORT resolution: ADDR wins if set, else
@@ -67,6 +74,16 @@ func resolveAddr() string {
 	return "0.0.0.0:8080"
 }
 
+// resolveDataDir is the DATA_DIR resolution, mirroring resolveAddr:
+// DATA_DIR wins if set, else "data" — the gitignored directory at the
+// working-directory root (T3).
+func resolveDataDir() string {
+	if v := os.Getenv("DATA_DIR"); v != "" {
+		return v
+	}
+	return "data"
+}
+
 // parseConfig reads environment only — no flags. It is the seam tests use so
 // they don't re-register flag entries across invocations.
 func parseConfig() config {
@@ -74,6 +91,7 @@ func parseConfig() config {
 		addr:        resolveAddr(),
 		timeout:     10 * time.Second,
 		idleTimeout: 120 * time.Second,
+		dataDir:     resolveDataDir(),
 	}
 }
 
@@ -83,6 +101,7 @@ func parseFlags(args []string) (config, error) {
 	cfg := parseConfig()
 	fs := flag.NewFlagSet("thutapi", flag.ContinueOnError)
 	fs.DurationVar(&cfg.timeout, "shutdown-timeout", cfg.timeout, "graceful shutdown deadline")
+	fs.StringVar(&cfg.dataDir, "data-dir", cfg.dataDir, "directory for the SQLite database and media blobs")
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
 	}
@@ -103,18 +122,26 @@ func parseFlags(args []string) (config, error) {
 }
 
 // server is the application's HTTP root. It owns the routes and the
-// dependencies they need. T0 wires a single handler: GET /healthz.
+// dependencies they need: GET /healthz (T0) and the media handler
+// (T3).
 type server struct {
 	mux   *http.ServeMux
 	log   *slog.Logger
 	start time.Time
+	media *mediastore.Store
 }
 
-func newServer(log *slog.Logger) *server {
-	s := &server{mux: http.NewServeMux(), log: log, start: time.Now()}
+// newServer wires the routes. media must be non-nil: it is the
+// /media/ handler, not an optional dependency.
+func newServer(log *slog.Logger, media *mediastore.Store) *server {
+	s := &server{mux: http.NewServeMux(), log: log, start: time.Now(), media: media}
 	// /healthz is the one route T0 ships. Liveness only — no dependency
 	// checks, no probes. That distinction belongs to a later track.
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
+	// T3's one sanctioned route line (PLAN.md invariant 5): media
+	// blobs serve through the mediastore handler, which answers Range
+	// requests so narration can be scrubbed (PLAN.md §T3).
+	s.mux.Handle("GET /media/{id}", s.media)
 	return s
 }
 
@@ -196,7 +223,25 @@ func run(log *slog.Logger, args []string, sigs <-chan os.Signal) error {
 		return err
 	}
 
-	srvHTTP := newHTTPServer(cfg, newServer(log))
+	// T3: the book store and the media blobs both live under the data
+	// dir, so a container restart — same volume, fresh process —
+	// reopens everything where it was left (PLAN.md §T3 Done when).
+	db, err := store.Open(context.Background(), store.Config{
+		Path: filepath.Join(cfg.dataDir, "thutapi.db"),
+	})
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer db.Close() // run returns only at shutdown; nothing outlives it
+	media, err := mediastore.Open(context.Background(), mediastore.Config{
+		Dir: filepath.Join(cfg.dataDir, "media"),
+		DB:  db,
+	})
+	if err != nil {
+		return fmt.Errorf("open media store: %w", err)
+	}
+
+	srvHTTP := newHTTPServer(cfg, newServer(log, media))
 
 	errCh := make(chan error, 1)
 	go func() {

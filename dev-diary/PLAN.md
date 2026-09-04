@@ -67,7 +67,8 @@ required, and the first things cut.
 | **T1b** | DONE. Closed at 52b2cd2 — checks 1, 2, 3, 4 pass against https://thutapi.nryn.dev/healthz (cf-ray present, Let's Encrypt origin cert via DNS-01, all five Traefik labels byte-identical). Check 5 moved to T3 (re-scoped: T1 binary has no static-file route). Run also repaired Traefik's CLOUDFLARE_DNS_API_TOKEN — restored cert renewal for the whole box (thutapi, serp, auteur, eoc, mosaic). Full infrastructure record (incident, resolution, token-replacement procedure) is in `~/work/hetzner/docs/foleyflow-server.md` §5, deliberately kept out of this repo. |
 | **T2** | DONE. Closed after a round-3 re-open: round 3 re-reviewed the whole `Done when` (rounds 1–2 had been scoped to round-1 residue plus a diff audit and were correct within that scope) and found **2 × H, 4 × M, 5 × L** — `EditImage` defaulting to the struck-through `Qwen-Image-2512` (would silently break T6's character lock), the `Retry:` contract unimplemented while `errors.go` claimed it, every-unclassified-4xx-`ErrTransient`, `GenerateImage` sharing the same bad default, the raw-bytes/no-live-test `Done when` gap, CI gofmt blind to `internal/`, and five L polish items. Remediation round 3 fixed all eleven; round 4 found **2 × M, 2 × L** (three coverage-floor statements disagreeing, an unrecorded AGENTS.md hunk, `&Reasoning{}` leaking `thinking:{"type":""}` on the wire, `ErrModelNotFound` docstring implying message matching); remediation round 4 fixed those. **Round 5: APPROVE 0/0/0/0, zero residue against rounds 1–4** (t2-round3/4/5.md, t2-remediation-round3/4.md). Defaults: `GenerateImage` → `Flux2-Klein` (§3 Start-on), `EditImage` rejects an empty model; retry contract implemented in both clients (one retry on `ErrTransient` only, request-queue `failed` included, never 4xx, default per-call deadline); catch-all 4xx → `ErrBadRequest`, 402 → `ErrPaymentRequired`; two-tier coverage floor (75% per package, 85% for `internal/gmi/*`). Live-endpoint half lives in **T2b**. |
 | **T2b** | Not started. Operator track on the T1/T1b precedent: it owns the live probes of both GMI endpoints (the half of T2's original Done when no agent on this workstation can run — the operator key is rejected by both providers). Runs once a working key exists; see §T2. |
-| **T3** | Not started. |
+| **T3** | DONE. Round 1 (t3-round1.md): REMEDIATE 0C/1H/1M/1L — `mediastore.ErrNotFound` documented but returned by no code path, media unbound to pages/cast with no listing queries (T6/T8/T10 unanswerable), five untested error branches. Remediation round 1 fixed all three (kind + page/cast anchor columns with composite FKs and partial unique indexes, `SetMediaPlace`/`BookMedia`/`PageMedia`/`CastMedia`, five branch pins, sentinel contract table). **Round 2: APPROVE 0/0/0/0, zero residue** (t3-round2.md). Restart-survival Done when pinned end to end incl. 206 Range after reopen; live smoke: cross-process WAL write, Range slice byte-exact. |
+| **T3b** | In progress — started 2026-09-05 on the operator's overnight go-ahead (sign-off recorded in §Unowned seams). See §T3b. |
 | **T4** | Not started. |
 | **T5** | Not started. |
 | **T6** | Not started. |
@@ -137,9 +138,9 @@ Things the task graph assumes exist, that no track's `Owns` line covers.
 
 | Seam | Assumed by | Status |
 | --- | --- | --- |
-| **SSE broker** (`internal/stream`) | §T4 *"Turns stream over the T1 SSE channel"*, T9, T10, and invariant 6 — i.e. the entire non-blocking architecture | **Unowned.** T1 shipped deployment artifacts and a `/healthz`; no SSE code exists anywhere in the tree, so "the T1 SSE channel" refers to something that was never built. project.md §Lift from Mosaic names `internal/stream/broker.go` (223 lines) as directly reusable. **Proposed as T3b**, parallel with T3 and blocking T4 — needs sign-off before T4 starts. |
-| **Job orchestration** (start → job id → progress events → result) | T4, T5, T6, T8, and every SSE consumer | **Unowned.** Invariant 6 describes the shape but no track builds the runner. Natural home is T3b alongside the broker, or a thin `internal/job` T3 owns. |
-| **Request-queue polling** | T6, T8 | **Unowned.** See invariant 4. Cheapest fix is to fold it into T2's remediation scope; otherwise it lands twice. |
+| **SSE broker** (`internal/stream`) | §T4 *"Turns stream over the T1 SSE channel"*, T9, T10, and invariant 6 — i.e. the entire non-blocking architecture | **Assigned: T3b** (was "proposed, needs sign-off"; the operator's 2026-09-05 overnight go-ahead on the task graph is the recorded sign-off). project.md §Lift from Mosaic names `internal/stream/broker.go` (223 lines) as directly reusable. |
+| **Job orchestration** (start → job id → progress events → result) | T4, T5, T6, T8, and every SSE consumer | **Assigned: T3b** as `internal/job`, alongside the broker. |
+| **Request-queue polling** | T6, T8 | **Assigned: T3b** — built inside `internal/gmi/media` per invariant 4, so it lands once. |
 | **`internal/web`** (shell template, book template) | T9, T10 | Now named in T9's and T10's `Owns`. Previously implied by AGENTS.md's file layout and by nothing else. |
 
 
@@ -422,7 +423,7 @@ a 4xx. Every call carries a context deadline.
 
 ---
 
-## T3 — Store and media
+## T3 — Store and media  *(DONE — closed at round 2, see t3-round2.md)*
 
 **Owns:** `internal/store/**`, `internal/mediastore/**`, plus the `/media/` route line in `newServer`.
 
@@ -441,6 +442,44 @@ media still serves.
   being enumerable.
 
 ---
+
+## T3b — SSE broker, job runner, request-queue polling
+
+**Owns:** `internal/stream/**`, `internal/job/**`, and the polling addition
+inside `internal/gmi/media` (invariant 4's mandated home — one polling layer,
+not one per consumer).
+
+**Depends on:** T3. **Unblocks:** T4, T5, T6, T8, T9, T10 — the entire
+non-blocking architecture (invariant 6: nothing blocks longer than 100
+seconds).
+
+Three seams the task graph assumed and nothing built (see §Unowned seams):
+
+* **SSE broker** (`internal/stream`). Per project.md §Lift from Mosaic:
+  subscribe/publish by topic, `: ping` heartbeat every 15s, correct SSE
+  headers (`text/event-stream`, `Cache-Control: no-cache`,
+  `X-Accel-Buffering: no`), flush per event, and detect client disconnect so
+  topics don't leak writers.
+* **Job runner** (`internal/job`). Start returns a job id immediately;
+  progress events flow to the broker topic; the final result lands in the
+  store (T3) so a page reload can catch up. The runner owns the goroutine and
+  its exit path (AGENTS.md §Concurrency).
+* **Request-queue polling** (in `internal/gmi/media`). The POST returns
+  `{request_id, status}`; poll `queued`/`processing` to `completed` and hand
+  back raw bytes; a `failed` terminal status surfaces through the existing
+  `ErrTransient` classification (one internal retry already implemented by
+  T2) and the whole poll respects the per-call context deadline.
+
+**Done when:** an httptest SSE client
+subscribes, a fake long job started through `internal/job` streams progress
+events and a terminal event, the heartbeat is observed between events, a
+second subscriber joining mid-job catches up from the store, and the polling
+layer drives a fake request queue through `queued` → `processing` →
+`completed` (plus `failed` → `ErrTransient` and a context deadline cutting the
+poll short).
+
+---
+
 
 ## T4 — The interview (Phase A)
 

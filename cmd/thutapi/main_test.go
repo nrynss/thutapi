@@ -11,16 +11,37 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"thutapi/internal/mediastore"
+	"thutapi/internal/store"
 )
 
+// newTestServer builds the server with a real store and media store
+// under a throwaway directory — /media/ is a live route, so the
+// handler behind it must exist.
 func newTestServer(t *testing.T) *server {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return newServer(log)
+	db, err := store.Open(t.Context(), store.Config{
+		Path: filepath.Join(t.TempDir(), "thutapi.db"),
+	})
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	media, err := mediastore.Open(t.Context(), mediastore.Config{
+		Dir: filepath.Join(t.TempDir(), "media"),
+		DB:  db,
+	})
+	if err != nil {
+		t.Fatalf("open media store: %v", err)
+	}
+	return newServer(log, media)
 }
 
 func TestHealthzReturnsOK(t *testing.T) {
@@ -71,12 +92,24 @@ func TestHealthzRejectsNonGET(t *testing.T) {
 func TestParseConfigDefaults(t *testing.T) {
 	t.Setenv("ADDR", "")
 	t.Setenv("PORT", "")
+	t.Setenv("DATA_DIR", "")
 	cfg := parseConfig()
 	if cfg.addr != "0.0.0.0:8080" {
 		t.Fatalf("addr = %q, want 0.0.0.0:8080", cfg.addr)
 	}
 	if cfg.timeout != 10*time.Second {
 		t.Fatalf("timeout = %v, want 10s", cfg.timeout)
+	}
+	if cfg.dataDir != "data" {
+		t.Fatalf("dataDir = %q, want data (the gitignored default)", cfg.dataDir)
+	}
+}
+
+func TestParseConfigDataDirEnv(t *testing.T) {
+	t.Setenv("DATA_DIR", "/var/lib/thutapi")
+	cfg := parseConfig()
+	if cfg.dataDir != "/var/lib/thutapi" {
+		t.Fatalf("dataDir = %q, want /var/lib/thutapi (DATA_DIR wins)", cfg.dataDir)
 	}
 }
 
@@ -129,12 +162,46 @@ func TestParseFlagsBadFlagReturnsError(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------
-// H1 (re-opened in round 2) — Pin: TestShutdownDeadlineIsHonouredAgainstSlowBody
-//
-// The H1 defect: a request accepted just before SIGTERM can keep its body
-// open past the graceful-shutdown deadline. If the http.Server's ReadTimeout
-// outlives cfg.timeout, srv.Shutdown returns context.DeadlineExceeded, the
+func TestParseFlagsDataDirFlag(t *testing.T) {
+	t.Setenv("DATA_DIR", "")
+	cfg, err := parseFlags([]string{"-data-dir=/tmp/books"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if cfg.dataDir != "/tmp/books" {
+		t.Fatalf("dataDir = %q, want /tmp/books", cfg.dataDir)
+	}
+}
+
+// TestMediaRouteServesThroughMux pins the one sanctioned route line
+// (PLAN.md invariant 5): /media/{id} reaches the mediastore handler,
+// where an unknown id is a 404 and a non-GET method is rejected by
+// the mux.
+func TestMediaRouteServesThroughMux(t *testing.T) {
+	srv := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/media/00000000000000000000000000000000", nil)
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	if got, want := rr.Code, http.StatusNotFound; got != want {
+		t.Fatalf("GET unknown media id: status = %d, want %d", got, want)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/media/not-an-id", nil)
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	if got, want := rr.Code, http.StatusNotFound; got != want {
+		t.Fatalf("GET malformed media id: status = %d, want %d", got, want)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/media/00000000000000000000000000000000", nil)
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	if got, want := rr.Code, http.StatusMethodNotAllowed; got != want {
+		t.Fatalf("POST media id: status = %d, want %d", got, want)
+	}
+}
+
 // process logs "graceful shutdown failed" and exits 1 — which the Hetzner
 // Traefik orchestrator treats as unhealthy and restart-loops on SIGTERM
 // during deploy.
@@ -416,8 +483,12 @@ func TestShutdownLogRecordsSignalName(t *testing.T) {
 	// sends a value.
 	sigs := make(chan os.Signal, 1)
 
+	// run() now opens the store (T3); point it at a throwaway dir so
+	// the test never touches the repo's data/.
+	dataDir := t.TempDir()
+
 	done := make(chan error, 1)
-	go func() { done <- run(log, nil, sigs) }()
+	go func() { done <- run(log, []string{"-data-dir=" + dataDir}, sigs) }()
 
 	// Give run() a moment to enter its select, then send SIGTERM.
 	time.Sleep(20 * time.Millisecond)
