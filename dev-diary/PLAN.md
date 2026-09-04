@@ -63,7 +63,8 @@ required, and the first things cut.
 | ID | Status |
 | --- | --- |
 | **T0** | DONE. Closed at 166a992 after 3 review rounds (zero residue; see t0-round1.md, t0-round2.md, t0-round3.md, t0-remediation-round1.md, t0-remediation-round2.md). |
-| **T1** | Implementation complete, local smoke green. Live verification (DNS A record + foleyflow deploy + curl) requires operator with box access; round-1 review at commit 294439d recorded 1 C + 3 L; C1 awaiting operator. See dev-diary/adversarial-review/t1-round1.md. |
+| **T1** | DONE. Closed at 65df379 — artifacts (Dockerfile, .dockerignore, deploy/docker-run.sh, deploy/README.md) committed, local smoke green, all Traefik labels byte-identical to project.md §Deployment. See dev-diary/adversarial-review/t1-round1.md. |
+| **T1b** | Blocked. Live deployment verification — DNS A record + foleyflow deploy + curl. Cannot be done from this workstation; needs operator with DNS + SSH access. See T1b section below. |
 | **T2** | Not started. Response shapes verified by hand 2026-09-04 — see T2. |
 | **T3** | Not started. |
 | **T4** | Not started. |
@@ -155,13 +156,23 @@ Conventions set here that every later track follows:
 
 ---
 
-## T1 — The deployment path, end to end, before there is anything to deploy  *(Implementation complete, local smoke green — awaiting operator for live verification)*
+## T1 — The deployment artifacts  *(Implementation complete, local smoke green — T1b holds the live verification)*
 
 Ship the T0 skeleton to `thutapi.nryn.dev` and prove every environmental fact
 while they are cheap to fix.
 
-**Depends on:** T0. **Done when:** all five checks below pass against the live
-URL.
+**Depends on:** T0. **Done when:** the Dockerfile, `.dockerignore`,
+`deploy/docker-run.sh`, and `deploy/README.md` are committed; a local
+`docker build -t thutapi:local . && docker run --rm -p 18080:8080 -e
+PORT=8080 thutapi:local` succeeds; `curl http://127.0.0.1:18080/healthz`
+returns 200 JSON with the version field; `docker ps` shows no dangling
+container after smoke; `go vet ./...`, `go test ./... -race`, and
+`gofmt -l cmd/thutapi/` are clean; and the five Traefik labels in
+`deploy/docker-run.sh` are byte-identical to project.md §Deployment.
+T1 covers the artifacts; **T1b owns the live deploy probe** (the five
+live URL checks against `thutapi.nryn.dev`) because that work needs
+operator access to foleyflow and the nryn.dev DNS zone that no agent
+on this workstation holds.
 
 1. **Traefik picks it up.** Container started with the five labels:
    ```
@@ -201,8 +212,69 @@ generations plus audio. **Generation therefore cannot be a blocking POST.**
   Cloudflare edge cache it. That is free performance for a judge.
 
 ---
+## T1b — Live deployment verification (operator-dependent)
 
-## T2 — GMI clients
+**Status:** Blocked. No agent on this workstation holds DNS credentials
+for `nryn.dev` or SSH access to `foleyflow`. The round-1 review
+(`dev-diary/adversarial-review/t1-round1.md`, C1) explicitly requires
+both: the A record on the Cloudflare zone and the container run on
+the Hetzner box. The artifacts (Dockerfile, deploy scripts, labels,
+README) are sound; the live path needs an operator.
+
+**Depends on:** T1 (artifacts). **Unblocks:** T2 (GMI clients),
+T13 (voice clone, check 5), T14 (submission requirement: "Live app URL
+on the Hetzner container").
+
+**Done when:** all five checks from the original T1 done-when pass
+against `https://thutapi.nryn.dev/healthz`:
+
+1. Traefik on `foleyflow` picks up the container with the five labels.
+2. DNS A record `thutapi.nryn.dev` → `167.233.247.107`, proxied
+   (matching `auteur`/`mosaic`/`eoc`/`serp`).
+3. Let's Encrypt HTTP-01 resolves through the proxy.
+4. `curl https://thutapi.nryn.dev/healthz` returns 200 JSON with
+   `cf-ray` present.
+5. A dummy MP3 at a signed path is fetchable by a third party
+   (proves the `source_audio` mechanism Speech 2.8 needs at T14).
+
+**Operator runbook:**
+
+```bash
+# On workstation, push the image the artifacts ship:
+docker build -t thutapi:local .
+docker save thutapi:local | ssh foleyflow 'docker load'
+
+# On foleyflow (via SSH), prepare the data dir and run the deploy:
+ssh foleyflow
+sudo mkdir -p /srv/thutapi/data
+sudo chown 1000:1000 /srv/thutapi/data      # match container nonroot UID
+export GMI_API_KEY='<from operator vault>'
+/srv/thutapi/deploy/docker-run.sh           # uses Traefik labels from project.md
+
+# Verify:
+curl -fsS -i https://thutapi.nryn.dev/healthz
+# Expect: HTTP/2 200, cf-ray header, body {"status":"ok","version":"dev",...}
+```
+
+**Failure modes the operator should expect and the work needed:**
+
+* DNS not propagated yet (Cloudflare adds the record on the operator's
+  side; nryn.dev is on Cloudflare nameservers, so 1.1.1.1 is the right
+  resolver to check).
+* Let's Encrypt rate limit if a sibling cert was issued in the last
+  five minutes — retry.
+* Cloudflare SSL mode for the zone is `Full (strict)`; Flexible plus
+  Traefik's HTTPS redirect is an infinite redirect loop. Verify, do not
+  assume.
+* If `curl /healthz` returns 524, Cloudflare's 100s proxy timeout
+  fired — but `/healthz` is sub-second, so the cause is upstream
+  (Traefik not picking the container; check labels and Traefik logs).
+
+**When done:** paste the five transcripts (or a single one with all
+five signal-bearing lines) into `dev-diary/adversarial-review/t1b-round1.md`,
+mark T1b status DONE in the table above, and the chain to T2/T13/T14
+opens. Until then T1b stays `Blocked`.
+
 
 Two clients, because GMI has two APIs with different shapes.
 
@@ -500,8 +572,8 @@ character consistency (T6 — without it there is no book).
 | 7 | Image provider: `$0.01` tier or `gemini-2.5-flash-image` | T6 | Cheap. One-line switch by design; decide from the first reference sheet. |
 | 8 | Page count: 6 or 8 | T5, T6 | Cheap early, annoying after the flipbook is laid out. |
 | 9 | Gate mechanism: passcode or per-IP cap | T11 | Cheap, but it must exist before the URL is public. |
-| 10 | Ask GMI Discord for the deadline timezone | T14 | Free to ask, 15 hours to get wrong. Ask today. |
-
+| 11 | T1 artifacts vs T1b live verification — split T1 into artifact-only close + operator-dependent T1b (DNS + foleyflow SSH). | T13, T14 | Done 2026-09-04 — T1 closed at 65df379, T1b unblocks operator run; without the split T2-T13 all blocked on operator work. |
+| 12 | Operator runbook for T1b (DNS record, `docker run` on foleyflow, five live checks, transcript placeholders). | T1b | Free if operator can find the runbook; 15+ hours of clock if not. |
 Decision 7 is deliberately deferred to evidence rather than argued now: the
 spread across the whole image catalog is about 23 cents a book, so the only
 input that matters is whether the cast holds, which is not knowable until a
