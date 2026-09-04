@@ -1,5 +1,7 @@
 # T0 round 2 — remediation
 
+> **Round boundaries in this file:** the `## Rows` section closes round-2 findings (H1 re-opened, L2 new) at commit `80ebe3e`. The `## Follow-up rows` section is the H1-floor follow-up at `c9e25b6` and `521d4ef` — a round-2 follow-up, not a separate round. The `## Round 3 follow-up` section is round-3 work (L1 gofmt, L2 stale comment) at `166a992`, kept in this file because no further remediation is expected for T0. The round-3 review itself is at `dev-diary/adversarial-review/t0-round3.md`.
+
 | | |
 |---|---|
 | **Target** | Two open findings from `t0-round2.md` at the start of remediation: H1 (re-opened) and L2 (new). H2, H3, M2, and L1 were closed at `5a7e7169802951e6e05fae29d5bf783366beb2b1`; M1 was waived in-session; the round-2 reviewer's re-probe was the only outstanding work. |
