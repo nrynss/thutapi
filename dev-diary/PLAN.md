@@ -65,7 +65,8 @@ required, and the first things cut.
 | **T0** | DONE. Closed at 166a992 after 3 review rounds (zero residue; see t0-round1.md, t0-round2.md, t0-round3.md, t0-remediation-round1.md, t0-remediation-round2.md). |
 | **T1** | DONE. Closed at 65df379 — artifacts (Dockerfile, .dockerignore, deploy/docker-run.sh, deploy/README.md) committed, local smoke green, all Traefik labels byte-identical to project.md §Deployment. See dev-diary/adversarial-review/t1-round1.md. |
 | **T1b** | DONE. Closed at 52b2cd2 — checks 1, 2, 3, 4 pass against https://thutapi.nryn.dev/healthz (cf-ray present, Let's Encrypt origin cert via DNS-01, all five Traefik labels byte-identical). Check 5 moved to T3 (re-scoped: T1 binary has no static-file route). Run also repaired Traefik's CLOUDFLARE_DNS_API_TOKEN — restored cert renewal for the whole box (thutapi, serp, auteur, eoc, mosaic). Full infrastructure record (incident, resolution, token-replacement procedure) is in `~/work/hetzner/docs/foleyflow-server.md` §5, deliberately kept out of this repo. |
-| **T2** | **REMEDIATE — reopened 2026-09-04 at round 3.** Was DONE at `a209226`; that close is withdrawn. Round 3 re-reviewed T2 against the whole of its `Done when` (rounds 1–2 scoped to round-1 residue plus a diff audit, and were correct within that scope) and found **2 × H, 4 × M, 5 × L**. The H's: `EditImage` defaults to `Qwen-Image-2512`, which project.md:197 strikes out as t2i-only and unable to take the reference image — it silently breaks the character lock T6 depends on; and the `Retry:` contract below is unimplemented while `internal/gmi/errors.go:48` tells callers one internal retry exists. Prior rounds missed both because every media test passes an explicit model id, so the `model == ""` default path is never executed. Round-1 M1/L1 residue re-checked and still zero. Next step: `t2-remediation-round3.md`, then round 4. Operator-side blocker unchanged: the bearer key in `apikey.txt` is rejected by both providers (shape `sk-or-v1-…` looks OpenRouter, not GMI); replace before T6/T8 live-call gates. See dev-diary/adversarial-review/t2-round3.md. |
+| **T2** | DONE. Closed after a round-3 re-open: round 3 re-reviewed the whole `Done when` (rounds 1–2 had been scoped to round-1 residue plus a diff audit and were correct within that scope) and found **2 × H, 4 × M, 5 × L** — `EditImage` defaulting to the struck-through `Qwen-Image-2512` (would silently break T6's character lock), the `Retry:` contract unimplemented while `errors.go` claimed it, every-unclassified-4xx-`ErrTransient`, `GenerateImage` sharing the same bad default, the raw-bytes/no-live-test `Done when` gap, CI gofmt blind to `internal/`, and five L polish items. Remediation round 3 fixed all eleven; round 4 found **2 × M, 2 × L** (three coverage-floor statements disagreeing, an unrecorded AGENTS.md hunk, `&Reasoning{}` leaking `thinking:{"type":""}` on the wire, `ErrModelNotFound` docstring implying message matching); remediation round 4 fixed those. **Round 5: APPROVE 0/0/0/0, zero residue against rounds 1–4** (t2-round3/4/5.md, t2-remediation-round3/4.md). Defaults: `GenerateImage` → `Flux2-Klein` (§3 Start-on), `EditImage` rejects an empty model; retry contract implemented in both clients (one retry on `ErrTransient` only, request-queue `failed` included, never 4xx, default per-call deadline); catch-all 4xx → `ErrBadRequest`, 402 → `ErrPaymentRequired`; two-tier coverage floor (75% per package, 85% for `internal/gmi/*`). Live-endpoint half lives in **T2b**. |
+| **T2b** | Not started. Operator track on the T1/T1b precedent: it owns the live probes of both GMI endpoints (the half of T2's original Done when no agent on this workstation can run — the operator key is rejected by both providers). Runs once a working key exists; see §T2. |
 | **T3** | Not started. |
 | **T4** | Not started. |
 | **T5** | Not started. |
@@ -377,14 +378,25 @@ opens. Until then T1b stays `Blocked`.
 
 ---
 
-## T2 — GMI clients  *(REMEDIATE — reopened at round 3, see t2-round3.md)*
+## T2 — GMI clients  *(DONE — closed at round 5, see t2-round5.md; live half in T2b)*
 
 **Owns:** `internal/gmi/**` (`errors.go`, `text/`, `media/`).
 
 Two clients, because GMI has two APIs with different shapes.
 
-**Depends on:** T1. **Done when:** an integration test hits both endpoints live
-and unmarshals into typed structs.
+**Depends on:** T1. **Done when:** both endpoints are exercised end to end by
+the httptest suite at the raw-wire level — the `{model, payload}` envelope,
+bearer auth, the `MiniMaxAI/` prefix pin, the `need_volumn_normalization`
+typo pin, and the retry contract below — and responses are handed to callers
+as **raw bytes**. Typed response shapes were dropped **deliberately**
+(amended 2026-09-04 at round 3, t2-round3.md M3): the request-queue API
+returns a different result schema per model and GMI has not published them
+all, so inside the two-day window a typed struct would be a fabrication; the
+decode belongs to T6 and T8, where the model — and therefore the schema — is
+known. The live half of the original criterion is **T2b**, an operator track
+on the T1/T1b precedent: it owns the live probes of both endpoints and runs
+once a working key exists, keeping this criterion mechanically checkable
+from a clean tree.
 
 | | Text | Audio / image / video |
 | --- | --- | --- |

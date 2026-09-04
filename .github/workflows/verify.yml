@@ -49,22 +49,31 @@ jobs:
       # PACKAGE; it does not catch an untested DECISION (T2 shipped the wrong
       # model constant at 85.1%, because no test exercised the default path).
       # The per-track rules in AGENTS.md are what catch those.
+      #
+      # Two-tier per AGENTS.md item 7 and t2-round3.md M4: the remediated
+      # internal/gmi packages are held to 85% (both clear it honestly:
+      # media 95.1%, text 90.2% at the round-3 remediation); every other
+      # package stays at 75% -- cmd/thutapi is outside T2's seam and rises
+      # only when the track that owns it raises it.
       - name: coverage floor
         env:
           MIN: '75.0'
+          GMI_MIN: '85.0'
         run: |
-          awk -v min="$MIN" '
+          awk -v min="$MIN" -v gmiMin="$GMI_MIN" '
             /\[no test files\]/ { print "warn " $2 ": no test files"; next }
             /coverage:/ {
               pct = ""
               for (i = 1; i <= NF; i++) if ($i == "coverage:") { pct = $(i+1); break }
               if (pct == "") next
               sub("%", "", pct)
-              if (pct + 0 < min + 0) { printf "FAIL %s: %s%% < %s%%\n", $2, pct, min; bad = 1 }
+              floor = min
+              if ($2 ~ /^thutapi\/internal\/gmi\//) floor = gmiMin
+              if (pct + 0 < floor + 0) { printf "FAIL %s: %s%% < %s%%\n", $2, pct, floor; bad = 1 }
               else printf "ok   %s: %s%%\n", $2, pct
             }
             END {
-              if (bad) { print "Coverage floor is " min "% per package (AGENTS.md)."; exit 1 }
+              if (bad) { print "Coverage floor is " min "% per package (" gmiMin "% for internal/gmi) per AGENTS.md."; exit 1 }
             }
           ' test.out
 

@@ -9,7 +9,7 @@ in [`dev-diary/adversarial-review/README.md`](dev-diary/adversarial-review/READM
 ## Process — implement → review → remediate → re-review → APPROVE
 
 Every track runs through this loop until **APPROVE** with **zero findings
-(0/0/0)** across all severities. There are no exceptions.
+(0/0/0/0)** across all severities. There are no exceptions.
 
 1. **Implement.** Edit only paths listed in the track's `Owns` section of
    `dev-diary/PLAN.md`. Stay inside the seam.
@@ -57,7 +57,7 @@ nobody re-opened the full `Done when`, and two H-severity defects sat behind an
 APPROVE for a day (`adversarial-review/t2-round3.md`).
 
 **The cycle does not end early.** implement → review → remediate → review →
-… → **APPROVE with 0/0/0 and an explicit zero-residue claim against every
+… → **APPROVE with 0/0/0/0 and an explicit zero-residue claim against every
 prior round**. A verdict of REMEDIATE always costs another full round; there is
 no "fixed it, close it out" path.
 
@@ -232,8 +232,8 @@ So, per track:
    If it says "an integration test does X", such a test exists and runs. If the
    check can only be performed by an operator, it goes in a `b`-suffixed track
    (the T1/T1b split is the precedent), not in prose.
-7. **Coverage floor: 75% of statements per package**, enforced in
-   `verify.yml`. It rises to 85% once T2's round-3 remediation lands. The floor
+7. **Coverage floor: 75% of statements per package, 85% for
+   `thutapi/internal/gmi/*`**, enforced in `verify.yml`. The floor
    exists to catch an untested *package*; rules 1–4 are what catch an untested
    *decision*.
 
@@ -254,7 +254,8 @@ So, per track:
 ## CI and images
 
 * **`verify.yml` runs on code pushes and PRs** — `go vet ./...`,
-  `go test ./... -race -cover`, a **75%-per-package coverage floor**,
+  `go test ./... -race -cover`, a **two-tier coverage floor** (75% per
+  package, 85% for `thutapi/internal/gmi/*`),
   **`gofmt -l .` across the whole tree**, and `bash -n` on the deploy script.
   It ignores doc-only changes; the dev-diary moves far more often than the code
   and a green tick on prose is noise.

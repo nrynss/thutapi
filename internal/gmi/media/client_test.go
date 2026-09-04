@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"thutapi/internal/gmi"
 )
@@ -38,6 +40,7 @@ type captured struct {
 	path        string
 	auth        string
 	contentType string
+	accept      string
 	envelope    envelope
 }
 
@@ -51,6 +54,7 @@ func fakeServer(t *testing.T, responseBody string, status int) (*httptest.Server
 		c.path = r.URL.Path
 		c.auth = r.Header.Get("Authorization")
 		c.contentType = r.Header.Get("Content-Type")
+		c.accept = r.Header.Get("Accept")
 		raw, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Errorf("read body: %v", err)
@@ -99,6 +103,9 @@ func TestGenerateImage(t *testing.T) {
 	if !strings.HasPrefix(got.contentType, "application/json") {
 		t.Errorf("Content-Type = %q, want application/json prefix", got.contentType)
 	}
+	if got.accept != "application/json" {
+		t.Errorf("Accept = %q, want application/json on the image endpoints", got.accept)
+	}
 	if got.envelope.Model != "Z-Image-Turbo" {
 		t.Errorf("envelope.model = %q, want Z-Image-Turbo", got.envelope.Model)
 	}
@@ -129,6 +136,9 @@ func TestEditImage(t *testing.T) {
 
 	if got.envelope.Model != "Flux2-Klein" {
 		t.Errorf("envelope.model = %q, want Flux2-Klein", got.envelope.Model)
+	}
+	if got.accept != "application/json" {
+		t.Errorf("Accept = %q, want application/json on the image endpoints", got.accept)
 	}
 	if got.envelope.Payload["prompt"] != "same girl, now beside a dragon" {
 		t.Errorf("envelope.payload[prompt] = %v, want the literal prompt", got.envelope.Payload["prompt"])
@@ -163,6 +173,9 @@ func TestSynthesizeSpeech(t *testing.T) {
 
 	if got.envelope.Model != "minimax-tts-speech-2.8-hd" {
 		t.Errorf("envelope.model = %q, want minimax-tts-speech-2.8-hd", got.envelope.Model)
+	}
+	if got.accept != "audio/*" {
+		t.Errorf("Accept = %q, want audio/* on the TTS call — it returns audio bytes, not JSON", got.accept)
 	}
 	if got.envelope.Payload["text"] != "Once upon a time" {
 		t.Errorf("envelope.payload[text] = %v, want the literal text", got.envelope.Payload["text"])
@@ -305,5 +318,387 @@ func TestEmptyInputs(t *testing.T) {
 	}
 	if _, err := c.SynthesizeSpeech(context.Background(), "x", "", ""); err == nil {
 		t.Error("SynthesizeSpeech accepted empty voice")
+	}
+}
+
+// TestGenerateImage_DefaultModelPinnedInRawJSON exercises the
+// empty-model default through its default path and asserts the model
+// id that reaches the wire, at the raw-JSON level. Every test before
+// round 3 passed an explicit model, so the default — which carried
+// the forbidden Qwen-Image-2512 through two review rounds
+// (t2-round3.md H1/M2) — was never executed.
+func TestGenerateImage_DefaultModelPinnedInRawJSON(t *testing.T) {
+	var raw []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
+			return
+		}
+		raw = body
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(fakeResponse))
+	}))
+	defer srv.Close()
+
+	t.Setenv("GMI_API_KEY", "k")
+	t.Setenv("GMI_MEDIA_BASE_URL", srv.URL)
+
+	c := New()
+	if _, err := c.GenerateImage(context.Background(), "a small girl in a red coat", ""); err != nil {
+		t.Fatalf("GenerateImage: %v", err)
+	}
+
+	const want = `"model":"Flux2-Klein"`
+	if !strings.Contains(string(raw), want) {
+		t.Errorf("raw body missing %q — the default model is the decision under test\nbody: %s", want, raw)
+	}
+	if strings.Contains(string(raw), "Qwen-Image-2512") {
+		t.Errorf("raw body contains the forbidden model id Qwen-Image-2512 (project.md §3): %s", raw)
+	}
+}
+
+// TestSynthesizeSpeech_DefaultModelPinnedInRawJSON pins the TTS
+// default through its default path: an empty model must put
+// minimax-tts-speech-2.8-hd on the wire.
+func TestSynthesizeSpeech_DefaultModelPinnedInRawJSON(t *testing.T) {
+	var raw []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
+			return
+		}
+		raw = body
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(fakeResponse))
+	}))
+	defer srv.Close()
+
+	t.Setenv("GMI_API_KEY", "k")
+	t.Setenv("GMI_MEDIA_BASE_URL", srv.URL)
+
+	c := New()
+	if _, err := c.SynthesizeSpeech(context.Background(), "hello", "English_expressive_narrator", ""); err != nil {
+		t.Fatalf("SynthesizeSpeech: %v", err)
+	}
+
+	const want = `"model":"minimax-tts-speech-2.8-hd"`
+	if !strings.Contains(string(raw), want) {
+		t.Errorf("raw body missing %q\nbody: %s", want, raw)
+	}
+}
+
+// TestEditImage_EmptyModelRejected pins the H1 fix: image-to-image
+// has no model default. An empty model is a gmi.ErrBadRequest and the
+// upstream is never called — a silent default here is what shipped a
+// model that cannot take the reference.
+func TestEditImage_EmptyModelRejected(t *testing.T) {
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(fakeResponse))
+	}))
+	defer srv.Close()
+
+	t.Setenv("GMI_API_KEY", "k")
+	t.Setenv("GMI_MEDIA_BASE_URL", srv.URL)
+
+	c := New()
+	_, err := c.EditImage(context.Background(), fakePNG, "same girl, now beside a dragon", "")
+	if !errors.Is(err, gmi.ErrBadRequest) {
+		t.Errorf("err = %v, want errors.Is(.., gmi.ErrBadRequest)", err)
+	}
+	if hits.Load() != 0 {
+		t.Errorf("upstream hit %d time(s) with an empty model, want 0", hits.Load())
+	}
+}
+
+// TestRetry_5xxHitTwice is the round-3 H2 Pin: a 5xx is retried
+// exactly once, so the upstream sees two hits and the caller one
+// gmi.ErrTransient.
+func TestRetry_5xxHitTwice(t *testing.T) {
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	t.Setenv("GMI_API_KEY", "k")
+	t.Setenv("GMI_MEDIA_BASE_URL", srv.URL)
+
+	c := New()
+	_, err := c.GenerateImage(context.Background(), "x", "Z-Image")
+	if !errors.Is(err, gmi.ErrTransient) {
+		t.Errorf("err = %v, want errors.Is(.., gmi.ErrTransient)", err)
+	}
+	if hits.Load() != 2 {
+		t.Errorf("upstream hit %d time(s) on 5xx, want 2 (one call + one retry per PLAN.md §T2)", hits.Load())
+	}
+}
+
+// TestRetry_FailedStatusThenSuccess pins the other half of the H2
+// contract: a request-queue 200 with {"status":"failed"} is retried
+// once, and the completed response reaches the caller as raw bytes.
+func TestRetry_FailedStatusThenSuccess(t *testing.T) {
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+		if hits.Load() == 1 {
+			_, _ = w.Write([]byte(`{"request_id":"req-1","status":"failed","error":"scheduling failed"}`))
+			return
+		}
+		_, _ = w.Write([]byte(fakeResponse))
+	}))
+	defer srv.Close()
+
+	t.Setenv("GMI_API_KEY", "k")
+	t.Setenv("GMI_MEDIA_BASE_URL", srv.URL)
+
+	c := New()
+	raw, err := c.GenerateImage(context.Background(), "x", "Z-Image")
+	if err != nil {
+		t.Fatalf("GenerateImage: %v", err)
+	}
+	if hits.Load() != 2 {
+		t.Errorf("upstream hit %d time(s) on a failed status, want 2 (one call + one retry per PLAN.md §T2)", hits.Load())
+	}
+	if !strings.Contains(string(raw), "req-abc") {
+		t.Errorf("raw = %q, want the completed response handed back as raw bytes", raw)
+	}
+}
+
+// TestRetry_FailedStatusBudgetSpent: with the upstream always
+// reporting failed, the retry is spent and the caller gets
+// gmi.ErrTransient with a nil body — never an error body dressed up
+// as media (t2-round3.md L3).
+func TestRetry_FailedStatusBudgetSpent(t *testing.T) {
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"request_id":"req-1","status":"failed","error":"scheduling failed"}`))
+	}))
+	defer srv.Close()
+
+	t.Setenv("GMI_API_KEY", "k")
+	t.Setenv("GMI_MEDIA_BASE_URL", srv.URL)
+
+	c := New()
+	raw, err := c.GenerateImage(context.Background(), "x", "Z-Image")
+	if !errors.Is(err, gmi.ErrTransient) {
+		t.Errorf("err = %v, want errors.Is(.., gmi.ErrTransient)", err)
+	}
+	if hits.Load() != 2 {
+		t.Errorf("upstream hit %d time(s), want 2 (budget is exactly one retry)", hits.Load())
+	}
+	if raw != nil {
+		t.Errorf("body = %q alongside a non-nil error, want nil", raw)
+	}
+}
+
+// TestPayloadTooLarge_413 is the round-3 M1 Pin: 413 is the expected
+// answer to an oversized inline reference image. It is the payload's
+// fault, so it must surface as gmi.ErrBadRequest, never
+// gmi.ErrTransient; it must not be retried; and it must not hand the
+// caller an error body.
+func TestPayloadTooLarge_413(t *testing.T) {
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusRequestEntityTooLarge)
+		_, _ = w.Write([]byte(`{"error":"payload too large"}`))
+	}))
+	defer srv.Close()
+
+	t.Setenv("GMI_API_KEY", "k")
+	t.Setenv("GMI_MEDIA_BASE_URL", srv.URL)
+
+	c := New()
+	raw, err := c.GenerateImage(context.Background(), "x", "Z-Image")
+	if err == nil {
+		t.Fatal("GenerateImage returned nil error on 413")
+	}
+	if !errors.Is(err, gmi.ErrBadRequest) {
+		t.Errorf("err = %v, want errors.Is(.., gmi.ErrBadRequest)", err)
+	}
+	if errors.Is(err, gmi.ErrTransient) {
+		t.Errorf("err = %v, must NOT also be errors.Is(.., gmi.ErrTransient)", err)
+	}
+	if hits.Load() != 1 {
+		t.Errorf("upstream hit %d time(s) on a 4xx, want 1 (never retry a 4xx)", hits.Load())
+	}
+	if raw != nil {
+		t.Errorf("body = %q alongside a non-nil error, want nil", raw)
+	}
+}
+
+// TestPaymentRequired_402: billing is operator-actionable
+// (PLAN.md §T11.2), gets its own sentinel, and is never retried — a
+// retry storm against a now-paid endpoint is the failure mode the
+// sentinel exists to prevent.
+func TestPaymentRequired_402(t *testing.T) {
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusPaymentRequired)
+		_, _ = w.Write([]byte(`{"error":"free window closed"}`))
+	}))
+	defer srv.Close()
+
+	t.Setenv("GMI_API_KEY", "k")
+	t.Setenv("GMI_MEDIA_BASE_URL", srv.URL)
+
+	c := New()
+	_, err := c.GenerateImage(context.Background(), "x", "Z-Image")
+	if !errors.Is(err, gmi.ErrPaymentRequired) {
+		t.Errorf("err = %v, want errors.Is(.., gmi.ErrPaymentRequired)", err)
+	}
+	if errors.Is(err, gmi.ErrTransient) || errors.Is(err, gmi.ErrBadRequest) {
+		t.Errorf("err = %v, must NOT also be errors.Is(.., gmi.ErrTransient) or errors.Is(.., gmi.ErrBadRequest)", err)
+	}
+	if hits.Load() != 1 {
+		t.Errorf("upstream hit %d time(s) on a 4xx, want 1 (never retry a 4xx)", hits.Load())
+	}
+}
+
+// TestClassifyStatus_Table walks the classifier's arms through the
+// endpoint: every 4xx lands on a non-transient sentinel and is hit
+// exactly once, the 5xx and the unmapped-default arms are transient
+// and retried once. The 418 and 302 rows are the arms rounds 1–3
+// never executed.
+func TestClassifyStatus_Table(t *testing.T) {
+	cases := []struct {
+		name     string
+		status   int
+		want     error
+		notWant  []error
+		wantHits int
+	}{
+		{"401 unauthorized", http.StatusUnauthorized, gmi.ErrUnauthorized, []error{gmi.ErrTransient}, 1},
+		{"402 payment required", http.StatusPaymentRequired, gmi.ErrPaymentRequired, []error{gmi.ErrTransient, gmi.ErrBadRequest}, 1},
+		{"403 forbidden", http.StatusForbidden, gmi.ErrUnauthorized, []error{gmi.ErrTransient}, 1},
+		{"404 model not found", http.StatusNotFound, gmi.ErrModelNotFound, []error{gmi.ErrTransient}, 1},
+		{"413 payload too large", http.StatusRequestEntityTooLarge, gmi.ErrBadRequest, []error{gmi.ErrTransient}, 1},
+		{"418 teapot is the 4xx catch-all", http.StatusTeapot, gmi.ErrBadRequest, []error{gmi.ErrTransient}, 1},
+		{"429 rate limited", http.StatusTooManyRequests, gmi.ErrRateLimited, []error{gmi.ErrTransient}, 1},
+		{"302 not followed is the default arm", http.StatusFound, gmi.ErrTransient, nil, 2},
+		{"502 bad gateway", http.StatusBadGateway, gmi.ErrTransient, nil, 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var hits atomic.Int64
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits.Add(1)
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(`{"error":"upstream says no"}`))
+			}))
+			defer srv.Close()
+
+			t.Setenv("GMI_API_KEY", "k")
+			t.Setenv("GMI_MEDIA_BASE_URL", srv.URL)
+
+			_, err := New().GenerateImage(context.Background(), "x", "Z-Image")
+			if err == nil {
+				t.Fatal("GenerateImage returned nil error")
+			}
+			if !errors.Is(err, tc.want) {
+				t.Errorf("err = %v, want errors.Is(.., %v)", err, tc.want)
+			}
+			for _, nw := range tc.notWant {
+				if errors.Is(err, nw) {
+					t.Errorf("err = %v, must NOT also be errors.Is(.., %v)", err, nw)
+				}
+			}
+			if hits.Load() != int64(tc.wantHits) {
+				t.Errorf("upstream hit %d time(s), want %d", hits.Load(), tc.wantHits)
+			}
+		})
+	}
+}
+
+// TestNoRetryWhenContextDead: a caller deadline that fires mid-attempt
+// must not buy a second attempt on an already-dead context.
+func TestNoRetryWhenContextDead(t *testing.T) {
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		time.Sleep(800 * time.Millisecond)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	t.Setenv("GMI_API_KEY", "k")
+	t.Setenv("GMI_MEDIA_BASE_URL", srv.URL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+
+	c := New()
+	_, err := c.GenerateImage(ctx, "x", "Z-Image")
+	if !errors.Is(err, gmi.ErrTransient) {
+		t.Errorf("err = %v, want errors.Is(.., gmi.ErrTransient)", err)
+	}
+	if hits.Load() != 1 {
+		t.Errorf("upstream hit %d time(s) with a dead context, want 1 (no retry on a spent context)", hits.Load())
+	}
+}
+
+// deadlineRecorder is an http.RoundTripper that records the context
+// deadline the client put on the outbound request — the only place
+// the PLAN.md §T2 "every call carries a context deadline" default is
+// observable without waiting out a real timeout.
+type deadlineRecorder struct {
+	deadline time.Time
+	hasOne   bool
+}
+
+func (r *deadlineRecorder) RoundTrip(req *http.Request) (*http.Response, error) {
+	r.deadline, r.hasOne = req.Context().Deadline()
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(fakeResponse)),
+		Header:     make(http.Header),
+	}, nil
+}
+
+// TestDefaultDeadlineApplied: a caller passing context.Background()
+// still gets a bounded call — the client applies defaultCallTimeout.
+func TestDefaultDeadlineApplied(t *testing.T) {
+	t.Setenv("GMI_API_KEY", "k")
+
+	rec := &deadlineRecorder{}
+	c := &Client{baseURL: "http://unused.invalid", httpClient: &http.Client{Transport: rec}}
+	if _, err := c.GenerateImage(context.Background(), "x", "Z-Image"); err != nil {
+		t.Fatalf("GenerateImage: %v", err)
+	}
+	if !rec.hasOne {
+		t.Fatal("outbound request carries no deadline; PLAN.md §T2 requires one on every call")
+	}
+	if left := time.Until(rec.deadline); left <= 0 || left > defaultCallTimeout {
+		t.Errorf("deadline in %v, want within (0, %v]", left, defaultCallTimeout)
+	}
+}
+
+// TestCallerDeadlineRespected: a caller-supplied deadline wins — the
+// default must not extend it.
+func TestCallerDeadlineRespected(t *testing.T) {
+	t.Setenv("GMI_API_KEY", "k")
+
+	rec := &deadlineRecorder{}
+	c := &Client{baseURL: "http://unused.invalid", httpClient: &http.Client{Transport: rec}}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := c.GenerateImage(ctx, "x", "Z-Image"); err != nil {
+		t.Fatalf("GenerateImage: %v", err)
+	}
+	if !rec.hasOne {
+		t.Fatal("outbound request carries no deadline")
+	}
+	if left := time.Until(rec.deadline); left <= 0 || left > 5*time.Second {
+		t.Errorf("deadline in %v, want within the caller's 5s, not the %v default", left, defaultCallTimeout)
 	}
 }
