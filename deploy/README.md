@@ -47,7 +47,8 @@ export GMI_API_KEY=...               # required
 ```
 
 The script starts the container in `--detach --restart unless-stopped`
-mode with the five Traefik labels from `dev-diary/project.md §Deployment`:
+mode, **attached to the `proxy` Docker network**, with the five Traefik
+labels from `dev-diary/project.md §Deployment`:
 
 ```
 traefik.enable=true
@@ -60,6 +61,13 @@ traefik.http.services.thutapi.loadbalancer.server.port=8080
 TLS, cert renewal and the public-HTTPS edge are already provided by the
 existing Traefik instance. The container does not need to publish a host
 port — Traefik talks to it on 8080 by label.
+
+**The `proxy` network is not optional.** `/opt/traefik/static.yml` sets the
+docker provider to `exposedByDefault: false` with `network: proxy`. A
+container that carries the labels but sits outside `proxy` is discovered
+and then unroutable, which surfaces as a 404 or 502 rather than as an
+obvious error. Override with `NETWORK=` only if Traefik's provider network
+changes.
 
 To stop and remove:
 
@@ -75,7 +83,7 @@ All configuration is read from environment (see `cmd/thutapi/main.go`
 | Variable | Required | Default | Notes |
 |---|---|---|---|
 | `PORT` | no | `8080` | Listen address inside the container. Must match `traefik.http.services.thutapi.loadbalancer.server.port`. |
-| `DATA_DIR` | no | `/data` | SQLite file and generated media live here. Bind-mount a host path. |
+| `DATA_DIR` | no | `/data` | SQLite file and generated media live here. Bind-mount a host path, owned by **uid 65532** (the distroless `nonroot` user). |
 | `GMI_API_KEY` | **yes** | — | GMI Cloud inference key. **Never in the repo.** Passed via `docker run -e` from the operator shell. |
 | `UPLOAD_TOKEN` | no | random | Bearer for the short-lived voice-sample upload path (T13). Regenerated per run. |
 
@@ -111,6 +119,30 @@ A single record, **proxied** through Cloudflare (matching `auteur`,
 SSL mode on the zone is **Full (strict)** — Flexible plus Traefik's HTTPS
 redirect is an infinite redirect loop. This is zone-wide and the existing
 sites work, so it should already be correct; verify before going live.
+
+### Certificates — DNS-01, and two certs not one
+
+Traefik issues via **DNS-01** using a Cloudflare API token
+(`CLOUDFLARE_DNS_API_TOKEN` in the Traefik container), not HTTP-01. Two
+consequences that are easy to get wrong:
+
+* Validation writes a `_acme-challenge` TXT record and never fetches the
+  origin, so **proxying does not interfere with issuance** and the origin
+  IP need not be publicly resolvable.
+* There are **two** certificates on the path. The one a browser sees is
+  Cloudflare's edge cert for the zone (issuer `O=Google Trust Services,
+  CN=WE1`). Traefik's Let's Encrypt cert is the **origin** cert, the one
+  Cloudflare validates under Full (strict). Checking for a Let's Encrypt
+  issuer from the public internet will always fail; check it on the box:
+
+```
+ssh foleyflow "echo | openssl s_client -servername thutapi.nryn.dev \
+  -connect 127.0.0.1:443 2>/dev/null | openssl x509 -noout -subject -issuer -dates"
+```
+
+If that returns `CN=TRAEFIK DEFAULT CERT`, issuance failed — check
+`docker logs traefik | grep -i acme` and verify the Cloudflare token with
+`curl https://api.cloudflare.com/client/v4/user/tokens/verify`.
 
 ## Cloudflare timeout constraint
 

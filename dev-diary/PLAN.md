@@ -64,7 +64,7 @@ required, and the first things cut.
 | --- | --- |
 | **T0** | DONE. Closed at 166a992 after 3 review rounds (zero residue; see t0-round1.md, t0-round2.md, t0-round3.md, t0-remediation-round1.md, t0-remediation-round2.md). |
 | **T1** | DONE. Closed at 65df379 — artifacts (Dockerfile, .dockerignore, deploy/docker-run.sh, deploy/README.md) committed, local smoke green, all Traefik labels byte-identical to project.md §Deployment. See dev-diary/adversarial-review/t1-round1.md. |
-| **T1b** | Blocked. Live deployment verification — DNS A record + foleyflow deploy + curl. Cannot be done from this workstation; needs operator with DNS + SSH access. See T1b section below. |
+| **T1b** | **Blocked on a dead Cloudflare token.** Run 2026-09-04: container deployed to foleyflow and check 1 PASSES (up on the `proxy` network, five labels byte-identical, HTTP/2 200 through Traefik at the origin with `version=t1b-cfa8bd4`). Checks 2–5 blocked: `CLOUDFLARE_DNS_API_TOKEN` in the Traefik container is invalid (`code 1000`), so DNS-01 401s and no A record can be written. Blast radius is box-wide — `serp` is already failing issuance; `auteur`/`eoc`/`mosaic` will fail at renewal. Needs a new Zone:DNS:Edit token on `nryn.dev`. Two artifact defects found and fixed (missing `--network proxy`, wrong chown uid). See t1b-round1.md. |
 | **T2** | Not started. Response shapes verified by hand 2026-09-04 — see T2. |
 | **T3** | Not started. |
 | **T4** | Not started. |
@@ -184,8 +184,12 @@ on this workstation holds.
    ```
 2. **DNS.** An A record for `thutapi.nryn.dev` → `167.233.247.107`, **proxied**,
    matching `auteur` / `mosaic` / `eoc` / `serp`.
-3. **Certificate issues.** Let's Encrypt HTTP-01 resolves through the proxy —
-   the existing four subdomains prove the path, but confirm for this one.
+3. **Certificate issues.** Traefik issues by **DNS-01** via a Cloudflare
+   token (`/opt/traefik/static.yml`), not HTTP-01 — so the proxy is
+   irrelevant to validation and the origin IP need not be publicly
+   resolvable. The existing four subdomains prove the path, but confirm
+   for this one. Note the Let's Encrypt cert is the **origin** cert; the
+   public handshake returns Cloudflare's edge cert instead.
 4. **`curl https://thutapi.nryn.dev/healthz` returns 200** with `cf-ray` present.
 5. **A public file is fetchable by a third party.** Put a dummy MP3 at a signed
    path and confirm an outside fetch works — this is the exact mechanism
@@ -231,7 +235,7 @@ against `https://thutapi.nryn.dev/healthz`:
 1. Traefik on `foleyflow` picks up the container with the five labels.
 2. DNS A record `thutapi.nryn.dev` → `167.233.247.107`, proxied
    (matching `auteur`/`mosaic`/`eoc`/`serp`).
-3. Let's Encrypt HTTP-01 resolves through the proxy.
+3. Let's Encrypt **DNS-01** (Cloudflare token) issues the origin cert.
 4. `curl https://thutapi.nryn.dev/healthz` returns 200 JSON with
    `cf-ray` present.
 5. A dummy MP3 at a signed path is fetchable by a third party
@@ -247,7 +251,7 @@ docker save thutapi:local | ssh foleyflow 'docker load'
 # On foleyflow (via SSH), prepare the data dir and run the deploy:
 ssh foleyflow
 sudo mkdir -p /srv/thutapi/data
-sudo chown 1000:1000 /srv/thutapi/data      # match container nonroot UID
+sudo chown 65532:65532 /srv/thutapi/data    # distroless nonroot uid, NOT 1000
 export GMI_API_KEY='<from operator vault>'
 /srv/thutapi/deploy/docker-run.sh           # uses Traefik labels from project.md
 

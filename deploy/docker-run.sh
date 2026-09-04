@@ -33,6 +33,8 @@ IMAGE="${IMAGE:-thutapi:local}"
 NAME="${NAME:-thutapi}"
 DATA_DIR="${DATA_DIR:-/srv/thutapi/data}"
 HOST_PORT="${HOST_PORT:-}"
+# Traefik's docker provider only routes to containers on this network.
+NETWORK="${NETWORK:-proxy}"
 
 # GMI_API_KEY is the only required secret. Fail loudly if it is missing so
 # the container cannot silently start with an unset inference key.
@@ -52,6 +54,12 @@ mkdir -p "${DATA_DIR}"
 printf '%s' "${UPLOAD_TOKEN}" > "${DATA_DIR}/upload-token"
 chmod 0600 "${DATA_DIR}/upload-token"
 
+# The distroless runtime stage runs as uid 65532 ("nonroot") — see the
+# Dockerfile's `USER nonroot:nonroot`. The bind mount is created by root
+# here, so hand it to that uid or every write under /data fails with
+# EACCES. 1000 is NOT the right uid for this image.
+chown -R 65532:65532 "${DATA_DIR}"
+
 
 # Build the docker run command. -e flags pass through to the binary's
 # parseConfig (cmd/thutapi/main.go: parseConfig reads environment only).
@@ -64,6 +72,13 @@ DOCKER_ARGS=(
   --restart unless-stopped
   --name "${NAME}"
   --hostname "${NAME}"
+
+  # Traefik's docker provider on foleyflow is configured with
+  # `network: proxy` and `exposedByDefault: false` (/opt/traefik/static.yml).
+  # A container not attached to `proxy` is discovered but has no reachable
+  # address on that network, so the router 404s or 502s. Every sibling
+  # (mosaic, cerebros, foleyflow, serp-relay) is on `proxy` and nothing else.
+  --network "${NETWORK}"
 
   # Persistence: SQLite + generated media live on a host bind mount. The
   # container expects DATA_DIR and writes under it.
