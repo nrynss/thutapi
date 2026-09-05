@@ -108,7 +108,8 @@ size as the yardstick:
 | ~~**T8**~~ | `internal/audio/**` | — | **DONE** `8b7066b` | Round-3 APPROVE 0/0/0/0. Wire-contract-2 amendment in round 4 |
 | ~~**T8b**~~ | `t8b-live-record.md` | — | **DONE** | Settled by a GET; never needed the pool |
 | **T5c** | `internal/story/story.go` + 3 test sites, 2 doc-only contract rows | T8b | **S** | One constant. The risk is ordering, not size — see below |
-| **T9** | `static/**`, `internal/web/**`, route lines | T4 — and see below on T8 | **L** | The only track whose verification is a **real phone**, not a test. Largest remaining surface |
+| **T8c** | the TTS hook in `internal/interview` + the `question_audio` event | T8 | **S** | Nobody publishes it today; §T9 screen 3 is silent without it |
+| **T9** | `static/**`, `internal/web/**`, route lines | T4, T9a, T10c — and **T8c** for audio | **L** | The only track whose verification is a **real phone**, not a test. Largest remaining surface |
 | ~~**T9a**~~ | `static/race/**` | — | **DONE** | Closed at round-2 APPROVE 0/0/0/0 |
 | **T10a** | `internal/bookvideo/**`, ffmpeg lines in `Dockerfile` | — | **S–M** | Nothing: recipe proven, fixtures on disk (t10-video-record.md). `exec.Command` hygiene, `t.Skip` when ffmpeg is absent |
 | **T10b** | book template in `internal/web/**`, `static/book/**`, route lines | T9, T10a, T10c, **T10d** | **S–M** | Now also owns **C4, the catch-up read** — without it a reload at minute four restarts the race at zero |
@@ -210,7 +211,8 @@ routes anyway; not worth doing speculatively before then.**
 | **T7** | **DONE** 2026-09-05, closed at `fa3a516`. Round-1 review (t7-round1.md) REMEDIATE 0C/0H/2M/1L → remediation (t7-remediation-round1.md) pinned all three → **round-2 APPROVE 0/0/0/0, zero residue** (t7-round2.md; all seven mutants re-run red/hang, byte-identical restores). Implemented T6's closing loop in `internal/illustrate/verify.go` + `persist.go`: echo guard (a page byte-identical to a locked sheet is `ErrDecodeEcho` — a decode defect, judged never, regenerated never), M3-as-judge verdict with up to 2 regenerations of the same prompt+sheets (`ErrConsistency` after the cap), judge transport errors surfaced unretried, `ErrBadVerdict` on unusable replies; sheets persist immediately per render, pages only post-approval, `ErrConflict` re-run replaces the occupant. Config gains `Judge` + `Persist` (nil = off; zero value byte-for-byte T6, no T6 test edited). Six contract rows C1–C6 sanctioned. The judge mechanism was pre-verified live (T6b item 2: M3 verdicts over the eight-page book). Live half of T7's loop (render → persist → serve end to end) is T6b item 3, which opens now. |
 | **T8** | **DONE** 2026-09-05, closed at `8b7066b` — round 1 (0C/0H/0M/2L) → round 2 (0C/1H/0M/0L, the emotion-key evidence chain) → **round 3 APPROVE 0/0/0/0**. `NarrateBook` (one clip per page, in page order, blob-first then `MediaNarration` place, `ErrConflict` replaces the occupant) and `SynthesizeQuestion`; sanctioned contract row C1 gave `media.SynthesizeSpeech` an emotion parameter. **Rider (a) closed at `028efe4`** — the wire-contract-2 amendment (round 4, APPROVE 0/0/0/0): question audio persists as an **unplaced** media row and `SynthesizeQuestion` returns its id, because a `question_audio` event needs a URL that exists; supersedes round-1's D3. The `question_audio` SSE event half is the flow track's. **Rider (b) is T8b**: the emotion key is asserted-but-unverified live, settlement probe committed. |
 | **T8b** | **DONE** 2026-09-05 — **and it was never blocked on the TTS pool.** The 503 is on POST synthesis; the parameter schema is behind a GET that answered 200 throughout: `GET console.gmicloud.ai/api/v1/ie/requestqueue/apikey/models/{id}` — the exact route t8-round2.md H1 named, which the remediation replaced with a weaker catalog-membership check. **Placement CONFIRMED CORRECT** (`emotion` is top-level in GMI's flattened dialect; round 2's `voice_setting` worry was right about MiniMax, wrong about GMI). **`neutral` is NOT in the provider enum** (`auto, calm, happy, sad, angry, fearful, disgusted, surprised`) — H1's silent-ignore class, live, on the value a gentle book reaches for most; handed to **T5c**. Bonus: T13's cast knobs confirmed against the schema (`pitch` ±12, `timbre`/`intensity` ±100, `sound_effects` incl. `robotic`, `spacious_echo`). Cost $0.00. See t8b-live-record.md. |
-| **T9** | Not started. |
+| **T8c** | **Not started. Assigned 2026-09-05.** Wire contract 2 specified `question_audio` and T8's round-4 amendment made the clip persist and return its id — **and nothing publishes it**: no TTS seam exists anywhere in `internal/interview` or `cmd/`. The hook was listed inside T8's `Owns` and fell through when T8 closed with `internal/audio` alone. Without it §T9's screen 3 is silent. See §T8c. |
+| **T9** | Not started. **Spec rewritten 2026-09-05** against the real wire — the two SSE streams, the call sequence with actual shapes, the screens it owns and the five things it does not. See §T9. |
 | **T9a** | **DONE** 2026-09-05. Closed after round-1 remediation and **round-2 APPROVE 0/0/0/0, zero residue** (t9a-round1.md, t9a-remediation-round1.md, t9a-round2.md). Delivered in `static/race/**`: standalone `race.html` and `index.html` with single-property `--done: 0..8` interface, 8 markers, composite-only `transform: scaleX(...)` progress bar, 5 distinct custom animal sprites (Hare, Tortoise, Fox, Duck, Mouse) with unique silhouettes at 64×44, `.runner svg{overflow:visible}` preventing ear clipping during `.bob`, non-overshooting deceleration curve `cubic-bezier(.25, 1, .5, 1)` preventing finish line clipping, full palette tokenization via CSS `var()`, and `prefers-reduced-motion` support. Suite passes in `race_test.go`. |
 | **T10c** | **DONE** 2026-09-05, closed at `61e4da5` — **round-1 APPROVE 0/0/0/0, zero residue** (t10c-round1.md; five reviewer mutations red, byte-identical restores). `internal/bookgen` joins every stage: `POST /interviews/{id}/generate` → job on the book's topic; 409-busy double-fire refusal, fresh run after terminal; stages in order (structure with byline/page-cast rows → illustrate with Judge+Persist → narrate → bookvideo → film persisted + attached); events `page_approved {n,image_url}` (drives T9a's `--done`) / `book_ready {video_url}` / `failed {}` exactly-once incl. panic; failure total + terminal, no auto retry; store-side catch-up pinned. Contract rows C1–C6 sanctioned. **Two cross-track deliverables ride on this:** C2 — mediastore's closed type set lacks `video/mp4`, so production film persist lands when its owner adds the type (lifecycle pinned via the filmStore seam meanwhile); C4 — the HTTP book-state catch-up read is T10b's. |
 | **T10a** | **DONE** 2026-09-05. Closed after round-1 remediation and **round-2 APPROVE 0/0/0/0, zero residue** (t10a-round1.md, t10a-remediation-round1.md, t10a-round2.md). Implemented video pipeline in `internal/bookvideo` (`types.go`, `command.go`, `video.go`, `bookvideo_test.go`): title card (blurred page 1 with title + byline via `textfile=`), page segments (`-shortest`, scale/pad/setsar 1080x1350 4:5 portrait, libx264/aac), end card (flat `0x1b1614` with domain attribution), and concat demuxer (`-c copy +faststart` with MP4 metadata tags). Bounded concurrency via `errgroup.SetLimit`. Added static ffmpeg 7.1 pinned by immutable sha256 digest to `Dockerfile`. Coverage 89.1%. |
@@ -1345,38 +1347,211 @@ so in the record rather than letting an unverified pin read as a verified one.
 
 ---
 
+## T8c — Spoken questions, wired
+
+**Owns:** the TTS hook inside `internal/interview` (a nil-able seam, the shape
+T7's `Config.Judge`/`Config.Persist` set) and the `question_audio` SSE event.
+
+**Depends on:** T8 (done) and T8's round-4 amendment (done). **Done when** a
+question turn publishes `question` immediately and `question_audio` when the
+clip lands, and an interview with no TTS configured behaves exactly as it does
+today.
+
+**Assigned 2026-09-05.** Wire contract 2 specified the event, T8's round-4
+amendment made `SynthesizeQuestion` persist its clip and return the media id
+that the URL is built from — **and nothing publishes it.** Grep finds no
+reference to `question_audio`, `SynthesizeQuestion` or any TTS seam anywhere in
+`internal/interview` or `cmd/`. The sequencing table listed "one nil-able hook
+in `internal/interview`" inside T8's `Owns`; T8 closed with `internal/audio`
+alone, and the hook fell down the gap between the two.
+
+Without it **§T9's screen 3 is silent** — the headline feature of a product
+whose questions are supposed to be spoken to a child who may not read well.
+
+### The shape
+
+* **A nil-able seam on the interview handler's config**, so a nil TTS is the
+  current behaviour exactly and no existing test changes.
+* **Fire it in parallel with the question turn and never block on it.** The
+  `question` event must publish the moment the text exists — *text never waits
+  on audio* is the rule T8 and project.md §4 both lead with, and the reason
+  contract 2 made this a second event rather than a field.
+* **Publish `question_audio {"turn":N,"audio_url":"/media/<id>"}`** on the
+  interview's own topic when the clip persists. A failure publishes **nothing**
+  — §T9 already treats a missing clip as normal.
+* The clip serves over T3's existing `GET /media/{id}`, so **no new route**.
+* Question clips persist as **unplaced** rows, which nothing cascades — they
+  are the orphan class §T11 item 4 now sweeps by age.
+
+---
+
 ## T9 — Frontend shell and the interview UI
 
-**Owns:** `static/**` (including `static/vendor/`), `internal/web/**` templates, plus its route lines in `newServer`.
+**Owns:** `static/**` (including `static/vendor/`), `internal/web/**`
+templates, plus its route lines in `newServer`.
 
-**Depends on:** T4, T8. **Done when:** an interview is completable by tapping,
-on a real phone.
+**Does NOT own** — every one of these is already built or belongs elsewhere,
+and reaching into them is the failure mode this section exists to prevent:
+
+| Not T9's | Whose | State |
+| --- | --- | --- |
+| The race widget | T9a, `static/race/**` | **DONE.** Consume it; do not rewrite it |
+| The book page (screen 6) | T10b | Not started |
+| The generation pipeline and its events | T10c, `internal/bookgen` | **DONE** |
+| Publishing `question_audio` | **T8c** | Not started — see below |
+| Anything under `internal/interview`, `internal/story`, `internal/audio` | T4 / T5 / T8, all closed | Raise a contract row; never edit quietly |
+
+**Depends on:** T4, T10c and T9a (all done) — and **T8c** for spoken questions,
+which is the only piece not yet built. **Build against a silent interview
+first:** every screen works without audio, and T8c's event is additive.
+
+**Done when:** an interview is completable by tapping, on a real phone, and
+screen 5 shows real progress from real events.
+
+### The five screens T9 owns
+
+Screens 1–5 of §The flow. Screen 6 (the book) is T10b's.
+
+| # | Screen | The one thing it must get right |
+| --- | --- | --- |
+| 1 | Shelf | Its CTA **is** the audio-unlock gesture. No separate "tap to start" screen |
+| 2 | *(none)* | Deliberately absent — see above |
+| 3 | Interview | Question zero, then chips; text never waits on audio |
+| 4 | Grown-up step | Record / upload / **skip**, all three equally weighted |
+| 5 | The wait | The race, driven by real `page_approved` counts |
+
+### The two streams — the thing to get straight before writing code
+
+T9 subscribes to **two different SSE streams at two different times**, on two
+different topics. Conflating them is the mistake this table exists to prevent.
+
+| | Interview stream | Book stream |
+| --- | --- | --- |
+| **Route** | `GET /interviews/{id}/events` | `GET /interviews/{id}/generate/events` |
+| **Live during** | screens 3–4 | screen 5 |
+| **Opened by** | `POST /interviews` (`events_url` in the 201) | `POST /interviews/{id}/generate` (`events_url` in the 202) |
+| **Events** | `question`, `question_audio` (T8c), `ended`, `error` | `page_approved`, `book_ready`, `failed` |
+| **Ends at** | `ended` | `book_ready` or `failed` |
+
+**The interview stream ends at `ended`. The book stream does not exist yet at
+that moment** — it is created by the `POST .../generate` that screen 4 fires.
+Between them sits the grown-up step, which is exactly why generation is
+triggered rather than automatic (decision 20).
+
+### The call sequence, with the real shapes
+
+```
+1. POST /interviews            {"byline":"Mira"}        (byline optional)
+   → 201 {id, book_id, topic, events_url, status}
+   Question zero is asked by the UI BEFORE this call; M3 never sees it.
+
+2. GET  {events_url}                                     ← interview stream
+   event: question       {"turn":1,"text":"…","chips":["…"],"filled":[…],"exchanges":N}
+   event: question_audio {"turn":1,"audio_url":"/media/<id>"}    (T8c; may never come)
+   event: error          {"error":"<class token>"}       no prose, no codes
+   event: ended          {"reason":"…","text":"…","filled":[…]}
+
+3. POST /interviews/{id}/answers   {"text":"a dragon"}
+   → 202 {topic, status}      status "open" = a question is running,
+                              "ending" = the goodbye is. Either way, wait
+                              for the next event; do not poll.
+
+4. (screen 4 — voice, or skip)
+
+5. POST /interviews/{id}/generate
+   → 202 {job_id, book_id, topic, events_url, status:"running"}
+   → 409 class "busy" if a run is already going. A TERMINATED run never
+     blocks a retry — the failure path's "try again" is exactly this POST.
+
+6. GET  {events_url}                                     ← book stream
+   event: page_approved {"n":3,"image_url":"/media/<id>"}
+   event: book_ready    {"video_url":"/media/<id>"}
+   event: failed        {}
+```
+
+**`GET /interviews/{id}` is the catch-up read** for the interview half — it
+serves the transcript plus status, the way a late subscriber recovers turns.
+It returns **JSON**, and it is *not* the interview page; see routes below.
+
+### Driving the race
+
+Screen 5 counts `page_approved` events into `--done` on `.race` and sets
+nothing else. That is T9a's entire interface — one number, no DOM
+construction, no reaching inside the widget.
+
+**The stream is from-now-on.** A reload at minute four currently restarts the
+race at zero, because the HTTP catch-up read for book state is **T10b's
+contract row C4** and does not exist yet. Until it lands, treat a reload
+during generation as a known gap; do **not** work around it by inventing a
+route, and do not fake progress.
+
+### Routes — human pages singular, API plural
+
+`GET /interviews/{id}` already serves JSON (`cmd/thutapi/main.go:154`) and
+Go's `ServeMux` matches patterns literally, so two handlers cannot share it.
+
+| Page | Route |
+| --- | --- |
+| Shelf | `GET /` |
+| Interview (screens 3–5) | `GET /interview/{id}` |
+| Book (screen 6, T10b) | `GET /book/{id}` |
+
+**No `Accept` negotiation** (decision 21) — the mux cannot express it, and it
+makes a shared link's behaviour depend on a header the sharer never sees.
+
+### Stack — pinned, and each pin has a reason
 
 **Preact + `htm` + hooks, vendored into `static/vendor/`, no build step.** Not
 Svelte (its 5-rune idiom is thin in training data and fails silently), not
-vanilla (hand-rolled DOM fails the same silent way). Hooks, not signals.
-Pinned copies committed — **no CDN**, so a judge's `docker run` has no network
-surprise.
+vanilla (hand-rolled DOM fails the same silent way — AGENTS.md:149). Hooks,
+not signals. Pinned copies committed — **no CDN**, so a judge's `docker run`
+has no network surprise. Go renders the shell with `html/template`, so a cold
+link works without JS.
 
-Go renders the shell with `html/template`, so a cold link works without JS.
+### Child-facing rules
 
-Child-facing rules:
-
-* **Tappable chips**, text box as the escape hatch. Typing is the friction point.
+* **Tappable chips**, text box as the escape hatch. Typing is the friction
+  point — and question zero is the one place it is unavoidable.
 * **~60px targets**, generously spaced. Fine motor control is poor.
-* **No naked spinners** — every wait is a character doing something. The six-minute generation wait is **the race** (§The flow, screen 5): SVG animals, one lane each, the pack advancing one marker per approved page. Prototyped; the mechanism is ~60 lines and the remaining cost is the sprites.
-* **Chunky rounded type** (Fredoka, Baloo 2), warm palette.
-* **No failure text.** Errors are warm and never a dead end.
-* **Adult corner.** Voice-sample capture and settings sit out of the child's
-  flow; a young child is likely operating this with a parent.
+* **No naked spinners.** The six-minute wait is the race (§T9a, done); the
+  interview's per-turn wait is one race animal trotting in place.
+* **Chunky rounded type** (Fredoka, Baloo 2), warm palette. The race reads
+  every colour from `var()` tokens, so the palette lands there for free.
+* **No failure text.** `error` and `failed` carry a class token, never prose —
+  render warmth, never the token. Two doors on failure, never one.
+* **Adult corner.** Screen 4 only; it is not a settings area.
 
-Responsive, **tablet-first**:
+### Audio — one element, unlocked once, and it can be missed
+
+* **One `Audio` element**, created and unlocked inside screen 1's CTA handler
+  and reused for every clip. **Never `new Audio()` per clip** — that is the
+  silent iOS failure §T8 warns about.
+* **A cold `/interview/{id}` link never passes through screen 1.** iOS Safari
+  then throws `NotAllowedError` on the first `play()`. Render a **"tap to
+  listen" speaker chip** beside the question; the first tap unlocks and plays.
+  Never a silent failure, never a modal.
+* **`question_audio` may never arrive** (TTS failed, or was slow past the
+  turn). Stay silent; do not spin, and never hold the text waiting for it.
+
+### Responsive, tablet-first
 
 * `100dvh` not `100vh`; `env(safe-area-inset-bottom)` on the pinned input;
-  scroll input into view on focus. **Chrome devtools does not reproduce the
-  mobile keyboard — test on a real phone.**
+  `scroll-padding-bottom` and scroll-into-view on focus. **Chrome devtools
+  does not reproduce the mobile keyboard — test on a real phone.**
 * `touch-action: manipulation` on buttons.
 * Plain CSS and media queries. **No Tailwind** — it reintroduces the build step.
+* `getUserMedia` (screen 4) needs a **secure context**: production HTTPS and
+  `localhost` qualify, **a LAN IP over plain HTTP does not**. Testing on a
+  phone against `http://192.168.x.x:8080` breaks recording in a way that looks
+  like a code bug.
+
+### Never
+
+* Relax or skip a validator to make a fixture pass. A loud refusal is the
+  product working (§T5c is the worked example).
+* Edit a closed track's package without a declared contract row.
+* Fake progress, invent an events route, or poll instead of subscribing.
+* Ship a CDN link, a build step, or a second `Audio` element.
 
 ---
 
