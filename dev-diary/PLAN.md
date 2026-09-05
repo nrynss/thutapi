@@ -357,7 +357,13 @@ gh workflow run image.yml -f latest=true
 ssh foleyflow
 sudo mkdir -p /srv/thutapi/data
 sudo chown 65532:65532 /srv/thutapi/data    # distroless nonroot uid, NOT 1000
-export GMI_API_KEY='<from operator vault>'
+
+# Secrets: a root-owned 0600 file, NOT an interactive export (an export
+# persists in ~/.zsh_history in plaintext). One-time:
+sudo install -d -m 0700 /etc/thutapi
+sudo install -m 0600 /dev/null /etc/thutapi/env
+sudo $EDITOR /etc/thutapi/env               # GMI_API_KEY=<from operator vault>
+
 /srv/thutapi/deploy/docker-run.sh           # uses Traefik labels from project.md
 
 # Verify:

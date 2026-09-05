@@ -9,18 +9,37 @@
 #
 # Usage (on the box):
 #
-#   export GMI_API_KEY=...               # required: GMI Cloud inference key
-#   ./deploy/docker-run.sh               # default image, default host port
+#   ./deploy/docker-run.sh               # reads /etc/thutapi/env for secrets
 #   IMAGE=ghcr.io/.../thutapi:abc123 ./deploy/docker-run.sh
 #   NAME=thutapi-canary ./deploy/docker-run.sh
+#   ENV_FILE=/path/to/env ./deploy/docker-run.sh
 #
 # To stop:
 #
 #   docker rm -f thutapi
 #
-# This script does NOT pull secrets from anywhere. GMI_API_KEY must be set
-# in the operator's shell environment. The repo is public for the whole
-# judging period, so it must never appear in this file or in image layers.
+# SECRETS. GMI_API_KEY is read from ENV_FILE (default /etc/thutapi/env),
+# a root-owned 0600 file on the box. Do NOT `export GMI_API_KEY=...` in an
+# interactive shell: it lands in ~/.zsh_history in plaintext and stays
+# there, which is how this key actually leaks. An already-exported value
+# still wins, so a one-off override works, but the file is the path the
+# runbook documents.
+#
+# The key reaches the container through docker's NAME-ONLY --env form
+# (`--env GMI_API_KEY`, no `=value`), which makes docker inherit the value
+# from this script's environment. The literal secret therefore never
+# appears in the process arguments, so it is not visible to `ps` on the
+# host at launch.
+#
+# It IS still visible in `docker inspect` and in the container's
+# config.v2.json on disk. That is accepted: anyone who can read those
+# already has docker-group or root access to the box, and at that point
+# they have the container too. Keeping it there is also what lets
+# `--restart unless-stopped` bring the service back after a reboot with no
+# operator present -- which matters across the judging window.
+#
+# The repo is public for the whole judging period, so the key must never
+# appear in this file or in image layers.
 #
 # Refs:
 #   dev-diary/project.md §Deployment — the box already does this
@@ -41,11 +60,41 @@ HOST_PORT="${HOST_PORT:-}"
 # Traefik's docker provider only routes to containers on this network.
 NETWORK="${NETWORK:-proxy}"
 
+# Secrets come from a root-owned file on the box, not from shell history.
+# An already-set GMI_API_KEY wins, so a one-off `GMI_API_KEY=... ./docker-run.sh`
+# still works without touching the file.
+ENV_FILE="${ENV_FILE:-/etc/thutapi/env}"
+
+if [[ -z "${GMI_API_KEY:-}" && -r "${ENV_FILE}" ]]; then
+  # Sourcing executes the file, so it must be operator-owned and 0600 --
+  # checked immediately below. set -a exports what it defines, which is
+  # what the name-only --env form needs.
+  set -a
+  # shellcheck source=/dev/null
+  . "${ENV_FILE}"
+  set +a
+fi
+
+# A secrets file the whole box can read is not a secrets file. Warn rather
+# than abort: an operator mid-incident should not be blocked by a chmod.
+if [[ -r "${ENV_FILE}" ]]; then
+  ENV_FILE_MODE="$(stat -c '%a' "${ENV_FILE}" 2>/dev/null || echo '')"
+  case "${ENV_FILE_MODE}" in
+    600|400|'') ;;
+    *) echo "warning: ${ENV_FILE} is mode ${ENV_FILE_MODE}; want 600 (chmod 600 ${ENV_FILE})" >&2 ;;
+  esac
+fi
+
 # GMI_API_KEY is the only required secret. Fail loudly if it is missing so
 # the container cannot silently start with an unset inference key.
 if [[ -z "${GMI_API_KEY:-}" ]]; then
-  echo "error: GMI_API_KEY is not set. Export it before running this script." >&2
-  echo "       The repo is public for the judging period; it must never" >&2
+  echo "error: GMI_API_KEY is not set and ${ENV_FILE} did not provide it." >&2
+  echo "       Create it on the box:" >&2
+  echo "         sudo install -d -m 0700 /etc/thutapi" >&2
+  echo "         sudo install -m 0600 /dev/null /etc/thutapi/env" >&2
+  echo "         sudo \$EDITOR /etc/thutapi/env    # GMI_API_KEY=..." >&2
+  echo "       Avoid \`export GMI_API_KEY=...\` -- it persists in shell history." >&2
+  echo "       The repo is public for the judging period; the key must never" >&2
   echo "       be hard-coded into this file or any image layer." >&2
   exit 1
 fi
@@ -55,6 +104,11 @@ fi
 # Speech 2.8 source_audio fetches the resulting URL. Short-lived and
 # unguessable keeps a child's voice off any directory listing.
 UPLOAD_TOKEN="${UPLOAD_TOKEN:-$(openssl rand -hex 16)}"
+
+# Both secrets must be exported, not merely set: the name-only --env form
+# below tells docker to read them from this process's environment.
+export GMI_API_KEY UPLOAD_TOKEN
+
 mkdir -p "${DATA_DIR}"
 printf '%s' "${UPLOAD_TOKEN}" > "${DATA_DIR}/upload-token"
 chmod 0600 "${DATA_DIR}/upload-token"
@@ -93,8 +147,13 @@ DOCKER_ARGS=(
   # below points Traefik at the same port.
   --env "PORT=8080"
   --env "DATA_DIR=/data"
-  --env "GMI_API_KEY=${GMI_API_KEY}"
-  --env "UPLOAD_TOKEN=${UPLOAD_TOKEN}"
+
+  # NAME-ONLY form, deliberately. `--env GMI_API_KEY` (no `=value`) makes
+  # docker copy the value from this script's environment, so the secret
+  # never enters the argument list and never shows up in `ps`. Writing
+  # `--env "GMI_API_KEY=${GMI_API_KEY}"` here would undo that.
+  --env GMI_API_KEY
+  --env UPLOAD_TOKEN
 
   # --- Traefik v3 labels ---
   # traefik.enable: opt this container into routing.

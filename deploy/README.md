@@ -74,12 +74,27 @@ stage ships the resulting static binary as the nonroot user.
 
 ## Starting the container
 
-Use the script:
+One-time setup on the box — create the secrets file:
 
 ```
-export GMI_API_KEY=...               # required
+sudo install -d -m 0700 /etc/thutapi
+sudo install -m 0600 /dev/null /etc/thutapi/env
+sudo $EDITOR /etc/thutapi/env          # GMI_API_KEY=...
+```
+
+Then every deploy is just:
+
+```
 ./deploy/docker-run.sh
 ```
+
+**Do not `export GMI_API_KEY=...` in an interactive shell.** It lands in
+`~/.zsh_history` in plaintext and stays there, which is the way this key
+realistically leaks — far more likely than anything on the container
+filesystem. The script reads `/etc/thutapi/env` (override with `ENV_FILE=`)
+and warns if that file is not mode 600. An already-exported value still
+wins, so `GMI_API_KEY=... ./deploy/docker-run.sh` works as a one-off
+without touching the file.
 
 The script starts the container in `--detach --restart unless-stopped`
 mode, **attached to the `proxy` Docker network**, with the five Traefik
@@ -119,7 +134,7 @@ All configuration is read from environment (see `cmd/thutapi/main.go`
 |---|---|---|---|
 | `PORT` | no | `8080` | Listen address inside the container. Must match `traefik.http.services.thutapi.loadbalancer.server.port`. |
 | `DATA_DIR` | no | `/data` | SQLite file and generated media live here. Bind-mount a host path, owned by **uid 65532** (the distroless `nonroot` user). |
-| `GMI_API_KEY` | **yes** | — | GMI Cloud inference key. **Never in the repo.** Passed via `docker run -e` from the operator shell. |
+| `GMI_API_KEY` | **yes** | — | GMI Cloud inference key. **Never in the repo.** Read from `/etc/thutapi/env` and passed with docker's name-only `--env GMI_API_KEY`, so the value never enters the command line. |
 | `UPLOAD_TOKEN` | no | random | Bearer for the short-lived voice-sample upload path (T13). Regenerated per run. |
 
 ## Persistence — where `data/` lives on the box
@@ -240,8 +255,37 @@ curl -fsS http://127.0.0.1:18080/healthz
 ## Safety
 
 - `GMI_API_KEY` is **never in the repo** and **never in the image**. It
-  flows shell-env → `docker run -e` → container env. The repo is public
-  for the whole judging period; sweep history before going public.
+  flows `/etc/thutapi/env` (root, 0600) → the script's environment →
+  docker's name-only `--env GMI_API_KEY` → container env. The repo is
+  public for the whole judging period; sweep history before going public.
+  Verified clean 2026-09-05: the key appears in no object across any ref,
+  and `.env` has never been tracked.
+
+### What this does and does not protect
+
+| Exposure | Status |
+|---|---|
+| Committed to the repo | **Closed** — gitignored, and the script refuses to hard-code it |
+| Operator's shell history on the box | **Closed** — the key is never typed; the file is read |
+| `docker run` argv, visible to `ps` at launch | **Closed** — name-only `--env` form; verified the value is absent from the argument list |
+| `docker inspect` → `Config.Env` | **Accepted** |
+| `/var/lib/docker/containers/<id>/config.v2.json` | **Accepted** |
+
+The last two are accepted deliberately, not overlooked. Anyone who can read
+them already holds docker-group or root on the box, and at that point they
+have the container itself. Removing them would mean the binary reading a
+mounted file instead of the environment — a change inside `internal/gmi`,
+which is a closed track — and it would also break the property that makes
+`--restart unless-stopped` work: docker replays the stored environment on
+reboot, so the service comes back with a working key and no operator
+present. Across a judging window that runs to Sep 11, that is worth more
+than the marginal secrecy.
+
+**The token does not expire.** Decoded locally: `HS256`, `scope: ie_model`,
+claims `id` / `ownerId` / `product`, and **no `exp` claim**. Good for
+availability — it cannot die mid-judging — but it means the only clock on
+this credential is one you set. **Rotate it after judging closes**, and
+know where to revoke it before you need to.
 - Generated demo content is synthetic. No real PII, no real voice samples,
   no real voice clones.
 - A public generate button is an open wallet at ~$0.01/image. T11 hardens

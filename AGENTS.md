@@ -296,7 +296,13 @@ So, per track:
   running box. `gh workflow run image.yml -f latest=true`.
 * **Deploy a SHA tag, not `latest`**, for anything you need to reproduce.
 * **Secrets never enter the repo or an image layer.** `GMI_API_KEY` flows
-  shell env → `docker run -e` → container. The origin IP of the box is in
+  `/etc/thutapi/env` (root, 0600) → the deploy script's environment →
+  docker's **name-only** `--env GMI_API_KEY` → container. The name-only form
+  (no `=value`) is deliberate: docker inherits the value from the script's
+  environment, so the secret never enters the argument list and is not
+  visible to `ps`. Never `export` it in an interactive shell — that writes it
+  to `~/.zsh_history` in plaintext, which is the realistic leak path. Its
+  presence in `docker inspect` is accepted; see `deploy/README.md` §Safety. The origin IP of the box is in
   the gitignored `.env` as `ORIGIN_IP`; the repo is public.
 
 ## Safety and data rules
