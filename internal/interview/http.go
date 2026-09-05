@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -25,6 +26,16 @@ type startResponse struct {
 	Topic  string `json:"topic"`
 	Events string `json:"events_url"`
 	Status string `json:"status"`
+	// Opening is a best-effort replay when the opening job completed before
+	// this response was encoded. GET /interviews carries the same replay for
+	// the normal asynchronous ordering.
+	Opening *currentQuestionJSON `json:"opening,omitempty"`
+}
+
+// startRequest is question zero, the optional book byline collected by the
+// UI. It is attribution rather than story material, so M3 never receives it.
+type startRequest struct {
+	Byline string `json:"byline"`
 }
 
 // answerResponse is the body of a 202 answer to POST
@@ -47,6 +58,17 @@ type turnJSON struct {
 	Text string `json:"text"`
 }
 
+// currentQuestionJSON is the latest interviewer question, including the
+// metadata that a late subscriber needs to render the tap-first opening.
+// It is separate from transcript turns because chips and question audio are
+// event metadata rather than model conversation content.
+type currentQuestionJSON struct {
+	Turn     int      `json:"turn"`
+	Text     string   `json:"text"`
+	Chips    []string `json:"chips"`
+	AudioURL string   `json:"audio_url,omitempty"`
+}
+
 // transcriptResponse is the body of GET /interviews/{id} — the
 // authoritative catch-up state (subscribe to the events topic first,
 // then read this; deduplicate "question" events on Turn). Error is
@@ -58,13 +80,14 @@ type turnJSON struct {
 // turn starts. Status stays "open": the interview is recoverable, the
 // child may simply answer again.
 type transcriptResponse struct {
-	ID        string     `json:"id"`
-	BookID    string     `json:"book_id"`
-	CreatedAt time.Time  `json:"created_at"`
-	Status    string     `json:"status"`
-	Filled    []string   `json:"filled"`
-	Error     string     `json:"error,omitempty"`
-	Turns     []turnJSON `json:"turns"`
+	ID        string               `json:"id"`
+	BookID    string               `json:"book_id"`
+	CreatedAt time.Time            `json:"created_at"`
+	Status    string               `json:"status"`
+	Filled    []string             `json:"filled"`
+	Error     string               `json:"error,omitempty"`
+	Turns     []turnJSON           `json:"turns"`
+	Current   *currentQuestionJSON `json:"current,omitempty"`
 }
 
 // start runs the start path: create the book row (working title —
@@ -72,9 +95,21 @@ type transcriptResponse struct {
 // launch the opening-question turn. The request returns before M3
 // answers; the question arrives as the first event on the topic.
 func (h *Handler) start(ctx context.Context) (startResponse, error) {
+	return h.startWithByline(ctx, "")
+}
+
+// startWithByline records question zero on the book before the opening turn
+// begins. An empty byline is normal and leaves the title card un-attributed.
+func (h *Handler) startWithByline(ctx context.Context, byline string) (startResponse, error) {
 	book, err := h.store.CreateBook(ctx, WorkingTitle)
 	if err != nil {
 		return startResponse{}, fmt.Errorf("interview: start: create book: %w", err)
+	}
+	if byline != "" {
+		book.Byline = byline
+		if err := h.store.UpdateBook(ctx, book); err != nil {
+			return startResponse{}, fmt.Errorf("interview: start: set byline: %w", err)
+		}
 	}
 	iv, err := h.store.CreateInterview(ctx)
 	if err != nil {
@@ -99,12 +134,16 @@ func (h *Handler) start(ctx context.Context) (startResponse, error) {
 		s.mu.Unlock()
 		return startResponse{}, fmt.Errorf("interview: start %s: opening turn: %w", iv.ID, err)
 	}
+	s.mu.Lock()
+	opening := currentQuestionFor(s)
+	s.mu.Unlock()
 	return startResponse{
-		ID:     iv.ID,
-		BookID: book.ID,
-		Topic:  Topic(iv.ID),
-		Events: "/interviews/" + iv.ID + "/events",
-		Status: statusOpen,
+		ID:      iv.ID,
+		BookID:  book.ID,
+		Topic:   Topic(iv.ID),
+		Events:  "/interviews/" + iv.ID + "/events",
+		Status:  statusOpen,
+		Opening: opening,
 	}, nil
 }
 
@@ -224,6 +263,7 @@ func (h *Handler) transcript(ctx context.Context, id string) (transcriptResponse
 	s := h.sessionFor(iv)
 	s.mu.Lock()
 	ended, filled, turnErr := s.ended, s.filled.filled(), s.turnErr
+	current := currentQuestionFor(s)
 	s.mu.Unlock()
 
 	status := statusOpen
@@ -242,12 +282,30 @@ func (h *Handler) transcript(ctx context.Context, id string) (transcriptResponse
 		Filled:    filled,
 		Error:     turnErr,
 		Turns:     turns,
+		Current:   current,
 	}, nil
+}
+
+func currentQuestionFor(s *session) *currentQuestionJSON {
+	if s.current == nil {
+		return nil
+	}
+	return &currentQuestionJSON{
+		Turn:     s.current.turn,
+		Text:     s.current.text,
+		Chips:    append([]string(nil), s.current.chips...),
+		AudioURL: s.current.audioURL,
+	}
 }
 
 // Start handles POST /interviews.
 func (h *Handler) Start(w http.ResponseWriter, r *http.Request) {
-	res, err := h.start(r.Context())
+	var req startRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		h.writeError(w, fmt.Errorf("interview: start: %w: %w", ErrBadBody, err))
+		return
+	}
+	res, err := h.startWithByline(r.Context(), strings.TrimSpace(req.Byline))
 	if err != nil {
 		h.writeError(w, err)
 		return

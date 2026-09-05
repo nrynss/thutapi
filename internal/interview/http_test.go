@@ -281,12 +281,62 @@ func TestHTTPStatusMapping(t *testing.T) {
 	}
 }
 
+// TestStartBylinePersistsQuestionZero pins the T9 wire contract: the optional
+// byline is recorded before the first question, never added to the M3 prompt,
+// and omitting it keeps the historical empty-byline start behaviour.
+func TestStartBylinePersistsQuestionZero(t *testing.T) {
+	h, _, db, _ := newHarness(t, []string{"Who is your hero?\n[[filled:]]"})
+	srv := serve(t, muxFor(t, h))
+
+	code, body := postJSON(t, srv.URL+"/interviews", map[string]string{"byline": "  Mira  "})
+	if code != http.StatusCreated {
+		t.Fatalf("start status = %d, want 201 (%v)", code, body)
+	}
+	book, err := db.Book(t.Context(), body["book_id"].(string))
+	if err != nil {
+		t.Fatalf("read byline book: %v", err)
+	}
+	if book.Byline != "Mira" {
+		t.Fatalf("byline = %q, want trimmed question-zero answer", book.Byline)
+	}
+
+	code, body = postJSON(t, srv.URL+"/interviews", nil)
+	if code != http.StatusCreated {
+		t.Fatalf("default start status = %d, want 201 (%v)", code, body)
+	}
+	book, err = db.Book(t.Context(), body["book_id"].(string))
+	if err != nil {
+		t.Fatalf("read default book: %v", err)
+	}
+	if book.Byline != "" {
+		t.Fatalf("default byline = %q, want empty", book.Byline)
+	}
+}
+
+// TestStartAllowsAnOmittedBody keeps the original bare POST start path valid.
+func TestStartAllowsAnOmittedBody(t *testing.T) {
+	h, _, _, _ := newHarness(t, []string{"Who is your hero?\n[[filled:]]"})
+	srv := serve(t, muxFor(t, h))
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/interviews", nil)
+	if err != nil {
+		t.Fatalf("new start request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("bare start request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("bare start status = %d, want 201", resp.StatusCode)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Transcript route.
 // ---------------------------------------------------------------------------
 
 func TestTranscriptRouteServesTheCatchUpShape(t *testing.T) {
-	h, _, _, _ := newHarness(t, []string{"Who is your hero?\n[[filled:]]"})
+	h, _, _, _ := newHarness(t, []string{"Who is your hero?\n[[filled:; chips: A fox, A dragon]]"})
 	srv := serve(t, muxFor(t, h))
 
 	res, err := h.start(t.Context())
@@ -315,6 +365,17 @@ func TestTranscriptRouteServesTheCatchUpShape(t *testing.T) {
 	first, _ := turns[0].(map[string]any)
 	if first["role"] != RoleInterviewer || first["text"] != "Who is your hero?" {
 		t.Fatalf("turn[0] = %v, want the opening question with the control line stripped", first)
+	}
+	current, ok := body["current"].(map[string]any)
+	if !ok {
+		t.Fatalf("current = %v, want the opening replay payload", body["current"])
+	}
+	if current["turn"] != float64(1) || current["text"] != "Who is your hero?" {
+		t.Fatalf("current = %v, want turn 1 with the opening text", current)
+	}
+	chips, ok := current["chips"].([]any)
+	if !ok || len(chips) != 2 || chips[0] != "A fox" || chips[1] != "A dragon" {
+		t.Fatalf("current chips = %v, want the opening choices", current["chips"])
 	}
 	if _, ok := body["created_at"]; !ok {
 		t.Fatal("created_at missing from the catch-up body")

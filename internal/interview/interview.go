@@ -219,6 +219,7 @@ type Chatter interface {
 // keep the transcript ordered. Satisfied by *store.DB.
 type interviewStore interface {
 	CreateBook(ctx context.Context, title string) (store.Book, error)
+	UpdateBook(ctx context.Context, book store.Book) error
 	CreateInterview(ctx context.Context) (store.Interview, error)
 	Interview(ctx context.Context, id string) (store.Interview, error)
 	UpdateInterview(ctx context.Context, iv store.Interview) error
@@ -353,16 +354,27 @@ func Topic(id string) string { return TopicPrefix + id }
 type session struct {
 	mu sync.Mutex
 
-	filled      checklist // slots the model has reported so far
-	streak      int       // consecutive low-effort child answers — the chip signal
-	stallStreak int       // consecutive stall-word child answers ("i dunno")
-	lastAnswer  string    // the previous child answer, normalised — the repetition check
-	exchanges   int       // child answers processed so far
-	inFlight    bool      // a turn (including the opening question) is running
-	ending      bool      // end decided; goodbye turn is running
-	ended       bool      // terminal; no further answers accepted
-	chips       []string  // options the last published question offered
-	turnErr     string    // machine class of the last failed turn; "" when none
+	filled      checklist        // slots the model has reported so far
+	streak      int              // consecutive low-effort child answers — the chip signal
+	stallStreak int              // consecutive stall-word child answers ("i dunno")
+	lastAnswer  string           // the previous child answer, normalised — the repetition check
+	exchanges   int              // child answers processed so far
+	inFlight    bool             // a turn (including the opening question) is running
+	ending      bool             // end decided; goodbye turn is running
+	ended       bool             // terminal; no further answers accepted
+	chips       []string         // options the last published question offered
+	current     *currentQuestion // latest question metadata for catch-up
+	turnErr     string           // machine class of the last failed turn; "" when none
+}
+
+// currentQuestion is the authoritative event metadata retained while the
+// interview is live. It closes the gap between a broker event published
+// before a subscriber exists and the transcript catch-up request.
+type currentQuestion struct {
+	turn     int
+	text     string
+	chips    []string
+	audioURL string
 }
 
 // sessionFor returns the session for iv, creating it on first touch.

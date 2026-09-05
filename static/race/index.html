@@ -29,12 +29,22 @@
 -->
 <style>
   :root{
-    /* T9 owns the real palette; these tokens drop straight into T9's theme. */
-    --cream:#fdf3e7;
-    --ink:#3b2a21;
-    --track:#f6e6d3;
-    --line:#d8c3ab;
-    --lit:#c9885a;
+    /* T9 supplies the settled UI palette; these aliases keep the T9a
+       widget's one-number interface and animal artwork unchanged. */
+    --bg:#eef8f2;
+    --surface:#d8efe3;
+    --ink:#17332b;
+    --muted:#4f6d64;
+    --mint:#7fd4b0;
+    --accent:#187158;
+    --rule:#55907a;
+    --warm:#e8a54a;
+    --film:#12241e;
+    --white:#fff;
+    --cream:var(--bg);
+    --track:var(--surface);
+    --line:var(--rule);
+    --lit:var(--mint);
     --pages:8;              /* §Decisions row 8: one constant, here */
     --runner-w:64px;
     --track-pad:8px;
@@ -109,7 +119,7 @@
   .markers::before{content:"";position:absolute;inset:0;
     transform-origin:left;
     transform:scaleX(calc(var(--done) / var(--pages)));
-    background:rgba(201,136,90,.16);transition:transform 1.2s ease}
+    background:var(--mint);opacity:.16;transition:transform 1.2s ease}
 
   .lane{position:relative;height:52px}
   /* transform only — never a layout property, on a screen that holds
@@ -158,10 +168,13 @@
   /* Demo scaffolding controls */
   .demo-controls{margin-top:16px;display:flex;gap:10px;align-items:center}
   button{font:inherit;padding:12px 20px;border:0;border-radius:14px;
-         background:var(--lit);color:#fff;min-height:48px;touch-action:manipulation;
+         background:var(--accent);color:var(--white);min-height:48px;touch-action:manipulation;
          cursor:pointer;font-weight:600}
   button.reset{background:var(--ink);opacity:.85}
   button:active{transform:scale(.98)}
+  body.embed-only{padding:0}
+  body.embed-only h1,body.embed-only p,body.embed-only .demo-controls{display:none}
+  body.embed-only .race{border-radius:0}
 </style>
 
 <h1>Your book is being drawn…</h1>
@@ -362,3 +375,16 @@
 </div>
 <!-- ^ demo scaffolding only. In the product the number comes from the
      server-rendered attribute, updated by one Preact component. -->
+<script>
+  (() => {
+    const race = document.getElementById("race");
+    if (new URLSearchParams(location.search).get("embed") === "1") {
+      document.body.classList.add("embed-only");
+    }
+    addEventListener("message", event => {
+      if (event.origin !== location.origin || !event.data || event.data.type !== "thutapi-race-done") return;
+      const done = Math.max(0, Math.min(8, Number(event.data.done) || 0));
+      race.style.setProperty("--done", String(done));
+    });
+  })();
+</script>

@@ -1,0 +1,28 @@
+# T9 round 1 — remediation
+
+The seven findings in `t9-round1.md` were remediated within T9-owned paths.
+The closed interview, audio, generation, and store packages were left
+unchanged. No physical-phone automation is claimed; deterministic browser
+coverage is provided by `static/browser-test.html` and `static/browser-test.js`.
+
+| # | Where | What | Fix | Pin | Mutation |
+|---|---|---|---|---|---|
+| H1 | `static/app.js` (`App`, `Interview` catch-up and SSE error handlers) | An opening-turn failure in `GET /interviews/{id}` left the child in a permanent waiting state with Send disabled. | Read the machine error class, render a warm recovery message, clear waiting, and leave the answer form available so the child can try again. | `static/browser-test.html` opening-error case asserts the warm status and enabled Send control. | Removing the `state.error` branch or restoring `setWaiting(true)` makes the opening-error case fail. |
+| H2 | `static/app.js`, `internal/web/templates/shelf.html` | The shelf created an Audio object and then navigated away, losing the user gesture and the object before interview audio arrived. | Render the shelf through the same Preact root, intercept the CTA, unlock one Audio object, and use `history.pushState` through byline and interview screens in the same document. Cold links retain the speaker fallback. | Browser contract case asserts the shelf CTA creates exactly one Audio object and remains on `/interview/new`; source audit has one `new Audio()` site. | Restoring the anchor navigation or adding per-clip construction breaks the same-document and single-object assertions. |
+| H3 | `static/app.js`, `static/app.css` | The ended interview skipped the required grown-up record/upload/skip decision and generated immediately. | Added an adult step with equally weighted record and upload mount points (`data-voice-record`, `data-voice-upload`, `data-voice-capture`) plus an explicit `data-voice-skip`; record/upload only select a mount mode, while skip alone calls generation, preserving T13's capture boundary. | Browser contract case asserts all three controls, no generation before a choice, and generation after Skip. | Replacing the adult step with the old direct generate button removes the three controls and fails the case. |
+| M1 | `static/app.js`; `static/race/race.html`, `static/race/index.html` | T9 had a private race clone, so T9a's tested widget and future fixes were not used. | Replaced the clone with an iframe consuming `/static/race/race.html?embed=1`. A same-origin postMessage bridge supplies only the documented done number; both T9a copies retain byte identity, and the settled UI tokens are used in the widget. | Browser contract case asserts the generation screen points at the T9a widget and updates its title from a `page_approved` count; `go test ./static/race -race` remains green. | Restoring the private `Race` markup or changing the iframe source makes the handoff assertion fail. |
+| M2 | `static/app.css`; T9a race theme aliases | The app omitted the settled palette tokens and used a white-on-terracotta button below the required contrast ratio. | Defined `--bg`, `--surface`, `--ink`, `--muted`, `--mint`, `--accent`, `--rule`, `--warm`, `--film`, and a white label token; all app colours now reference tokens, with `--accent` carrying labels. The race's six UI aliases and demo button use the settled palette. | `rg` confirms the required token set in `static/app.css` and no non-token app colour declarations; the documented white-on-`#187158` pair is 5.93:1. | Restoring literal app colours or `#e66d3d` makes the token/contrast contract fail. |
+| M3 | `static/app.js` catch-up and interview stream handling | Catch-up discarded chips, did not establish the current turn for late audio, and could replay the same question. | Subscribe before the catch-up read; recover the current interviewer turn and its same-tab cached chips/audio; track seen SSE turns, keep `activeTurn` current, accept the first authoritative event for a recovered turn, and ignore later duplicates. Late `question_audio` updates the current question and remains available for the speaker chip. | Browser contract case replays a recovered turn, asserts its chip survives, sends a late current-turn audio event, and asserts the speaker remains without duplicate chips. | Restoring `chips: []`, `activeTurn` zero, or unconditional question replacement makes the catch-up case fail. |
+| M4 | `static/browser-test.html`, `static/browser-test.js` | The frontend had no executable coverage of its load-bearing API/SSE/audio/adult/race paths, and no honest acceptance record. | Added a dependency-free browser contract page with mocked fetch/EventSource/Audio covering the deterministic portions of H1–H3, catch-up/audio state, shelf gesture, skip gating, and race progress. It is runnable from the static server and makes no physical-phone claim. | `node --check static/app.js static/browser-test.js`; serve the repo and open `/static/browser-test.html` to run the named cases. | Removing the behavioral branches or the race handoff makes the corresponding browser assertions fail; no claim is made for real-device keyboard/audio behavior in this environment. |
+
+## Checks
+
+* `go test ./... -race` — PASS
+* `go vet ./...` — PASS
+* `gofmt -l .` — clean
+* `git diff --check` — clean
+* `node --check static/app.js` — PASS
+* `node --check static/browser-test.js` and all `static/vendor/*.js` — PASS
+* `go test ./static/race -race` — PASS; `race.html` and `index.html` remain identical
+
+**REMEDIATED — all seven round-1 findings have a fix and a pin.**

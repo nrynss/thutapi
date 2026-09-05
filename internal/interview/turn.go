@@ -206,6 +206,11 @@ func (h *Handler) questionTurn(ctx context.Context, s *session, iv store.Intervi
 	}
 	s.chips = rep.Chips
 	turnN := len(iv.Turns)
+	s.current = &currentQuestion{
+		turn:  turnN,
+		text:  rep.Text,
+		chips: append([]string(nil), rep.Chips...),
+	}
 	h.publish(iv.ID, "question", questionEvent{
 		Turn:      turnN,
 		Text:      rep.Text,
@@ -229,6 +234,11 @@ func (h *Handler) questionTurn(ctx context.Context, s *session, iv store.Intervi
 				h.log.Warn("interview: synthesize question audio returned empty media ID", "id", id, "turn", turnN)
 				return
 			}
+			s.mu.Lock()
+			if s.current != nil && s.current.turn == turnN {
+				s.current.audioURL = "/media/" + mediaID
+			}
+			s.mu.Unlock()
 			h.publish(id, "question_audio", questionAudioEvent{
 				Turn:     turnN,
 				AudioURL: "/media/" + mediaID,

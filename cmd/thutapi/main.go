@@ -33,6 +33,7 @@ import (
 	"thutapi/internal/mediastore"
 	"thutapi/internal/store"
 	"thutapi/internal/stream"
+	"thutapi/internal/web"
 )
 
 // version is stamped at link time via -X main.version=<v>. Default "dev"
@@ -149,6 +150,11 @@ func newServer(log *slog.Logger, media *mediastore.Store, interviews *interview.
 	// /healthz is the one route T0 ships. Liveness only — no dependency
 	// checks, no probes. That distinction belongs to a later track.
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
+	// T9's human page and static-asset routes. API routes remain plural.
+	s.mux.HandleFunc("GET /{$}", web.Shelf)
+	s.mux.HandleFunc("GET /interview/{id}", web.Interview)
+	s.mux.HandleFunc("GET /book/{id}", web.Book)
+	s.mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
 	// T3's one sanctioned route line (PLAN.md invariant 5): media
 	// blobs serve through the mediastore handler, which answers Range
 	// requests so narration can be scrubbed (PLAN.md §T3).
