@@ -151,3 +151,60 @@ func TestDeleteBookCascades(t *testing.T) {
 		t.Fatalf("media survived cascade: %v", err)
 	}
 }
+
+// TestBookByline: question zero's answer round-trips through create →
+// update → read → list, and clearing it is a legal state rather than a
+// validation error (PLAN.md §The flow, screen 3 — a skipped question
+// zero drops the title card's byline line, so "" must survive).
+//
+// Mutation: drop `byline` from either SELECT, or drop it from the
+// UPDATE, and the round-trip assertions below fail.
+func TestBookByline(t *testing.T) {
+	ctx := t.Context()
+	db := openTestDB(t)
+
+	b, err := db.CreateBook(ctx, "Mira and Bramble's Long Day")
+	if err != nil {
+		t.Fatalf("create book: %v", err)
+	}
+	if b.Byline != "" {
+		t.Errorf("new book byline = %q, want empty", b.Byline)
+	}
+
+	b.Byline = "Mira"
+	if err := db.UpdateBook(ctx, b); err != nil {
+		t.Fatalf("update book: %v", err)
+	}
+	got, err := db.Book(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("read book: %v", err)
+	}
+	if got.Byline != "Mira" {
+		t.Errorf("byline = %q, want %q", got.Byline, "Mira")
+	}
+	if got.Title != b.Title {
+		t.Errorf("title = %q, want %q", got.Title, b.Title)
+	}
+
+	// Listing carries it too — the shelf (screen 1) reads books, not one book.
+	list, err := db.Books(ctx)
+	if err != nil {
+		t.Fatalf("books: %v", err)
+	}
+	if len(list) != 1 || list[0].Byline != "Mira" {
+		t.Errorf("Books() = %+v, want one book with byline Mira", list)
+	}
+
+	// Skipping question zero is legal: an empty byline is not ErrInvalid.
+	got.Byline = ""
+	if err := db.UpdateBook(ctx, got); err != nil {
+		t.Fatalf("clearing byline must be legal, got: %v", err)
+	}
+	cleared, err := db.Book(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("read book: %v", err)
+	}
+	if cleared.Byline != "" {
+		t.Errorf("byline after clear = %q, want empty", cleared.Byline)
+	}
+}

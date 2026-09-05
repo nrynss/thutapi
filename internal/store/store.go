@@ -153,6 +153,7 @@ var schema = []string{
 	`CREATE TABLE IF NOT EXISTS books (
 		id         TEXT PRIMARY KEY,
 		title      TEXT NOT NULL,
+		byline     TEXT NOT NULL DEFAULT '',
 		created_at INTEGER NOT NULL
 	)`,
 	`CREATE TABLE IF NOT EXISTS pages (
