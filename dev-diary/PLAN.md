@@ -78,7 +78,7 @@ surprise us.
 | 6 | verdict → **disk** | approved page → `mediastore` blob + `store` row | **live** | T6b item 3 (`6664be3`) — sheets and pages persisted by T7's `BookWriter` and fetched back through the real `GET /media/{id}` as 200 `image/jpeg`, byte-identical; `BookMedia` returns exactly 4 placed rows |
 | 7 | **Speech 2.8** → narration | per-page text + emotion → one MP3 per page | **live** (transport + shape), track not built | T2b — real round-trip, result at `outcome.audio_url`, publicly fetchable, verified a real 128 kbps MP3. **T8 owes T10 one persisted clip per page, in page order** |
 | 8 | pages + clips → **MP4** | ffmpeg segments + `concat -c copy` → one downloadable film | **verified, including inside the shipping image** | t10-video-record.md — the eight real T6b renders muxed to a playable 49.2 s file in 13.3 s; full chain re-run under the containerised ffmpeg 7.1 as uid 65532. Narration was **stand-in**, and serving/on-device playback are **not** covered — see that record's §What is NOT verified |
-| 9 | MP4 → **the child** | book page, `<video controls playsinline>`, download, shareable URL | **not yet** | T10b owns the page/catch-up route; **T10d is DONE**: `mediastore.supportedTypes` carries `video/mp4`, film persistence unlocked |
+| 9 | MP4 **or PDF** → **the child** | book page, `<video>` when a film exists, and **always** a PDF download | **not yet** | T10f, T10b owns the page/catch-up route; **T10d is DONE**: `mediastore.supportedTypes` carries `video/mp4`, film persistence unlocked |
 
 Hops 1–6 are proven against production. Hop 8 is proven against real inputs
 offline. **Hops 7 and 9 are the remaining risk**, and they are exactly T8 and
@@ -114,6 +114,7 @@ size as the yardstick:
 | ~~**T10a**~~ | `internal/bookvideo/**`, ffmpeg lines in `Dockerfile` | — | **DONE** | Closed at round-2 APPROVE 0/0/0/0. Video pipeline and static ffmpeg |
 | **T10b** | book template in `internal/web/**`, `static/book/**`, route lines | T9, T10a, T10c, T10d | **S–M** | Now also owns **C4, the catch-up read** — without it a reload at minute four restarts the race at zero |
 | ~~**T10d**~~ | `supportedTypes` in `internal/mediastore/` + its test | — | **DONE** | Closed at round 1: **APPROVE 0/0/0/0, zero residue**. Added `video/mp4` with Range support |
+| **T10f** | `internal/bookpdf/**` + its own `application/pdf` and `bookgen` stage lines | T5, T7 | **M** | Every book gets a PDF — and it is the whole artifact while TTS is out |
 | ~~**T10e**~~ | `internal/bookgen/live_test.go` + `t10e-live-record.md` | T10d | **DONE** | Closed at round-1 APPROVE 0/0/0/0. Full joined pipeline verified live end-to-end |
 | ~~**T10c**~~ | `internal/bookgen/**` + route lines | T5, T6, T7, T8, T10a | **DONE** | Closed at round-1 APPROVE 0/0/0/0 |
 | **T11** gate | `internal/gate/**` + route wrap | — | **S** | Middleware against no one else's code |
@@ -163,7 +164,7 @@ event**, not a field.
 
 #### The critical path
 
-**~~T7~~ → ~~T8~~ → ~~T10c~~ → ~~T10d~~ → ~~T10e~~ → T9 → T10b → T11 → T14**, with ~~T10a~~,
+**~~T7~~ → ~~T8~~ → ~~T10c~~ → ~~T10d~~ → ~~T10e~~ → T10f → T9 → T10b → T11 → T14**, with ~~T10a~~,
 ~~T9a~~, ~~T8b~~ and ~~T5c~~ done.
 
 **T10d jumps the queue.** It is one map entry, it depends on nothing, and until
@@ -217,6 +218,7 @@ routes anyway; not worth doing speculatively before then.**
 | **T10c** | **DONE** 2026-09-05, closed at `61e4da5` — **round-1 APPROVE 0/0/0/0, zero residue** (t10c-round1.md; five reviewer mutations red, byte-identical restores). `internal/bookgen` joins every stage: `POST /interviews/{id}/generate` → job on the book's topic; 409-busy double-fire refusal, fresh run after terminal; stages in order (structure with byline/page-cast rows → illustrate with Judge+Persist → narrate → bookvideo → film persisted + attached); events `page_approved {n,image_url}` (drives T9a's `--done`) / `book_ready {video_url}` / `failed {}` exactly-once incl. panic; failure total + terminal, no auto retry; store-side catch-up pinned. Contract rows C1–C6 sanctioned. **Two cross-track deliverables ride on this:** C2 — mediastore's closed type set lacks `video/mp4`, so production film persist lands when its owner adds the type (lifecycle pinned via the filmStore seam meanwhile); C4 — the HTTP book-state catch-up read is T10b's. |
 | **T10a** | **DONE** 2026-09-05. Closed after round-1 remediation and **round-2 APPROVE 0/0/0/0, zero residue** (t10a-round1.md, t10a-remediation-round1.md, t10a-round2.md). Implemented video pipeline in `internal/bookvideo` (`types.go`, `command.go`, `video.go`, `bookvideo_test.go`): title card (blurred page 1 with title + byline via `textfile=`), page segments (`-shortest`, scale/pad/setsar 1080x1350 4:5 portrait, libx264/aac), end card (flat `0x1b1614` with domain attribution), and concat demuxer (`-c copy +faststart` with MP4 metadata tags). Bounded concurrency via `errgroup.SetLimit`. Added static ffmpeg 7.1 pinned by immutable sha256 digest to `Dockerfile`. Coverage 89.1%. |
 | **T10b** | Not started. Book template under `internal/web/**`, `static/book/**`, and route lines in `newServer`. **Also owns T10c's contract row C4** — the HTTP book-state catch-up read (§T10, *What the player owes*). |
+| **T10f** | **Not started. Assigned 2026-09-05.** MiniMax TTS is out across the whole family (2.8/2.6/02/01, hd and turbo — every one 503s) and non-MiniMax narration is ruled out, so a book with no voice has no film: §T10a's timing model is `-shortest` against each page's own clip. **Every book now also gets a PDF, always**, beside the film; when narration 503s the run still **succeeds** with the PDF and emits `narration_unavailable`. Owns its own lines in `bookgen` and `mediastore` under contract rows — **T10c/T10d/T10e stay closed**. Carries the repo's third dependency (`github.com/go-pdf/fpdf`, pure Go, MIT) with its reason written down per §T0. See §T10f. |
 | **T10e** | **DONE** 2026-09-05. Closed at round 1: **APPROVE 0/0/0/0, zero residue** (t10e-live-record.md, t10e-round1.md). Full generation pipeline verified live end-to-end: Phase-A interview transcript structured by M3 (22.4s); 3 reference sheets + 8 pages illustrated via seedream-5.0-lite with M3 consistency judge; live judge caught character drift on pages 4 and 8, triggering T7 regeneration loop, and approved on re-render; upstream TTS 503 capacity outage documented; video rendered via ffmpeg 7.1 in 5.1s (title card + 8 segments + end card); MP4 persisted in mediastore; HTTP serving verified (200 OK immutable + 206 Partial Content Range); ffprobe confirmed 1080x1350 h264/aac; SSE sequence verified: 8 page_approved, 1 book_ready, 0 failed. Probe in `internal/bookgen/live_test.go`. |
 | **T10d** | **DONE** 2026-09-05. Closed at round 1: **APPROVE 0/0/0/0, zero residue** (t10d-round1.md). Resolves T10c's contract row C2: added `"video/mp4": true` to closed `mediastore.supportedTypes`, updated package doc and set doc comment, replaced `"video/mp4"` in unsupported test cases with `"video/webm"`, and pinned persistence, serving, and Range requests (206 Partial Content, sub-slice and suffix) via `TestPersistAndServeVideoMP4_RangeRequest`. Coverage: mediastore 95.6%. |
 | **T11** | Not started. Gate targets exactly one route — `POST /interviews/{id}/generate`, the only one that spends money — and must **not** gate the shelf, the book page or `GET /media/{id}`. **Prewarm cannot run before T5c and T10d**, or the judges' landing books are generated twice. Item 4 now specs the unplaced-orphan sweep. |
@@ -1509,7 +1511,7 @@ Screens 1–5 of §The flow. Screen 6 (the book) is T10b's.
 | 2 | *(none)* | Deliberately absent — see above |
 | 3 | Interview | Question zero, then chips; text never waits on audio |
 | 4 | Grown-up step | Record / upload / **skip**, all three equally weighted |
-| 5 | The wait | The race, driven by real `page_approved` counts |
+| 5 | The wait | The race, driven by real `page_approved` counts — and `narration_unavailable` handled warmly, never as an error |
 
 ### The two streams — the thing to get straight before writing code
 
@@ -1555,9 +1557,14 @@ triggered rather than automatic (decision 20).
      blocks a retry — the failure path's "try again" is exactly this POST.
 
 6. GET  {events_url}                                     ← book stream
-   event: page_approved {"n":3,"image_url":"/media/<id>"}
-   event: book_ready    {"video_url":"/media/<id>"}
-   event: failed        {}
+   event: page_approved          {"n":3,"image_url":"/media/<id>"}
+   event: narration_unavailable  {}   MiniMax TTS is out (§T10f). A warm line,
+                                      not an error: the run still SUCCEEDS,
+                                      with a PDF and no film.
+   event: book_ready             {"pdf_url":"/media/<id>","video_url":"…"}
+                                      video_url is EMPTY when there is no film.
+                                      A pdf_url is always present.
+   event: failed                 {}
 ```
 
 **`GET /interviews/{id}` is the catch-up read** for the interview half — it
@@ -1644,6 +1651,8 @@ link works without JS.
 * Edit a closed track's package without a declared contract row.
 * Fake progress, invent an events route, or poll instead of subscribing.
 * Ship a CDN link, a build step, or a second `Audio` element.
+* Treat a missing `video_url` as a failure. A book with a PDF and no film is a
+  **successful** book whose voices were out (§T10f) — the child still made one.
 
 ---
 
