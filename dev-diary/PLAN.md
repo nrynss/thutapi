@@ -78,7 +78,7 @@ surprise us.
 | 6 | verdict → **disk** | approved page → `mediastore` blob + `store` row | **live** | T6b item 3 (`6664be3`) — sheets and pages persisted by T7's `BookWriter` and fetched back through the real `GET /media/{id}` as 200 `image/jpeg`, byte-identical; `BookMedia` returns exactly 4 placed rows |
 | 7 | **Speech 2.8** → narration | per-page text + emotion → one MP3 per page | **live** (transport + shape), track not built | T2b — real round-trip, result at `outcome.audio_url`, publicly fetchable, verified a real 128 kbps MP3. **T8 owes T10 one persisted clip per page, in page order** |
 | 8 | pages + clips → **MP4** | ffmpeg segments + `concat -c copy` → one downloadable film | **verified, including inside the shipping image** | t10-video-record.md — the eight real T6b renders muxed to a playable 49.2 s file in 13.3 s; full chain re-run under the containerised ffmpeg 7.1 as uid 65532. Narration was **stand-in**, and serving/on-device playback are **not** covered — see that record's §What is NOT verified |
-| 9 | MP4 **or PDF** → **the child** | book page, `<video>` when a film exists, and **always** a PDF download | **not yet** | T10f, T10b owns the page/catch-up route; **T10d is DONE**: `mediastore.supportedTypes` carries `video/mp4`, film persistence unlocked |
+| 9 | MP4 **and/or PDF** → **the child** | book page, `<video>` when a film exists, and **always** a PDF download | **T10f DONE** | `326d2c1` — every book gets its PDF (round-3 APPROVE); T10d is DONE (`video/mp4` persisted). The page/catch-up route is T10b's; once T10g lands, a film exists either way (captioned, silent or narrated) and both URLs are always present |
 
 Hops 1–6 are proven against production. Hop 8 is proven against real inputs
 offline. **Hops 7 and 9 are the remaining risk**, and they are exactly T8 and
@@ -114,7 +114,7 @@ size as the yardstick:
 | ~~**T10a**~~ | `internal/bookvideo/**`, ffmpeg lines in `Dockerfile` | — | **DONE** | Closed at round-2 APPROVE 0/0/0/0. Video pipeline and static ffmpeg |
 | **T10b** | book template in `internal/web/**`, `static/book/**`, route lines | T9, T10a, T10c, T10d | **S–M** | Now also owns **C4, the catch-up read** — without it a reload at minute four restarts the race at zero |
 | ~~**T10d**~~ | `supportedTypes` in `internal/mediastore/` + its test | — | **DONE** | Closed at round 1: **APPROVE 0/0/0/0, zero residue**. Added `video/mp4` with Range support |
-| **T10f** | `internal/bookpdf/**` + its own `application/pdf` and `bookgen` stage lines | T5, T7 | **M** | Every book gets a PDF — and it is the whole artifact while TTS is out |
+| ~~**T10f**~~ | `internal/bookpdf/**` + its own `application/pdf` and `bookgen` stage lines | T5, T7 | **DONE** `326d2c1` | Closed at round-3 APPROVE 0/0/0/0. PDF always; narration-503 → `narration_unavailable`, PDF-only success (pre-activation — the film-either-way flip is T10g's) |
 | **T10g** | its own caption lines in `internal/bookvideo` + a wrap helper | T5, T10a | **S–M** | **Not deferrable.** Captions make a silent film possible, which is the only video artifact while TTS is out. Geometry moves to 2:3, so T10e needs a re-run |
 | ~~**T10e**~~ | `internal/bookgen/live_test.go` + `t10e-live-record.md` | T10d | **DONE** | Closed at round-1 APPROVE 0/0/0/0. Full joined pipeline verified live end-to-end |
 | ~~**T10c**~~ | `internal/bookgen/**` + route lines | T5, T6, T7, T8, T10a | **DONE** | Closed at round-1 APPROVE 0/0/0/0 |
