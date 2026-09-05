@@ -1105,7 +1105,7 @@ to make that six minutes survivable.
 | 1 | **Shelf** | Two or three prewarmed books, and one big *Make your own book*. Cost control (§T11 item 2) and the judge's default landing | T9 + T11 |
 | 2 | *(no screen)* | **The CTA on screen 1 *is* the "Tap to start" gesture.** It unlocks the `Audio` element §T8 needs and costs no extra tap and no extra screen | T9 |
 | 3 | **Interview** | Chips, text box as the escape hatch. Questions stream over SSE and speak; text never waits on audio | T9 + T4/T8 |
-| 4 | **The grown-up step** | Interview ends → *"a grown-up can add a voice"* → record / upload / skip. **One screen, skippable, exactly once** | T13 |
+| 4 | **The grown-up step** | Interview ends → *"a grown-up can add a voice"* → record / upload / skip. **One screen, skippable, exactly once.** T9 owns the step; T13 owns what goes in it — see below | T13 |
 | 5 | **The wait** | The race (below) plus pages landing as they are approved. ~6 minutes | T9 |
 | 6 | **The book** | Video plays, download, shareable URL, cold-open works without JS | T10b |
 
@@ -1142,7 +1142,28 @@ appending an `ALTER TABLE` — `migrate` applies `schema` in order and leans on
 production data, and the box's generated media is disposable until judging
 opens.
 
-### Screen 4 — voice capture sits at the interview's end (decided)
+### Screen 4 — who builds it: T9 owns the step, T13 owns the capture
+
+**Both tracks claimed this screen** — §T9 owns "screens 1–5" and `static/**`,
+while §T13 owns "both capture modes in `static/**` (adult corner)". Two tracks
+in one file is the collision §Sequencing names as the only real merge hotspot,
+so the boundary is drawn here rather than discovered in a conflict.
+
+* **T9 owns the step**: that it exists, where it sits, the layout, the three
+  equally-weighted buttons, the skip path, and **a mount point** where capture
+  goes. Nothing else.
+* **T13 owns everything in the mount point**: both capture modes, the upload
+  route, the transcode, the clone call.
+* **The seam is a mount point**, the same idiom as `--done` for §T9a and the
+  nil-able `Judge`/`Persist` for `illustrate`. T9 ships complete with nothing
+  mounted; T13 mounts into it without editing T9's screen.
+
+**With nothing mounted, screen 4 does not render at all.** A step whose only
+option is *skip* is a screen that wastes a tap — so if T13 has not landed, the
+interview's end goes straight to screen 5. **T9 therefore does not depend on
+T13**, and neither does anything else: T13 depends on T9, not the reverse.
+
+### Voice capture sits at the interview's end (decided)
 
 Not before the interview: an adult-facing detour in front of every child's
 first run. Not after the book: that means re-synthesising narration and
@@ -1492,7 +1513,10 @@ bundling is unrestricted.
 templates, plus its route lines in `newServer`.
 
 **Does NOT own** — every one of these is already built or belongs elsewhere,
-and reaching into them is the failure mode this section exists to prevent:
+and reaching into them is the failure mode this section exists to prevent.
+**T9 depends on neither T12 nor T13**: T12 has no browser surface at all (the
+bed is mixed into the film), and T13 mounts into screen 4 rather than T9
+waiting on it (§The flow screen 4).
 
 | Not T9's | Whose | State |
 | --- | --- | --- |
