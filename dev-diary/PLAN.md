@@ -129,6 +129,14 @@ implementation detail — propose it in the track's review file first
 8. **Errors cross a package boundary as a sentinel**, matched with
    `errors.Is` — an `internal/gmi` sentinel, or one the track declares itself.
    Never a matched substring of a provider message.
+9. **A `b`-suffixed track owns the `live_test.go` in each package its parent
+   track owns**, and owns nothing else. Live verification is split off into a
+   `b` track whenever it needs credentials, an operator, or the world (the
+   T1/T1b split is the precedent; T2b and T5b follow it). Probes go in
+   `//go:build live` files so they never run in CI and never gate a build —
+   they are evidence, and `AGENTS.md` §Testing forbids a live call from being a
+   CI gate. A parent that owns no Go package leaves its `b` track owning no
+   repo paths at all, which is why T1b's `Owns` line reads as it does.
 
 ---
 
@@ -424,6 +432,39 @@ a 4xx. Every call carries a context deadline.
 
 ---
 
+---
+
+## T2b — Live GMI endpoint verification  *(DONE — 2026-09-05, see t2b-t5b-live-record.md)*
+
+**Owns:** `internal/gmi/text/live_test.go`, `internal/gmi/media/live_test.go`
+— the `//go:build live` files in each package T2 owns. Nothing else.
+
+**Depends on:** T2 (clients), plus a working `GMI_API_KEY`. **Unblocks:** T6,
+T7, T8 — every track that makes a real call.
+
+**Done when:** both endpoints are reached live and their responses decode into
+the packages' typed structs — the half of T2's original `Done when` that no
+agent could run while the operator key was rejected by both providers.
+
+Closed 2026-09-05. Both endpoints reached, both error classifications confirmed
+against real upstream responses. The probes are committed rather than pasted,
+so they satisfy `AGENTS.md` §Definition of done item 4 (a cited check passes
+from a clean tree):
+
+```bash
+set -a; . ./.env; set +a
+go test -tags live -run Live -v ./internal/gmi/text/ ./internal/gmi/media/
+```
+
+**What it changed downstream.** The media package doc claimed TTS returns a
+binary blob. It returns the request-queue envelope, with the audio at
+`outcome.audio_url` on `storage.googleapis.com` — so **T8 downloads and
+persists rather than receiving bytes**, which is exactly the expiring-URL case
+§T3 anticipated. That URL is publicly fetchable with no credential (verified:
+`200 audio/mpeg`, 63,348 bytes, real MP3), which hands **T13 a safety
+question**: a cloned child voice would sit at an unauthenticated public URL on
+GMI's bucket. `AGENTS.md` §Safety governs what *we* host, not what GMI does.
+
 ## T3 — Store and media  *(DONE — closed at round 2, see t3-round2.md)*
 
 **Owns:** `internal/store/**`, `internal/mediastore/**`, plus the `/media/` route line in `newServer`.
@@ -551,6 +592,47 @@ Validate before use. A malformed structure must fail loudly into a retry, not
 half-render a book.
 
 ---
+
+---
+
+## T5b — Live Phase-B verification  *(DONE — 2026-09-05, see t2b-t5b-live-record.md)*
+
+**Owns:** `internal/story/live_test.go` — the `//go:build live` file in the
+package T5 owns. Nothing else.
+
+**Depends on:** T5 (structuring), plus a working `GMI_API_KEY`.
+**Unblocks:** T6 (it consumes the `story.Story` this proves M3 actually
+produces).
+
+**Done when:** a real transcript yields schema-valid JSON twice running,
+against the live model with `thinking` ON, and MiniMax is shown to accept a
+`system`-role corrective message mid-conversation — the mechanism
+`story.Structure`'s retry depends on.
+
+```bash
+set -a; . ./.env; set +a
+go test -tags live -run Live -v ./internal/story/
+```
+
+Closed 2026-09-05. Two independent calls, both `Validate`-clean, both 8 pages,
+emotions inside the taught vocabulary, every page character present in the
+cast. The corrective-system-message acceptance holds.
+
+**Two live cast shapes handed to T6.** Both validate, and both defeat a naive
+"one reference image per cast member" loop:
+
+* **Non-visual members.** Both runs emitted a `Narrator` — `visual: "no visual"`
+  in one, `"an unseen storyteller with no appearance"` in the other. Two
+  phrasings, so no literal-string match works; `Narrator` is not reservable
+  either, since a child may legitimately name a character that. A per-member
+  sheet spends ~$0.01 a book rendering nothing.
+* **One entity in two cast slots.** `Grumpy River` and `Happy River`, the
+  second's visual opening *"the same wide blue river"*. Unique names, so
+  `Validate` accepts them; under the image lock they become two unrelated
+  rivers — the exact drift T6 exists to prevent.
+
+Neither is a T5 defect: the schema and validator do what they were specified to
+do. Both are T6's to absorb.
 
 ## T6 — Illustration
 

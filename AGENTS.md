@@ -12,7 +12,9 @@ Every track runs through this loop until **APPROVE** with **zero findings
 (0/0/0/0)** across all severities. There are no exceptions.
 
 1. **Implement.** Edit only paths listed in the track's `Owns` section of
-   `dev-diary/PLAN.md`. Stay inside the seam.
+   `dev-diary/PLAN.md`. Stay inside the seam. Every track has an `Owns` line;
+   if one does not, that is a defect in `PLAN.md` — fix it before you start
+   rather than guessing your boundary.
 2. **Review.** A reviewer reads the diff against the spec and writes
    `dev-diary/adversarial-review/t<N>-round<K>.md` with verdict
    (`REMEDIATE` / `APPROVE`), findings counted by severity (C / H / M / L),
@@ -93,6 +95,28 @@ severity of the behaviour it misdescribes, because the next agent will code
 against it — see §Go style, "Docs about behaviour must match the behaviour". A
 docstring claiming a retry that does not exist is an H, not an exempt typo,
 and it goes through the full cycle like anything else.
+
+### Live verification splits into a `b` track
+
+Work that needs credentials, an operator, or the world does not belong in the
+track that writes the code. Split it into a `b`-suffixed track — T1/T1b is the
+precedent, T2b and T5b follow it.
+
+* **A `b` track owns the `live_test.go` in each package its parent owns**, and
+  nothing else. A parent owning no Go package leaves its `b` track owning no
+  repo paths (T1b).
+* **Probes live behind `//go:build live`.** They never run in CI and never gate
+  a build. A live call is evidence, never a CI gate (§Testing rule 5) — it
+  needs a real key, it costs real money on the paid paths, and a red build
+  caused by someone else's outage teaches nothing.
+* **Commit the probe, not a transcript.** A pasted console log cannot be re-run;
+  §Definition of done item 4 requires a cited check to pass from a clean tree.
+  Paste the transcript into the record file *as well*, because the interesting
+  part is often the response shape rather than the pass/fail.
+* **Probe the free paths by preference.** Where a paid path must be proven,
+  prove it at the cheapest point that still fails for the right reason — model
+  resolution rejects a bad id before it renders anything, which verifies auth
+  and routing for nothing.
 
 ## Read order
 

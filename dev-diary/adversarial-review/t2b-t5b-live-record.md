@@ -150,11 +150,19 @@ to do, and `internal/story` is closed. Both are T6's to absorb.
 
 ---
 
-## Process note
+## Process note — closed
 
-Neither T2b nor T5b has an `Owns` line in `PLAN.md` — they were added as status
-rows when T2 and T5 split off their live halves. The probes above landed in
-`internal/gmi/text/`, `internal/gmi/media/` and `internal/story/`, all behind
-`//go:build live`, which is a seam nobody owns. Worth assigning before the next
-operator track: the natural rule is that a `b`-suffixed track owns the
-`live_test.go` file in each package its parent track owns.
+Neither T2b nor T5b had an `Owns` line when this record was first written;
+both existed only as status rows, with no `## ` section of their own, which is
+why the boundary was undefined. Closed the same day: both now have full
+sections with `Owns` lines, and the general rule is recorded as
+`PLAN.md` §Architectural invariants 9 and `AGENTS.md` §"Live verification
+splits into a `b` track" —
+
+> A `b`-suffixed track owns the `live_test.go` in each package its parent track
+> owns, and nothing else. Probes go behind `//go:build live`; a live call is
+> evidence, never a CI gate.
+
+That also explains T1b's `Owns` line, which reads "no repo paths": its parent
+owns the Dockerfile and the deploy script, not a Go package, so there is no
+`live_test.go` for it to own.
