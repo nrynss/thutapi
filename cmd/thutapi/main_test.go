@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -17,6 +18,9 @@ import (
 	"testing"
 	"time"
 
+	"thutapi/internal/bookgen"
+	"thutapi/internal/bookvideo"
+	"thutapi/internal/gmi/media"
 	"thutapi/internal/gmi/text"
 	"thutapi/internal/interview"
 	"thutapi/internal/job"
@@ -28,7 +32,10 @@ import (
 // newTestServer builds the server with a real store and media store
 // under a throwaway directory — /media/ is a live route, so the
 // handler behind it must exist. The interview handler (T4) gets a
-// canned-echo chatter so the interview routes answer without M3.
+// canned-echo chatter so the interview routes answer without M3; the
+// generation handler (T10c) gets stage fakes that fail loudly if a
+// route test ever drives them (no pipeline runs here — the pipeline is
+// internal/bookgen's own suite).
 func newTestServer(t *testing.T) *server {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -39,8 +46,9 @@ func newTestServer(t *testing.T) *server {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
+	mediaDir := filepath.Join(t.TempDir(), "media")
 	media, err := mediastore.Open(t.Context(), mediastore.Config{
-		Dir: filepath.Join(t.TempDir(), "media"),
+		Dir: mediaDir,
 		DB:  db,
 	})
 	if err != nil {
@@ -56,19 +64,74 @@ func newTestServer(t *testing.T) *server {
 	if err != nil {
 		t.Fatalf("build interview handler: %v", err)
 	}
-	return newServer(log, media, interviews)
+	generate, err := bookgen.New(bookgen.Config{
+		DB:       db,
+		Blobs:    media,
+		MediaDir: mediaDir,
+		Chat:     echoChatter{},
+		Judge:    echoChatter{},
+		Imager:   failImager{},
+		TTS:      failTTS{},
+		Broker:   broker,
+		Jobs:     job.New(broker),
+		Video:    failRenderer{},
+		Film:     failFilmStore{},
+		Log:      log,
+	})
+	if err != nil {
+		t.Fatalf("build generation handler: %v", err)
+	}
+	return newServer(log, media, interviews, generate)
 }
 
 // echoChatter answers every Chat call with a one-question reply that
 // never fills a checklist slot and never ends: enough for route-wiring
-// assertions, never enough for an interview. The real interview
-// behaviour is tested in internal/interview.
+// assertions, never enough for an interview. It also satisfies
+// bookgen's structure-chat and judge seams (same one-method shape).
+// The real interview behaviour is tested in internal/interview and the
+// generation pipeline in internal/bookgen.
 type echoChatter struct{}
 
 func (echoChatter) Chat(_ context.Context, _ text.ChatRequest) (*text.ChatResponse, error) {
 	return &text.ChatResponse{Choices: []text.Choice{{
 		Message: text.AssistantMessage{TextBody: "What happens next?\n[[filled:]]"},
 	}}}, nil
+}
+
+// failImager, failTTS, failRenderer and failFilmStore are bookgen
+// stage fakes that fail loudly if a cmd route test ever drives a
+// generation: the pipeline itself is tested in internal/bookgen with
+// its own scripted fakes, and this file only pins the route seam.
+type failImager struct{}
+
+func (failImager) GenerateImage(context.Context, string, string, media.ImageOptions) ([]byte, error) {
+	return nil, fmt.Errorf("failImager: unexpected GenerateImage in a cmd route test")
+}
+
+func (failImager) EditImage(context.Context, string, string, []string, media.ImageOptions) ([]byte, error) {
+	return nil, fmt.Errorf("failImager: unexpected EditImage in a cmd route test")
+}
+
+type failTTS struct{}
+
+func (failTTS) SynthesizeSpeech(context.Context, string, string, string, string) ([]byte, error) {
+	return nil, fmt.Errorf("failTTS: unexpected SynthesizeSpeech in a cmd route test")
+}
+
+type failRenderer struct{}
+
+func (failRenderer) Render(context.Context, bookvideo.Input) error {
+	return fmt.Errorf("failRenderer: unexpected Render in a cmd route test")
+}
+
+type failFilmStore struct{}
+
+func (failFilmStore) Persist(context.Context, io.Reader, string) (string, error) {
+	return "", fmt.Errorf("failFilmStore: unexpected Persist in a cmd route test")
+}
+
+func (failFilmStore) Delete(context.Context, string) error {
+	return fmt.Errorf("failFilmStore: unexpected Delete in a cmd route test")
 }
 
 func TestHealthzReturnsOK(t *testing.T) {
@@ -268,6 +331,54 @@ func TestInterviewRoutesServeThroughMux(t *testing.T) {
 	srv.ServeHTTP(rr, req)
 	if got, want := rr.Code, http.StatusMethodNotAllowed; got != want {
 		t.Fatalf("GET /interviews: status = %d, want %d", got, want)
+	}
+}
+
+// TestGenerateRoutesServeThroughMux pins T10c's route lines (PLAN.md
+// invariant 5): POST /interviews/{id}/generate reaches the bookgen
+// handler (an unknown interview is a 404 from the handler, not the
+// mux), GET /interviews/{id}/generate/events likewise 404s on an
+// unknown interview, and the wrong method on either route is a 405
+// from the mux. The pipeline itself is tested in internal/bookgen;
+// here only the seam.
+func TestGenerateRoutesServeThroughMux(t *testing.T) {
+	srv := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/interviews/00000000000000000000000000000000/generate", nil)
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	if got, want := rr.Code, http.StatusNotFound; got != want {
+		t.Fatalf("POST generate unknown id: status = %d, want %d (body: %s)", got, want, rr.Body.String())
+	}
+	var body struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode generate error body: %v", err)
+	}
+	if body.Error != "not_found" {
+		t.Fatalf("generate error class = %q, want not_found", body.Error)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/interviews/00000000000000000000000000000000/generate/events", nil)
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	if got, want := rr.Code, http.StatusNotFound; got != want {
+		t.Fatalf("GET generate events unknown id: status = %d, want %d", got, want)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/interviews/00000000000000000000000000000000/generate", nil)
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	if got, want := rr.Code, http.StatusMethodNotAllowed; got != want {
+		t.Fatalf("GET generate route: status = %d, want %d", got, want)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/interviews/00000000000000000000000000000000/generate/events", nil)
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	if got, want := rr.Code, http.StatusMethodNotAllowed; got != want {
+		t.Fatalf("POST generate events route: status = %d, want %d", got, want)
 	}
 }
 

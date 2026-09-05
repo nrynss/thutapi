@@ -22,6 +22,9 @@ import (
 	"syscall"
 	"time"
 
+	"thutapi/internal/bookgen"
+	"thutapi/internal/bookvideo"
+	"thutapi/internal/gmi/media"
 	"thutapi/internal/gmi/text"
 	"thutapi/internal/interview"
 	"thutapi/internal/job"
@@ -126,20 +129,21 @@ func parseFlags(args []string) (config, error) {
 }
 
 // server is the application's HTTP root. It owns the routes and the
-// dependencies they need: GET /healthz (T0), the media handler (T3)
-// and the interview handler (T4).
+// dependencies they need: GET /healthz (T0), the media handler (T3),
+// the interview handler (T4) and the generation handler (T10c).
 type server struct {
 	mux        *http.ServeMux
 	log        *slog.Logger
 	start      time.Time
 	media      *mediastore.Store
 	interviews *interview.Handler
+	generate   *bookgen.Handler
 }
 
-// newServer wires the routes. media and interviews must be non-nil:
-// they are live handlers, not optional dependencies.
-func newServer(log *slog.Logger, media *mediastore.Store, interviews *interview.Handler) *server {
-	s := &server{mux: http.NewServeMux(), log: log, start: time.Now(), media: media, interviews: interviews}
+// newServer wires the routes. media, interviews and generate must be
+// non-nil: they are live handlers, not optional dependencies.
+func newServer(log *slog.Logger, media *mediastore.Store, interviews *interview.Handler, generate *bookgen.Handler) *server {
+	s := &server{mux: http.NewServeMux(), log: log, start: time.Now(), media: media, interviews: interviews, generate: generate}
 	// /healthz is the one route T0 ships. Liveness only — no dependency
 	// checks, no probes. That distinction belongs to a later track.
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
@@ -154,6 +158,11 @@ func newServer(log *slog.Logger, media *mediastore.Store, interviews *interview.
 	s.mux.HandleFunc("GET /interviews/{id}", s.interviews.Transcript)
 	s.mux.HandleFunc("GET /interviews/{id}/events", s.interviews.Events)
 	s.mux.HandleFunc("POST /interviews/{id}/answers", s.interviews.Answer)
+	// T10c's sanctioned route lines (PLAN.md invariant 5): start a
+	// book's generation and stream its events on the book's topic.
+	// The pipeline lives in internal/bookgen.
+	s.mux.HandleFunc("POST /interviews/{id}/generate", s.generate.Generate)
+	s.mux.HandleFunc("GET /interviews/{id}/generate/events", s.generate.Events)
 	return s
 }
 
@@ -238,6 +247,9 @@ func run(log *slog.Logger, args []string, sigs <-chan os.Signal) error {
 	// T3: the book store and the media blobs both live under the data
 	// dir, so a container restart — same volume, fresh process —
 	// reopens everything where it was left (PLAN.md §T3 Done when).
+	// mediaDir is handed to the generation handler too: blob files are
+	// named by their media id inside it, which is how the film stage
+	// reads the persisted pages and narration back.
 	db, err := store.Open(context.Background(), store.Config{
 		Path: filepath.Join(cfg.dataDir, "thutapi.db"),
 	})
@@ -245,31 +257,59 @@ func run(log *slog.Logger, args []string, sigs <-chan os.Signal) error {
 		return fmt.Errorf("open store: %w", err)
 	}
 	defer db.Close() // run returns only at shutdown; nothing outlives it
-	media, err := mediastore.Open(context.Background(), mediastore.Config{
-		Dir: filepath.Join(cfg.dataDir, "media"),
+	mediaDir := filepath.Join(cfg.dataDir, "media")
+	blobs, err := mediastore.Open(context.Background(), mediastore.Config{
+		Dir: mediaDir,
 		DB:  db,
 	})
 	if err != nil {
 		return fmt.Errorf("open media store: %w", err)
 	}
 
-	// T4: the interview loop streams each turn over SSE (PLAN.md
-	// invariant 6 — nothing blocks on M3), so main owns the broker and
-	// the job runner and hands them to both the interview handler and,
-	// later, every other long-work track.
+	// The two GMI clients are process-wide: one text client serves the
+	// interview turns, Phase-B structuring and T7's consistency judge
+	// (a *text.Client satisfies every seam); one request-queue client
+	// serves the image renders and the speech synthesis (invariant 1:
+	// nothing outside internal/gmi talks to GMI).
+	textCli := text.New()
+	mediaCli := media.New()
+
+	// T4/T10c: the interview loop and the generation pipeline stream
+	// over SSE and run off the request path (PLAN.md invariant 6 —
+	// nothing blocks on M3), so main owns the broker and the job
+	// runner and hands them to both handlers. One runner bounds the
+	// whole process's long work.
 	broker := stream.New(stream.Config{})
+	runner := job.New(broker)
 	interviews, err := interview.New(interview.Config{
-		Chat:   text.New(),
+		Chat:   textCli,
 		Store:  db,
 		Broker: broker,
-		Jobs:   job.New(broker),
+		Jobs:   runner,
 		Log:    log,
 	})
 	if err != nil {
 		return fmt.Errorf("build interview handler: %w", err)
 	}
+	generate, err := bookgen.New(bookgen.Config{
+		DB:       db,
+		Blobs:    blobs,
+		MediaDir: mediaDir,
+		Chat:     textCli,
+		Judge:    textCli,
+		Imager:   mediaCli,
+		TTS:      mediaCli,
+		Broker:   broker,
+		Jobs:     runner,
+		Video:    bookgen.NewFFmpegRenderer(bookvideo.Config{}),
+		Film:     blobs,
+		Log:      log,
+	})
+	if err != nil {
+		return fmt.Errorf("build generation handler: %w", err)
+	}
 
-	srvHTTP := newHTTPServer(cfg, newServer(log, media, interviews))
+	srvHTTP := newHTTPServer(cfg, newServer(log, blobs, interviews, generate))
 
 	errCh := make(chan error, 1)
 	go func() {
