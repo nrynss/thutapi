@@ -257,3 +257,70 @@ It needs an owner and a round. Recorded here and in §T6 rather than acted on.
   or three cast members, where today only one reference is passed.
 * **Whether a `data:` URI is accepted** in the `image` array — untested, and
   now moot, since chaining GMI's own URLs works and costs nothing.
+
+---
+
+# Item 1b — the two experiments the remediation was waiting for
+
+**Date:** 2026-09-05, ~11:50 IST. **Cost:** 4 image calls (~$0.14) + free M3
+vision verdicts. **Renders:** `data/live/seqA-1.jpg`, `bramble-1.jpg`,
+`multi-1.jpg`, `maximg-1.jpg` (gitignored; byte sizes below).
+
+## Experiment A — `sequential_image_generation: "auto"`, `max_images: 3`
+
+One prompt asking for three scenes of the same girl. Result: `success`, 42.6 s,
+**exactly one image** — a single 1792x2240 jpeg containing a **three-panel
+grid**, same girl consistent across panels (M3 verdict: all three requested
+scenes present, panels labelled by the model).
+
+Two findings:
+
+1. **`max_images` is silently ignored for this model.** Isolation probe: the
+   same payload without the sequential param, `max_images: 3` alone → one
+   image (`maximg-1.jpg` attempt). One image per request is the operating
+   reality; the parameter returns no error and no signal.
+2. **Sequential mode renders a multi-panel GRID with baked-in text** — and the
+   rendered labels are misspelled ("pudet", "Dooway", "Asseep" per the M3
+   read). Not usable as book pages (a page is one scene; baked text cannot be
+   corrected), and it does not replace per-page generation. Recorded so nobody
+   re-tries it expecting page-sized frames.
+
+## Experiment B — multi-reference i2i (`payload.image` as an array of URLs)
+
+Two references — a Mira sheet (from experiment A's panel render) and a
+Bramble sheet (separate t2i) — passed as `"image": [urlA, urlB]`, one prompt
+asking for both characters on a bench. Result: `success`, 41.7 s, one
+1792x2240 jpeg, 490 KB. M3 verdict on the render: **girl present and matching
+the reference description; dog present with the white ear; no watermark, no
+text, no anatomical flags.**
+
+**Multi-reference works and keeps both entities.** This is the load-bearing
+answer for T6: a page naming two or three cast members can carry *all* their
+reference URLs in one call — the "first named character only" limitation the
+round-1 design lived with does not need to survive remediation.
+
+## Consolidated shape facts for the remediation
+
+| Fact | Value |
+| --- | --- |
+| Terminal status | `success` arrives **synchronously on the POST** (~14–43 s); polling exists but is not needed for images |
+| Result location | `outcome.media_urls` — **an array of objects** `{"id","url"}`, plus `outcome.thumbnail_image_url` beside it |
+| Echo | `payload` echoed in the record; **inconsistently** (t2i echoed the prompt, i2i echoed `{}`) — never a decode signal |
+| Reference input | `payload.image` is an **array of URL strings** (up to 14); inline base64 not needed — chain GMI's own public output URLs |
+| One image per request | `max_images` silently ignored (1 regardless); `sequential_image_generation` yields a multi-panel grid with baked-in misspelled text |
+| Size | explicit `1792x2240` honoured exactly; presets are 2K/3K only; hard pixel floor 1920×1920 |
+| Format/cost | `jpeg` ~350–620 KB (13× smaller than PNG); `watermark:false` explicit; $0.035/image, ~$0.39/book |
+| Latency | 37–43 s per image — the per-page render budget must plan on ~40 s × 8 pages sequential, or fan out |
+| T7 mechanism pre-verified | M3 judged both renders correctly from inline base64 jpeg (~450 KB request) — the consistency-verdict call is real |
+
+**Consequences for T6's remediation (decision recorded for the orchestrator):**
+
+1. H1's fix keys on `outcome.media_urls[].url` **by name** — no body walking.
+2. `media.EditImage`'s base64-string contract is dead; the client needs the
+   URL-array form (§6 above) — the contract change already flagged, now with
+   the exact wire shape.
+3. Pages with multiple cast members take the multi-reference array — the
+   plan.go variant heuristics matter less (no fusion needed to fit one
+   reference) but still decide which characters get sheets at all (H3).
+4. `sequential_image_generation` and `max_images`: do not use — one image per
+   request, always.
