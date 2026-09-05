@@ -42,21 +42,22 @@ T0 ─→ T1 ─→ T2 ─→ T3 ─┬─→ T4 ─→ T5 ─→ T6 ─→ T7 �
                        └─→ T8 ─────────────────→ T9 ─→ T11 ─┬─→ T14
                                                             │
                                               T12, T13 ─────┘
-                                              (optional, fold in if they land)
 
 T0  repo skeleton              T8  audio: TTS + narration
 T1  deploy path, end to end    T9  frontend shell + interview UI
 T2  GMI clients                T10 book video (ffmpeg) + player
 T3  store and media            T11 hardening: gate, cap, prewarm
-T4  interview loop (Phase A)   T12 music bed        (optional)
-T5  structuring (Phase B)      T13 voice clone      (optional)
+T4  interview loop (Phase A)   T12 music bed
+T5  structuring (Phase B)      T13 voice clone
 T6  illustration               T14 submission       (last, always)
 T7  consistency verification   T9a the waiting race (subtask)
 ```
 
 T1 comes second on purpose. **T14 is last and is never skipped** — an unsubmitted
-project scores zero. T12 and T13 are the two optional models: scored, not
-required, and the first things cut.
+project scores zero. T12 and T13 are the third and fourth MiniMax models, and
+they **ship** — the operator ruled on 2026-09-05 that nothing is cut. They are
+scored, and a Multimodality entry that ticks four models rather than two is the
+claim the track is judged on.
 
 ### The generation path, end to end
 
@@ -217,8 +218,8 @@ routes anyway; not worth doing speculatively before then.**
 | **T10e** | **Not started. Assigned 2026-09-05.** T10c closed at round-1 APPROVE with every stage pinned against **fakes** — no live run of the joined pipeline has ever happened, and it is the integration track, where fakes prove least. Every other pipeline track got a live half (T1b, T2b, T5b, T6b, T8b); this one is owed. One book, ~$0.35, ~6 min: transcript → structure → illustrate+judge+persist → narrate → film → persisted → served, with the SSE events observed in order. Opens the moment T10d lands. |
 | **T10d** | **Not started. Assigned 2026-09-05** as T10c's contract row C2 — `mediastore.supportedTypes` has no `video/mp4`, so the film cannot be persisted and no production run can finish. One map entry, and the last thing between the repo and its first true end-to-end run. See §T10d. |
 | **T11** | Not started. |
-| **T12** | Optional. Not started. |
-| **T13** | Optional. Not started. |
+| **T12** | Not started. **Ships** — no longer optional (operator, 2026-09-05). |
+| **T13** | Not started. **Ships** — no longer optional (operator, 2026-09-05); in-browser recording is non-negotiable. The consent decision below is still open and is the only thing that could stop it. |
 | **T14** | Not started. Never cut. |
 
 ---
@@ -334,7 +335,7 @@ hardcoded story, on the live URL. Ugly is fine; the pipeline must be real.
 
 | Time (IST) | |
 | --- | --- |
-| → 16:00 | T8–T11 (+T12/T13 if reached): audio, interview UI, book video, hardening |
+| → 16:00 | T9–T13: interview UI, book page, hardening, music bed, voice clone |
 | **16:00** | **Hard stop on building.** Whatever is unfinished gets cut. |
 | 16:00–20:00 | T14: video, repo public, form, X post |
 | **20:00** | **Submit.** 90 minutes before the earliest plausible deadline. |
@@ -1802,7 +1803,7 @@ that spends a gate token rather than something the pipeline does on its own.
 
 ---
 
-## T12 — Music bed (optional)
+## T12 — Music bed
 
 **Owns:** `internal/audio/music.go`.
 
@@ -1845,7 +1846,7 @@ looping `<audio>` racing the page.
 
 ---
 
-## T13 — Voice clone (optional)
+## T13 — Voice clone
 
 **Owns:** `internal/audio/clone.go`, **both capture modes in `static/**`
 (adult corner) and the one upload route that receives them.**
@@ -1950,11 +1951,14 @@ unauthenticated public URL on infrastructure we do not control and cannot
 delete from. The input sample is ours to make short-lived; the output is not.
 
 That is a **consent decision, not a technical one**, and it is the reason T13
-is optional rather than merely deferred. Decide it before the first real clone
-call, not after. The library voice remains the default path and carries none of
+must be decided before the first real clone call, not after. **T13 ships**
+(operator, 2026-09-05); this is the one thing that could still stop it, and it
+is a judgement about a child's voice, not a schedule call. The library voice remains the default path and carries none of
 this.
 
-Optional throughout. The library voice is the default path.
+The library voice remains the **default** path — a book made without a sample
+is a complete book. What changed on 2026-09-05 is that the clone is no longer
+optional *work*: it ships, with both capture modes.
 
 ---
 
@@ -1962,7 +1966,7 @@ Optional throughout. The library voice is the default path.
 
 **Owns:** `README.md` and the submission assets. Touches no `internal/` package.
 
-**Depends on:** T11, plus T12/T13 if they landed. **Starts 16:00 IST Sunday
+**Depends on:** T11, T12 and T13. **Starts 16:00 IST Sunday
 regardless of state; submits by 20:00 IST.** Never cut, never deferred — an
 unsubmitted project scores zero.
 
@@ -1980,8 +1984,12 @@ unsubmitted project scores zero.
 
 ## Cut list
 
-**Cut first:** T12 music, T13 clone, multi-character voices, page count to 6,
-controlnet.
+**Cut first:** multi-character voices, page count to 6, controlnet.
+
+**No longer on this list:** T12 and T13. The operator ruled on 2026-09-05 that
+nothing is cut, and both ship. If the 16:00 Sunday hard stop arrives with one
+unfinished, that is a decision to take in the moment against a running clock —
+not a plan that expects to shed them.
 
 **Cut by decision, not by the clock:** the flipbook. §T10 is now an MP4 render
 plus a `<video>`; there is no page-turn UI left to run out of time on.
@@ -2000,7 +2008,7 @@ character consistency (T6 — without it there is no book).
 | ~~3~~ | ~~Backend language~~ | — | **Decided: Go.** M3 writes it; the compiler is the first reviewer. |
 | ~~4~~ | ~~Frontend~~ | — | **Decided: Preact + htm + hooks, vendored, no build.** Densest idiom in training data. |
 | ~~5~~ | ~~Music 3.0 free~~ | — | **Confirmed free.** |
-| ~~6~~ | ~~Voice clone scope~~ | — | **Decided: optional throughout.** Library voice is the default. |
+| ~~6~~ | ~~Voice clone scope~~ | — | **Superseded 2026-09-05: T13 ships**, with both capture modes and recording non-negotiable. The library voice stays the default path; the clone is no longer optional work. |
 | 7 | Image provider: `$0.01` tier or `gemini-2.5-flash-image` | T6 | Cheap. One-line switch by design; decide from the first reference sheet. |
 | 8 | Page count: 6 or 8 | T5, T6 | Cheap early, annoying once the book render is laid out. |
 | 9 | Gate mechanism: passcode or per-IP cap | T11 | Cheap, but it must exist before the URL is public. |
