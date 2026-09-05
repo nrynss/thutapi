@@ -63,12 +63,14 @@
 //	event: question
 //	{"turn":3,"text":"...","chips":["brave","sneaky"],
 //	 "filled":["hero","companion"],"exchanges":2}
+//	event: question_audio
+//	{"turn":3,"audio_url":"/media/<id>"}
 //	event: ended
 //	{"reason":"checklist|stall|limit","text":"<goodbye>",
 //	 "filled":["hero",...]}
 //	event: error
 //	{"error":"internal"}
-//
+
 // "question" carries the chips and the checklist for T9's progress
 // display; "ended" is terminal — no question follows it, and its text
 // is always a spoken goodbye (the model's, or fallbackGoodbye when an
@@ -191,6 +193,20 @@ const defaultMaxTurns = 12
 // sees the same shape.
 const maxChips = 4
 
+// QuestionSpeaker is the interview's view of the question audio synthesizer
+// (PLAN.md invariant 3: the consumer declares the interface).
+type QuestionSpeaker interface {
+	SynthesizeQuestion(ctx context.Context, text string) (mediaID string, err error)
+}
+
+// QuestionSpeakerFunc adapts a function to the QuestionSpeaker interface.
+type QuestionSpeakerFunc func(ctx context.Context, text string) (string, error)
+
+// SynthesizeQuestion calls f(ctx, text).
+func (f QuestionSpeakerFunc) SynthesizeQuestion(ctx context.Context, text string) (string, error) {
+	return f(ctx, text)
+}
+
 // Chatter is the interview's view of the text client (PLAN.md
 // invariant 3: consumers declare the interface). It is satisfied by
 // *text.Client; tests substitute a fake.
@@ -251,6 +267,10 @@ var (
 type Config struct {
 	// Chat is the M3 text client used for every turn.
 	Chat Chatter
+	// Speaker, when non-nil, synthesizes audio for each question in the
+	// background and publishes question_audio on the interview topic.
+	// Nil leaves the interview purely text-based (the current behavior).
+	Speaker QuestionSpeaker
 	// Store persists books, interviews and the transcript.
 	Store interviewStore
 	// Broker publishes the turn events and serves the SSE topic.
@@ -280,6 +300,7 @@ func (cfg Config) withDefaults() Config {
 // loop. Build it with New; the zero value is not usable.
 type Handler struct {
 	chat     Chatter
+	speaker  QuestionSpeaker
 	store    interviewStore
 	broad    broadcaster
 	jobs     jobRunner
@@ -311,6 +332,7 @@ func New(cfg Config) (*Handler, error) {
 	cfg = cfg.withDefaults()
 	return &Handler{
 		chat:     cfg.Chat,
+		speaker:  cfg.Speaker,
 		store:    cfg.Store,
 		broad:    cfg.Broker,
 		jobs:     cfg.Jobs,

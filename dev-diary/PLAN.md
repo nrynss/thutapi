@@ -108,7 +108,7 @@ size as the yardstick:
 | ~~**T8**~~ | `internal/audio/**` | — | **DONE** `8b7066b` | Round-3 APPROVE 0/0/0/0. Wire-contract-2 amendment in round 4 |
 | ~~**T8b**~~ | `t8b-live-record.md` | — | **DONE** | Settled by a GET; never needed the pool |
 | ~~**T5c**~~ | `internal/story/story.go` + 3 test sites, 2 doc-only contract rows | T8b | **DONE** | Closed at round-2 APPROVE 0/0/0/0. Aligned emotions with provider enum |
-| **T8c** | the TTS hook in `internal/interview` + the `question_audio` event | T8 | **S** | Nobody publishes it today; §T9 screen 3 is silent without it |
+| ~~**T8c**~~ | `internal/interview/**` + `cmd/thutapi/main.go` | T8 | **DONE** | Closed at round-1 APPROVE 0/0/0/0. Spoken questions hook and question_audio SSE event wired |
 | **T9** | `static/**`, `internal/web/**`, route lines | T4, T9a, T10c — and **T8c** for audio | **L** | The only track whose verification is a **real phone**, not a test. Largest remaining surface |
 | ~~**T9a**~~ | `static/race/**` | — | **DONE** | Closed at round-2 APPROVE 0/0/0/0 |
 | ~~**T10a**~~ | `internal/bookvideo/**`, ffmpeg lines in `Dockerfile` | — | **DONE** | Closed at round-2 APPROVE 0/0/0/0. Video pipeline and static ffmpeg |
@@ -211,7 +211,7 @@ routes anyway; not worth doing speculatively before then.**
 | **T7** | **DONE** 2026-09-05, closed at `fa3a516`. Round-1 review (t7-round1.md) REMEDIATE 0C/0H/2M/1L → remediation (t7-remediation-round1.md) pinned all three → **round-2 APPROVE 0/0/0/0, zero residue** (t7-round2.md; all seven mutants re-run red/hang, byte-identical restores). Implemented T6's closing loop in `internal/illustrate/verify.go` + `persist.go`: echo guard (a page byte-identical to a locked sheet is `ErrDecodeEcho` — a decode defect, judged never, regenerated never), M3-as-judge verdict with up to 2 regenerations of the same prompt+sheets (`ErrConsistency` after the cap), judge transport errors surfaced unretried, `ErrBadVerdict` on unusable replies; sheets persist immediately per render, pages only post-approval, `ErrConflict` re-run replaces the occupant. Config gains `Judge` + `Persist` (nil = off; zero value byte-for-byte T6, no T6 test edited). Six contract rows C1–C6 sanctioned. The judge mechanism was pre-verified live (T6b item 2: M3 verdicts over the eight-page book). Live half of T7's loop (render → persist → serve end to end) is T6b item 3, which opens now. |
 | **T8** | **DONE** 2026-09-05, closed at `8b7066b` — round 1 (0C/0H/0M/2L) → round 2 (0C/1H/0M/0L, the emotion-key evidence chain) → **round 3 APPROVE 0/0/0/0**. `NarrateBook` (one clip per page, in page order, blob-first then `MediaNarration` place, `ErrConflict` replaces the occupant) and `SynthesizeQuestion`; sanctioned contract row C1 gave `media.SynthesizeSpeech` an emotion parameter. **Rider (a) closed at `028efe4`** — the wire-contract-2 amendment (round 4, APPROVE 0/0/0/0): question audio persists as an **unplaced** media row and `SynthesizeQuestion` returns its id, because a `question_audio` event needs a URL that exists; supersedes round-1's D3. The `question_audio` SSE event half is the flow track's. **Rider (b) is T8b**: the emotion key is asserted-but-unverified live, settlement probe committed. |
 | **T8b** | **DONE** 2026-09-05 — **and it was never blocked on the TTS pool.** The 503 is on POST synthesis; the parameter schema is behind a GET that answered 200 throughout: `GET console.gmicloud.ai/api/v1/ie/requestqueue/apikey/models/{id}` — the exact route t8-round2.md H1 named, which the remediation replaced with a weaker catalog-membership check. **Placement CONFIRMED CORRECT** (`emotion` is top-level in GMI's flattened dialect; round 2's `voice_setting` worry was right about MiniMax, wrong about GMI). **`neutral` is NOT in the provider enum** (`auto, calm, happy, sad, angry, fearful, disgusted, surprised`) — H1's silent-ignore class, live, on the value a gentle book reaches for most; handed to **T5c**. Bonus: T13's cast knobs confirmed against the schema (`pitch` ±12, `timbre`/`intensity` ±100, `sound_effects` incl. `robotic`, `spacious_echo`). Cost $0.00. See t8b-live-record.md. |
-| **T8c** | **Not started. Assigned 2026-09-05.** Wire contract 2 specified `question_audio` and T8's round-4 amendment made the clip persist and return its id — **and nothing publishes it**: no TTS seam exists anywhere in `internal/interview` or `cmd/`. The hook was listed inside T8's `Owns` and fell through when T8 closed with `internal/audio` alone. Without it §T9's screen 3 is silent. See §T8c. |
+| **T8c** | **DONE** 2026-09-05. Closed at round 1: **APPROVE 0/0/0/0, zero residue** (t8c-round1.md). Consumer interface `QuestionSpeaker` declared in `internal/interview`, wired in `cmd/thutapi/main.go` delegating to `audio.SynthesizeQuestion`. Non-blocking background synthesis under detached 30s timeout publishes `question_audio {"turn":N,"audio_url":"/media/<id>"}`. Errors and empty IDs suppressed silently; text questions stream immediately. Coverage: interview 93.7%. |
 | **T9** | Not started. **Spec rewritten 2026-09-05** against the real wire — the two SSE streams, the call sequence with actual shapes, the screens it owns and the five things it does not. See §T9. |
 | **T9a** | **DONE** 2026-09-05. Closed after round-1 remediation and **round-2 APPROVE 0/0/0/0, zero residue** (t9a-round1.md, t9a-remediation-round1.md, t9a-round2.md). Delivered in `static/race/**`: standalone `race.html` and `index.html` with single-property `--done: 0..8` interface, 8 markers, composite-only `transform: scaleX(...)` progress bar, 5 distinct custom animal sprites (Hare, Tortoise, Fox, Duck, Mouse) with unique silhouettes at 64×44, `.runner svg{overflow:visible}` preventing ear clipping during `.bob`, non-overshooting deceleration curve `cubic-bezier(.25, 1, .5, 1)` preventing finish line clipping, full palette tokenization via CSS `var()`, and `prefers-reduced-motion` support. Suite passes in `race_test.go`. |
 | **T10c** | **DONE** 2026-09-05, closed at `61e4da5` — **round-1 APPROVE 0/0/0/0, zero residue** (t10c-round1.md; five reviewer mutations red, byte-identical restores). `internal/bookgen` joins every stage: `POST /interviews/{id}/generate` → job on the book's topic; 409-busy double-fire refusal, fresh run after terminal; stages in order (structure with byline/page-cast rows → illustrate with Judge+Persist → narrate → bookvideo → film persisted + attached); events `page_approved {n,image_url}` (drives T9a's `--done`) / `book_ready {video_url}` / `failed {}` exactly-once incl. panic; failure total + terminal, no auto retry; store-side catch-up pinned. Contract rows C1–C6 sanctioned. **Two cross-track deliverables ride on this:** C2 — mediastore's closed type set lacks `video/mp4`, so production film persist lands when its owner adds the type (lifecycle pinned via the filmStore seam meanwhile); C4 — the HTTP book-state catch-up read is T10b's. |
@@ -1349,8 +1349,7 @@ so in the record rather than letting an unverified pin read as a verified one.
 
 ## T8c — Spoken questions, wired
 
-**Owns:** the TTS hook inside `internal/interview` (a nil-able seam, the shape
-T7's `Config.Judge`/`Config.Persist` set) and the `question_audio` SSE event.
+**Owns:** `internal/interview/**` (the TTS hook and the `question_audio` SSE event) and the hook line in `cmd/thutapi/main.go`.
 
 **Depends on:** T8 (done) and T8's round-4 amendment (done). **Done when** a
 question turn publishes `question` immediately and `question_audio` when the
@@ -2007,6 +2006,111 @@ error, so a failure is total: there is no partial book to serve, and `failed`
 means the whole run. §The flow's failure path — animals sit, two doors, **no
 automatic retry** — is the UI half of this, and the reason a retry is a tap
 that spends a gate token rather than something the pipeline does on its own.
+
+---
+
+## T10f — The PDF book
+
+**Owns:** `internal/bookpdf/**`, **its own** `application/pdf` line in
+`mediastore.supportedTypes`, and **its own** PDF stage in `internal/bookgen`.
+
+**T10c, T10d and T10e are closed and stay closed.** Nothing here reopens them.
+Two of T10f's lines land inside packages other tracks created, which is the
+ordinary case in this repo and has an ordinary mechanism: **declare a contract
+row** naming file, line, change and reason in T10f's round-1 record — the way
+T7 hooked into T6's files as C1–C6, and the way **T10d itself added a line to
+`internal/mediastore` without reopening T3**. The lines are T10f's; the
+packages remain their authors'.
+
+**Depends on:** T7 (persisted page images), T5 (page text), T10d (the
+content-type precedent). **Done when:** every finished book has a downloadable
+PDF, and a book whose narration could not be made still produces one.
+
+**Assigned 2026-09-05, on the operator's ruling.** Two things drove it:
+
+1. **MiniMax TTS is out.** Every model in the family answers
+   `HTTP 503 "Upstream capacity temporarily exhausted"` — 2.8-hd, 2.8-turbo,
+   2.6-hd, 2.6-turbo, 02-hd, 01-turbo, all of them, verified 2026-09-05.
+   Non-MiniMax narration is **ruled out**: this is MiniMax Week, and an
+   ElevenLabs voice would undercut the entry's own claim. Without narration
+   there is no film — §T10a's whole timing model is `-shortest` against each
+   page's clip — so a book with no voice needs a different artifact.
+2. **A PDF is a better fallback than a silent film**, and a good thing in its
+   own right. A picture book that prints is what a parent actually wants, and
+   it needs no timing model, no audio, and no autoplay.
+
+### It is not only a fallback — every book gets one
+
+**The PDF is produced for every book, always**, beside the film rather than
+instead of it. §The flow screen 6 offers both. That makes the outage path
+*narrower* rather than special: when narration fails, the book simply ships
+with the artifact it already had, and only the film is missing.
+
+### The dependency, and its written reason
+
+§T0's rule: *"Third-party dependencies are `modernc.org/sqlite` and
+`golang.org/x/sync/errgroup`. Nothing else without a reason written down."*
+This is that reason.
+
+**Use `github.com/go-pdf/fpdf`** (pure Go, MIT, the maintained successor to
+`jung-kurt/gofpdf`, which is archived). Pure Go keeps `CGO_ENABLED=0` and the
+distroless runtime intact — the same constraint that made `modernc.org/sqlite`
+the SQLite choice. It embeds JPEG directly and supports TTF embedding, so the
+PDF can carry **Fredoka** and match §The look rather than falling back to
+base-14 Helvetica.
+
+**Pin the version in `go.mod`, vendor nothing, and add no second PDF library.**
+The repo goes public tomorrow; one dependency with one reason is the whole
+budget.
+
+### The document
+
+* **One page per book page**: the illustration, and the page's text beneath it.
+  8 pages plus a title page carrying the story title and the byline (§The flow
+  screen 3's question zero).
+* **Page images pass through as JPEG.** They are already baseline JPEG at
+  1792×2240 (4:5); do not re-encode, do not resample. A 10-image book is a
+  handful of megabytes.
+* **A4 portrait**, because it prints on whatever a parent owns. The 4:5 image
+  centred with the text below it.
+* **Fredoka for the text**, embedded — the same family §The look vendors as
+  `woff2` for the web. The PDF needs the **TTF**; they are two formats of one
+  licence (SIL OFL, so embedding is unrestricted).
+* Colours from §The look: `--ink` on white, `--accent` for the title.
+
+### Where it runs
+
+**A PDF stage that T10f owns**, in `internal/bookgen`, after narration and
+before the film — added under a contract row, not by reopening T10c:
+
+```
+structure → illustrate+judge+persist → narrate → PDF → film
+                                          │        │
+                                          │        └─ skipped when narration failed
+                                          └─ 503 ⇒ outage path, PDF still renders
+```
+
+* **The PDF stage never fails the run.** It needs only images and text, both of
+  which exist by then.
+* **When narration 503s**, the run skips the film, emits
+  `narration_unavailable {}` on the book's topic, and still terminates
+  **successfully** with a PDF. It is not `failed` — the child has a book.
+* `book_ready` gains `pdf_url`; `video_url` is empty when there is no film.
+  §T9 and §T10b both read "a film may be absent, a PDF never is".
+* `application/pdf` joins `mediastore.supportedTypes` as **T10f's line**,
+  under its own contract row. T10d's `video/mp4` is the precedent for the
+  shape — one map entry plus a Range-serving pin — not a track to reopen.
+
+### What T9 and T10b owe it
+
+* **Screen 5** handles `narration_unavailable` with a warm line — *the voices
+  are resting today* — and never an error code. The race still finishes; the
+  book still arrives.
+* **Screen 6** always offers **Download the book (PDF)**. The `<video>` and its
+  download appear only when `video_url` is non-empty.
+* **A "try again with voices" button** re-POSTs `/interviews/{id}/generate`,
+  which is the same retry the failure path already uses and spends a §T11 gate
+  token. When TTS returns, the same book regenerates with narration.
 
 ---
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"thutapi/internal/gmi"
 	"thutapi/internal/gmi/text"
@@ -22,6 +23,13 @@ type questionEvent struct {
 	Chips     []string `json:"chips"`
 	Filled    []string `json:"filled"`
 	Exchanges int      `json:"exchanges"`
+}
+
+// questionAudioEvent is the data of the "question_audio" SSE event
+// published when TTS synthesis for a question finishes in the background.
+type questionAudioEvent struct {
+	Turn     int    `json:"turn"`
+	AudioURL string `json:"audio_url"`
 }
 
 // endedEvent is the data of the terminal "ended" SSE event. Reason is
@@ -197,13 +205,36 @@ func (h *Handler) questionTurn(ctx context.Context, s *session, iv store.Intervi
 		return
 	}
 	s.chips = rep.Chips
+	turnN := len(iv.Turns)
 	h.publish(iv.ID, "question", questionEvent{
-		Turn:      len(iv.Turns),
+		Turn:      turnN,
 		Text:      rep.Text,
 		Chips:     emptyWhenNil(rep.Chips),
 		Filled:    s.filled.filled(),
 		Exchanges: s.exchanges,
 	})
+	if h.speaker != nil {
+		speaker := h.speaker
+		id := iv.ID
+		text := rep.Text
+		go func() {
+			synthCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			mediaID, err := speaker.SynthesizeQuestion(synthCtx, text)
+			if err != nil {
+				h.log.Warn("interview: synthesize question audio failed", "id", id, "turn", turnN, "err", err)
+				return
+			}
+			if mediaID == "" {
+				h.log.Warn("interview: synthesize question audio returned empty media ID", "id", id, "turn", turnN)
+				return
+			}
+			h.publish(id, "question_audio", questionAudioEvent{
+				Turn:     turnN,
+				AudioURL: "/media/" + mediaID,
+			})
+		}()
+	}
 	// Server-side enforcement: the checklist filled but the model did
 	// not say "end". The question still lands (it is good transcript
 	// content and often a confirmation); the interview ends right

@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"thutapi/internal/audio"
 	"thutapi/internal/bookgen"
 	"thutapi/internal/bookvideo"
 	"thutapi/internal/gmi/media"
@@ -282,7 +283,11 @@ func run(log *slog.Logger, args []string, sigs <-chan os.Signal) error {
 	broker := stream.New(stream.Config{})
 	runner := job.New(broker)
 	interviews, err := interview.New(interview.Config{
-		Chat:   textCli,
+		Chat: textCli,
+		Speaker: interview.QuestionSpeakerFunc(func(ctx context.Context, text string) (string, error) {
+			_, id, err := audio.SynthesizeQuestion(ctx, audio.Config{TTS: mediaCli, DB: db, Blobs: blobs}, text)
+			return id, err
+		}),
 		Store:  db,
 		Broker: broker,
 		Jobs:   runner,
