@@ -1008,23 +1008,40 @@ to make that six minutes survivable.
 | 5 | **The wait** | The race (below) plus pages landing as they are approved. ~6 minutes | T9 |
 | 6 | **The book** | Video plays, download, shareable URL, cold-open works without JS | T10b |
 
-### Screen 4 — the grown-up step: voice, and the byline
+### Screen 3 — question zero: whose book is this?
 
-**The byline comes from here, not from the interview** (decided 2026-09-05).
-§T10's title card reads *"a book by <name>"*, and the interview cannot supply
-it: its checklist is six **story** slots — hero, companion, want, obstacle,
-turn, ending (`internal/interview/reply.go:13`) — the child's name is not one
-of them, and T4 is closed. Adding a seventh slot would reopen a closed track to
-collect something that is not a story element.
+**The interview opens by asking the child's name** (operator, 2026-09-05), and
+it is the byline on §T10's title card: *"a book by Mira"*.
 
-So screen 4 carries **one short text field beside record / upload / skip.** The
-adult is already on this screen, is the one who will upload the file, and can
-change anything before it goes anywhere — the person who owns the decision is
-the person who types it. Left blank, the title card carries the title alone and
-nothing else changes. Typing is §T9's friction point, and this is the one
-screen where an adult is holding the device on purpose.
+**It is not a checklist slot and it is not in the prompt.** The checklist is
+six **story** slots — hero, companion, want, obstacle, turn, ending
+(`internal/interview/reply.go:13`) — taught in
+`internal/interview/prompt.go` in three places, and T4 closed at
+APPROVE 0/0/0/0. A seventh slot would reopen a closed track to collect
+something that is not a story element, and it would put a count that is
+currently one constant into several rules — the §T5 `PageCount` lesson.
 
-### Voice capture sits at the interview's end (decided)
+So **question zero is asked by the UI, answered by the child, and stored on the
+book. M3 never sees it**, `filled` stays six slots, and `prompt.go` is not
+touched. It is also the warmest possible opening — *"whose book are we
+making?"* — and the one moment where an adult is most likely still holding the
+device, which is what makes it the right place for the product's only
+unavoidable piece of typing. Blank is a normal case: the title card drops the
+line, not the card.
+
+**One consequence to handle before T9 starts, not during.** `books` is
+`(id, title, created_at)` (`internal/store/store.go:153`) — there is nowhere to
+put a byline. It needs `byline TEXT NOT NULL DEFAULT ''`, which is a **declared
+contract change against closed T3**, in the shape T7's C1–C6 rows already set:
+name the file, the line and the reason in the track's review file rather than
+reaching in quietly. Add it to the `CREATE TABLE books` statement rather than
+appending an `ALTER TABLE` — `migrate` applies `schema` in order and leans on
+`IF NOT EXISTS` for idempotency, which `ADD COLUMN` does not have. That means
+**deleting any existing dev database**, which costs nothing: there is no
+production data, and the box's generated media is disposable until judging
+opens.
+
+### Screen 4 — voice capture sits at the interview's end (decided)
 
 Not before the interview: an adult-facing detour in front of every child's
 first run. Not after the book: that means re-synthesising narration and
@@ -1280,9 +1297,9 @@ of it was **built and verified 2026-09-05** (`title card + end card + tags`:
   needed); end card = flat `0x1b1614` with "made with Thutapi" and the domain.
   Both are ordinary segments built to the same geometry, so they concat with
   `-c copy` like any page. The static build has freetype/fontconfig — point
-  `fontfile` at the Fredoka TTF T9 vendors. **The byline is typed by the adult
-  at screen 4** (§The flow, decision 14); left blank it drops the line, not the
-  card.
+  `fontfile` at the Fredoka TTF T9 vendors. **The byline is the child's answer
+  to question zero** (§The flow screen 3, decision 14); left blank it drops the
+  line, not the card.
 * **Text goes in via `textfile=`, never `text=`.** The title is model output
   and a child's own words: apostrophes, colons, commas and backslashes are all
   live ammunition in a filtergraph. Write the string to a file under `/data`
@@ -1566,7 +1583,7 @@ character consistency (T6 — without it there is no book).
 | 9 | Gate mechanism: passcode or per-IP cap | T11 | Cheap, but it must exist before the URL is public. |
 | 11 | T1 artifacts vs T1b live verification — split T1 into artifact-only close + operator-dependent T1b (DNS + foleyflow SSH). | T13, T14 | Done 2026-09-04 — T1 closed at 65df379, T1b unblocks operator run; without the split T2-T13 all blocked on operator work. |
 | 13 | Book delivery: flipbook or MP4. | T10, T14 | **Decided 2026-09-05: MP4.** Free to decide now, expensive once a page-turn UI is laid out. Deletes the swipe/spread/audio-sync work, collapses the T8 autoplay hazard, and hands T14 a shareable artifact it needs anyway. |
-| 14 | Byline on the title card. | T10, T13 | **Decided 2026-09-05: the child's name, typed by the adult at screen 4.** The parent is the publisher — they upload the file and can change anything before it goes anywhere — so the person who owns the decision is the person who types it. Not from the interview: that checklist is six *story* slots and T4 is closed. Skipped ⇒ the card carries the title alone. |
+| 14 | Byline on the title card, and where the name comes from. | T9, T10 | **Decided 2026-09-05: the child's name, and the interview asks for it — as question zero, outside the model loop.** The byline is not a privacy question: the parent uploads the file and can change anything before it goes anywhere. It is also **not a checklist slot and not in the prompt** (operator, explicit): the checklist is six *story* slots taught in `internal/interview/prompt.go` in three places, and T4 is closed. Question zero is asked by the UI, answered by the child, stored on the book — M3 never sees it. Blank ⇒ the card carries the title alone. |
 | 15 | The ~6-minute wait: spinner, or something to watch. | T9, T9a | **Decided 2026-09-05: the race** (§The flow screen 5). Eight markers, one per page — the animation encodes real progress, so §T10's "no percentage" rule survives. Prototyped the same day; the mechanism is settled and only the sprites are left. |
 | 16 | Where voice capture sits in the flow. | T9, T13 | **Decided 2026-09-05: at the interview's end**, one skippable screen. Narration has not started, so the clone is ready exactly when T8 needs it and nothing regenerates. |
 | 17 | What the child sees when generation fails. | T9 | **Decided 2026-09-05: animals sit down, one warm line, two equal doors — *try again* and *look at other books*. No automatic retry** — a regeneration is ~$0.35 and six minutes, and after 2026-09-06 it bills; an auto-retry on a public URL is the open wallet §T11 item 1 exists to prevent. |
