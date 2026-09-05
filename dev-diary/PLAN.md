@@ -70,7 +70,8 @@ required, and the first things cut.
 | **T3** | DONE. Round 1 (t3-round1.md): REMEDIATE 0C/1H/1M/1L — `mediastore.ErrNotFound` documented but returned by no code path, media unbound to pages/cast with no listing queries (T6/T8/T10 unanswerable), five untested error branches. Remediation round 1 fixed all three (kind + page/cast anchor columns with composite FKs and partial unique indexes, `SetMediaPlace`/`BookMedia`/`PageMedia`/`CastMedia`, five branch pins, sentinel contract table). **Round 2: APPROVE 0/0/0/0, zero residue** (t3-round2.md). Restart-survival Done when pinned end to end incl. 206 Range after reopen; live smoke: cross-process WAL write, Range slice byte-exact. |
 | **T3b** | DONE. Round 1 (t3b-round1.md): REMEDIATE 0C/0H/2M/2L — running jobs had no cancellation path (`WithoutCancel` + no `Cancel` → leaked slots, no handle for T11/operator on runaway spend), submit bodies with a request_id but unknown/absent status passed through as the result without polling, `Event.Name` newlines could inject SSE field lines, and a deadline landing mid-poll-GET surfaced `ErrTransient` instead of `ErrPollDeadline`. Remediation round 1 fixed all four (cancel registry + `Runner.Cancel` + `StatusCancelled` terminal, request_id-bearing submit bodies now poll, `oneLine` name sanitization, `pollCtx.Err()` guard before transient counting). **Round 2: APPROVE 0/0/0/0, zero residue** (t3b-round2.md) — Cancel-vs-completion proven deterministic (200 interleavings × 20 race runs, exactly-once terminal), all four mutations re-applied by hand and reverted byte-identical. Coverage: stream 94.4%, job 95.7%, media 92.5%. |
 | **T4** | DONE. Round 1 (t4-round1.md): REMEDIATE 0C/1H/3M/3L — the stall rule ended interviews after two substantive one-word answers ("Mira" → "red"), end-marker-only replies left ended interviews reopenable, opening-turn failures were invisible to clients, error payloads carried freeform prose instead of machine classes, plus streak-rollback, enforced-end persistence, and doc-comment gaps. Remediation round 1 fixed all seven (end fires only on no-progress/repetition with a per-turn chip-signal directive to the model; closing turn persisted unconditionally on every end path; turn-failure marker surfaced through the catch-up route; sentinel-derived error tokens on the wire). **Round 2: APPROVE 0/0/0/0, zero residue** (t4-round2.md). E2e: start → turns → self-ended (checklist, stall, MaxTurns paths) against a scripted fake, SSE-observable, transcript persisted and ordered; thinking OFF pinned on raw wire. Coverage: interview 93.4%. |
-| **T5** | Not started. |
+| **T5** | DONE. Round 1 (t5-round1.md): REMEDIATE 0C/0H/3M/2L — transport-error pin had an empty assertion body (swallow mutant went green), the Done when's live half had no owner, the prompt taught "exactly 8 pages" while the validator enforced no count, a prose-embedded decoy JSON object could be taken as the book (full-story decoy silently in one call), and cast uniqueness was case-sensitive (Mira+mira split the T6 lock). Remediation round 1 fixed all five (real transport pins incl. six-sentinel probe; T5b operator row + amended Done-when; `PageCount = 8` taught by prompt and enforced by validator, cut-to-6 changes exactly that rule; extractStory scans all candidates for first decode-AND-validate with first-candidate fallback errors; EqualFold uniqueness with exact references). **Round 2: APPROVE 0/0/0/0, zero residue** (t5-round2.md). Coverage: story 100%. Live half owned by **T5b**. |
+| **T5b** | Not started. Operator track on the T2b precedent: it owns the live half of T5's original Done when — two real M3 calls with `thinking` ON over a real transcript, each returning schema-valid JSON (8 pages, taught emotion vocabulary, consistent cast names), plus the corrective-system-message acceptance (MiniMax accepts a `system`-role corrective message mid-conversation) — the half no agent on this workstation can run (the operator key is rejected by both providers). Runs once a working key exists; see §T5. |
 | **T6** | Not started. |
 | **T7** | Not started. Capability **verified live** 2026-09-04 — see T7. |
 | **T8** | Not started. |
@@ -522,7 +523,16 @@ One call over the whole transcript. M3's 1M context means no summarisation and
 no state to marshal.
 
 **Depends on:** T4. **Done when:** a transcript yields valid JSON that
-validates against the schema, twice running.
+validates against the schema, twice running against the scripted suite —
+the same transcript through the extract-and-validate pipeline yields the
+same valid story twice, with the corrective retry bounded
+(`TestStructureDeterministicTwiceRunning` is that pin). The live half of
+the original criterion — M3 with `thinking` ON returning schema-valid
+JSON (8 pages, taught emotion vocabulary, consistent cast names) on two
+real calls, and MiniMax accepting a `system`-role corrective message
+mid-conversation — is **T5b**, an operator track on the T2b precedent: it
+owns those live probes and runs once a working key exists, keeping this
+criterion mechanically checkable from a clean tree.
 
 ```json
 { "title": "...",
