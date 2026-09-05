@@ -5,13 +5,18 @@
 // # The two paths
 //
 // SynthesizeQuestion speaks one interview question and returns the
-// audio bytes. The interview's text streams over SSE immediately and
-// the TTS call is fired in parallel — text never waits on audio
-// (project.md §4) — so the seam is a plain function returning bytes:
+// audio bytes plus the media id the clip was persisted under — the
+// /media/<id> URL the question_audio SSE event carries (PLAN.md
+// §The flow, wire contract 2). The interview's text streams over
+// SSE immediately and the TTS call is fired in parallel — text never
+// waits on audio (project.md §4) — so the seam stays a pure function:
 // the caller decides when to fire it (a job, a goroutine), and this
-// package never blocks the text path itself. Questions are not book
-// narration; nothing here anchors them into store rows. They use the
-// turbo model — latency beats fidelity (PLAN.md §T8).
+// package never blocks the text path itself. Question clips persist
+// like narration does — blob into mediastore plus one media row —
+// but as UNPLACED rows: the store's kinds (reference, illustration,
+// narration) all anchor to a book, and a question is interview-
+// scoped with no book row to anchor to (see SynthesizeQuestion).
+// They use the turbo model — latency beats fidelity (PLAN.md §T8).
 //
 // NarrateBook speaks every page of a book — one clip per page, in
 // page order — and persists each clip into the store: blob bytes into
@@ -151,10 +156,14 @@ var (
 	// spoken without a speech client.
 	ErrNoTTS = errors.New("audio: no tts client configured")
 
-	// ErrNoStore reports a narration Config missing the store or
-	// the blob store. Narration's deliverable is persisted clips, so
-	// both are required; the message names which one is nil. The
-	// question path never needs them.
+	// ErrNoStore reports a Config with exactly one half of its
+	// store: a store.DB without the mediastore, or the other way
+	// round. NarrateBook's deliverable is persisted clips, so it
+	// requires both. SynthesizeQuestion persists when both are
+	// configured and returns plain bytes when neither is; one
+	// without the other is refused loudly here — a silently
+	// half-wired store would silently drop the persist. The
+	// message names which one is nil.
 	ErrNoStore = errors.New("audio: no store configured")
 
 	// ErrNoPages reports a NarrateBook call with no pages. There is
@@ -226,10 +235,15 @@ type Config struct {
 	// TTS is the speech client. Required on every path.
 	TTS TTS
 
-	// DB and Blobs persist narration clips: the metadata row
-	// through DB (store.MediaNarration at (book, page)) and the
-	// bytes through Blobs. Required for NarrateBook — missing one
-	// is ErrNoStore — and never touched by SynthesizeQuestion.
+	// DB and Blobs persist audio clips: the metadata row through
+	// DB (store.MediaNarration at (book, page) for narration;
+	// unplaced rows for question audio) and the bytes through
+	// Blobs. NarrateBook requires both — missing one is
+	// ErrNoStore; its deliverable is persisted clips.
+	// SynthesizeQuestion persists the same way when both are set
+	// and returns plain bytes when neither is (the
+	// questions-without-store mode); one without the other is
+	// ErrNoStore.
 	DB    *store.DB
 	Blobs *mediastore.Store
 
@@ -338,7 +352,7 @@ func NarrateBook(ctx context.Context, cfg Config, bookID string, pages []story.P
 		return nil, err
 	}
 	if cfg.DB == nil || cfg.Blobs == nil {
-		return nil, fmt.Errorf("%w: narrating a book needs both a store.DB and a mediastore.Store; the question path needs neither", ErrNoStore)
+		return nil, fmt.Errorf("%w: narrating a book needs both a store.DB and a mediastore.Store", ErrNoStore)
 	}
 	w := &narrationWriter{db: cfg.DB, blobs: cfg.Blobs, bookID: bookID}
 
@@ -381,38 +395,79 @@ func (sp *speaker) narratePage(ctx context.Context, w *narrationWriter, p story.
 }
 
 // SynthesizeQuestion speaks one interview question and returns the
-// audio bytes (audio/mpeg in practice — see fetchAudio), downloaded on
-// receipt from the envelope's outcome.audio_url. Nothing is persisted:
-// questions are not book narration and the interview keeps no audio
-// rows (project.md §4 streams the text and plays the clip; the
-// transcript the store keeps is text turns).
+// audio bytes (audio/mpeg in practice — see fetchAudio), downloaded
+// on receipt from the envelope's outcome.audio_url, plus the media id
+// the clip was persisted under. The id is what makes the audio
+// reachable: the question_audio SSE event carries /media/<id> (the
+// fixed route cmd/thutapi registers for mediastore — PLAN.md
+// invariant 5 and §The flow, wire contract 2), and the bytes are what
+// a caller without an event stream plays directly.
+//
+// The clip persists like narration does — blob into mediastore, one
+// metadata row — but as an UNPLACED row: the store's kinds
+// (reference, illustration, narration) all anchor to a book, and a
+// question is interview-scoped with no book row to anchor to, so the
+// row is created unplaced (store.CreateMedia via mediastore.Persist —
+// no book, no kind) and its id serves over GET /media/{id} exactly
+// like any placed blob's. Unplaced rows have no book and are never
+// listed by BookMedia; their retention is PLAN.md §T11's sweep's,
+// the same orphan class a crash between a delete and a re-place
+// leaves.
+//
+// The persist is conditional on the store exactly as narration's is:
+// a Config with both DB and Blobs set persists and returns the new
+// id; a Config with neither set returns plain bytes and an empty id
+// (the questions-without-store mode, unchanged from round 1); one
+// half set without the other is ErrNoStore, refused before any paid
+// call — a silently half-wired store would silently drop the persist.
+// A persist failure fails the call: a clip that never reached the
+// store is not a playable question, and the caller treats a failed
+// call as "question_audio never arrives".
 //
 // The model is DefaultQuestionModel and the voice DefaultVoice —
 // questions are the library voice, spoken for latency. The empty text
-// is ErrNoText. The returned bytes are ready to play; the caller
-// fires this call in parallel with streaming the question text over
-// SSE (project.md §4: text never waits on audio).
-func SynthesizeQuestion(ctx context.Context, cfg Config, text string) ([]byte, error) {
+// is ErrNoText. The caller fires this call in parallel with streaming
+// the question text over SSE (project.md §4: text never waits on
+// audio); when the audio does not land — TTS failed, or was slow past
+// the turn — the UI stays silent, never spinning (PLAN.md §The flow,
+// wire contract 2).
+func SynthesizeQuestion(ctx context.Context, cfg Config, text string) ([]byte, string, error) {
 	sp, err := cfg.resolve()
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if strings.TrimSpace(text) == "" {
-		return nil, fmt.Errorf("%w: question text is empty", ErrNoText)
+		return nil, "", fmt.Errorf("%w: question text is empty", ErrNoText)
+	}
+	persist := true
+	switch {
+	case cfg.DB == nil && cfg.Blobs == nil:
+		persist = false // no store configured: plain bytes, nothing persisted
+	case cfg.DB == nil:
+		return nil, "", fmt.Errorf("%w: persisting question audio needs both a store.DB and a mediastore.Store (DB is nil)", ErrNoStore)
+	case cfg.Blobs == nil:
+		return nil, "", fmt.Errorf("%w: persisting question audio needs both a store.DB and a mediastore.Store (Blobs is nil)", ErrNoStore)
 	}
 	raw, err := sp.tts.SynthesizeSpeech(ctx, text, "", DefaultVoice, DefaultQuestionModel)
 	if err != nil {
-		return nil, fmt.Errorf("audio: synthesize question: %w", err)
+		return nil, "", fmt.Errorf("audio: synthesize question: %w", err)
 	}
 	audioURL, err := decodeAudioURL(raw)
 	if err != nil {
-		return nil, fmt.Errorf("audio: synthesize question: %w", err)
+		return nil, "", fmt.Errorf("audio: synthesize question: %w", err)
 	}
-	b, _, err := sp.fetchAudio(ctx, audioURL)
+	b, ct, err := sp.fetchAudio(ctx, audioURL)
 	if err != nil {
-		return nil, fmt.Errorf("audio: synthesize question: %w", err)
+		return nil, "", fmt.Errorf("audio: synthesize question: %w", err)
 	}
-	return b, nil
+	if !persist {
+		return b, "", nil
+	}
+	id, err := cfg.Blobs.Persist(ctx, bytes.NewReader(b), ct)
+	if err != nil {
+		return nil, "", fmt.Errorf("audio: persist question clip: %w", err)
+	}
+	return b, id, nil
 }
 
 // validatePages refuses a page set that cannot be narrated, before a
