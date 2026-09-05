@@ -73,6 +73,7 @@ required, and the first things cut.
 | **T5** | DONE. Round 1 (t5-round1.md): REMEDIATE 0C/0H/3M/2L — transport-error pin had an empty assertion body (swallow mutant went green), the Done when's live half had no owner, the prompt taught "exactly 8 pages" while the validator enforced no count, a prose-embedded decoy JSON object could be taken as the book (full-story decoy silently in one call), and cast uniqueness was case-sensitive (Mira+mira split the T6 lock). Remediation round 1 fixed all five (real transport pins incl. six-sentinel probe; T5b operator row + amended Done-when; `PageCount = 8` taught by prompt and enforced by validator, cut-to-6 changes exactly that rule; extractStory scans all candidates for first decode-AND-validate with first-candidate fallback errors; EqualFold uniqueness with exact references). **Round 2: APPROVE 0/0/0/0, zero residue** (t5-round2.md). Coverage: story 100%. Live half owned by **T5b**. |
 | **T5b** | **DONE** 2026-09-05. Closes the live half of T5's original `Done when`: two independent live M3 calls with `thinking` ON over a realistic 14-turn transcript, both schema-valid, both 8 pages, all emotions in the taught vocabulary, every page character present in the cast (14s and 37s). Corrective-system-message acceptance **confirmed** — MiniMax obeyed a `system`-role message placed after an assistant turn, which is the mechanism `story.Structure`'s corrective retry depends on. **Two findings handed to T6** (not T5 defects — the validator does what it was specified to do): live casts contain non-visual members (`Narrator`, `visual:"no visual"` / `"an unseen storyteller with no appearance"` — two phrasings, so no literal match works) which would each burn a ~$0.01 reference sheet on nothing; and one entity can occupy two cast slots (`Grumpy River` + `Happy River`, the latter's visual opening "the same wide blue river"), which the image lock would render as two unrelated rivers — the exact drift T6 exists to prevent. Also: M3's page prompts already carry their own style language, which competes with T6's constant style suffix. Probes committed as `//go:build live` tests. Zero cost. See t2b-t5b-live-record.md. |
 | **T6** | **REMEDIATE — round 1, awaiting remediation.** Implementation at `a0340d3` (100% statements, three locks pinned on the marshalled bytes, `Qwen-Image-2512` refused before a request is built, default path asserted with `Config.Model` empty — the test shape whose absence let t2-round3 H1 survive). Round 1: **0C/3H/3M/2L**. **H1** — `decode.go` scans every string for base64 image magic *before* trying the URL, so the queue's echoed `payload.image` (the reference sheet, inlined by `EditImage`) beats the real result: every page would decode to its own reference sheet, and T7 cannot catch it because the page *is* the reference. **C if T6b confirms the image queue echoes `payload`** the way the live TTS call did. **H2** — the variant rule fuses genuinely different characters (`Mira's Mum` when the visual is phrased marker-first; `Blue Dragon`/`Green Dragon` on a shared species token; a dog described by comparison to Mira). **H3** — `NeedsReferenceSheet` substring-matches ordinary description (a ghost "with no face"), and the cost is not one skip: a page naming only that character returns zero book, and elsewhere the character is dropped from the prompt, failing lock 1 silently. M1 forbidden-model guard is exact-match-after-trim (`Qwen/Qwen-Image-2512` passes); M2 the zero-`Book`-on-error contract is unpinned on render paths (partial-book mutant green); M3 one unsupported candidate aborts a render holding a usable PNG; L1 the notes misstate the `go.mod` edit; L2 `fetchImage` follows redirects to any host reachable on the `proxy` network. **10 of 11 claimed pins held under mutation** — only M2 did not. Rulings: `go.mod` sanctioned (`go mod tidy` reproduces it byte-for-byte); persistence reasoning sound but the write is **unassigned** — needs an owner before T7 starts; **T6b recommended**, `Owns: internal/illustrate/live_test.go`, first item a single ~$0.01 `EditImage` call to settle H1. Loop paused here by operator instruction — no remediation agent dispatched. See t6-round1.md. |
+| **T6b** | **Not started — but item 1 should run before T6 remediation.** Operator track owning `internal/illustrate/live_test.go`. Item 1 is a single ~$0.01 `EditImage` call to capture the terminal queue record and settle whether the image queue echoes `payload` the way the audio queue does — that decides whether round-1 **H1** is Critical or High, and stops the remediation agent guessing a response shape (which is how H1 arose). Items 2–3 (eight pages with a constant cast; render → persist → serve end to end) wait until T6 closes. See §T6b. |
 | **T7** | Not started. Capability **verified live** 2026-09-04 — see T7. |
 | **T8** | Not started. |
 | **T9** | Not started. |
@@ -151,6 +152,7 @@ Things the task graph assumes exist, that no track's `Owns` line covers.
 | **Job orchestration** (start → job id → progress events → result) | T4, T5, T6, T8, and every SSE consumer | **Assigned: T3b** as `internal/job`, alongside the broker. |
 | **Request-queue polling** | T6, T8 | **Assigned: T3b** — built inside `internal/gmi/media` per invariant 4, so it lands once. |
 | **`internal/web`** (shell template, book template) | T9, T10 | Now named in T9's and T10's `Owns`. Previously implied by AGENTS.md's file layout and by nothing else. |
+| **Illustration persistence** (render → `mediastore` blob → `store.SetMediaPlace`) | T6 renders and deliberately writes nothing; T10 serves what must already be on disk | **Assigned: T7** (2026-09-05, on the round-1 review's ruling 2). A page is final when T7 approves it, not when T6 renders it — persisting after the verdict is one write, persisting before makes every regeneration a delete/insert against the one-illustration-per-page unique slot. T6b proves the render → persist → serve path live. |
 
 
 ## The deadline's timezone
@@ -640,7 +642,7 @@ cast. The corrective-system-message acceptance holds.
 Neither is a T5 defect: the schema and validator do what they were specified to
 do. Both are T6's to absorb.
 
-## T6 — Illustration
+## T6 — Illustration  *(REMEDIATE — round 1 found 0C/3H/3M/2L, see t6-round1.md; live verification in T6b)*
 
 **Owns:** `internal/illustrate/**`.
 
@@ -681,9 +683,51 @@ Fan out with `errgroup`, bounded to ~4 concurrent.
 
 ---
 
+---
+
+## T6b — Live illustration verification
+
+**Owns:** `internal/illustrate/live_test.go` — the `//go:build live` file in
+the package T6 owns (§Architectural invariants 9). Nothing else.
+
+**Depends on:** T6 (implementation). **Unblocks:** T6's remediation round —
+see the ordering note below. **Runs paid calls deliberately.**
+
+**Done when:**
+
+1. **The terminal request-queue record for an image call is captured and its
+   shape written down.** One `EditImage` call, ~$0.01. This settles T6
+   round-1 **H1**: does the image queue echo `payload` back inside its result
+   the way the audio queue demonstrably does? If it does, H1 is Critical and
+   the decoder must key on `outcome`; if it does not, H1 stays High and the
+   fix is narrower. Either way the answer costs one cent and removes all
+   guesswork from remediation.
+2. **Eight pages render with a recognisably constant cast** — T6's original
+   `Done when`, which is not mechanically checkable from a clean tree and is
+   why this track exists (the T1b / T2b / T5b precedent).
+3. **The render → persist → serve path works end to end**: an illustration is
+   rendered, persisted by T7's writer, and fetched back through the
+   `/media/{id}` route with a correct content type.
+
+### Ordering — this track inverts the usual b-track rule
+
+T2b and T5b ran *after* their parents closed, verifying finished work. **T6b's
+item 1 runs first, before T6 remediation**, because it is the evidence
+remediation needs: fixing a decoder against a guessed response shape is how H1
+happened in the first place. Items 2 and 3 wait until T6 closes — an eight-page
+run while H1 is open would render eight copies of a character sheet and teach
+nothing.
+
+**Cost.** Item 1 is one image. Item 2 is ~10. At ~$0.01 each that is about a
+tenth of one book — see project.md §3, where the column is per *book*, not per
+image. Operator policy (2026-09-05) is to spend it: proving the shape now is
+cheaper than building two tracks on a wrong assumption.
+
 ## T7 — Consistency verification
 
-**Owns:** `internal/illustrate/verify.go` (same package as T6 — it is T6's closing loop, not a separate seam).
+**Owns:** `internal/illustrate/verify.go` and `internal/illustrate/persist.go`
+(same package as T6 — it is T6's closing loop, not a separate seam), plus the
+`internal/mediastore` / `internal/store` writes those make.
 
 **Depends on:** T6. **Done when:** a deliberately drifted page is caught and
 regenerated.
@@ -702,6 +746,51 @@ This is worth real points — it uses multimodality *as input* in the
 Multimodality track, and answers criterion 1's "how far you pushed the model"
 with something other than call volume.
 
+### The blind spot this check does NOT cover
+
+**A page that is byte-identical to its reference sheet passes this test
+perfectly.** T6 round-1 H1 is precisely that failure: the decoder picks the
+request-queue's *echoed* `payload.image` — which is the reference sheet
+`EditImage` inlined — instead of the real result, so every page comes back as
+the character sheet. Ask M3 "does this page match the reference?" and the
+answer is an emphatic yes, on all eight pages, and the book of eight identical
+portraits ships green.
+
+So T7 must assert the negative as well as the positive:
+
+* **The page must not be near-identical to the reference it was locked to.**
+  Cheapest form is a byte/hash comparison against the reference bytes, which
+  catches the exact-echo case for free and needs no model call. A perceptual
+  or size-delta check catches the near-echo case.
+* A match verdict of `true` on a page that *is* the reference is a **decode
+  defect, not a consistency success** — surface it as its own error rather than
+  folding it into the regenerate path, because regenerating will produce the
+  same echo again and burn the 2-retry cap on every page.
+
+Consistency verification is not a safety net for decode bugs unless it is
+written to be one.
+
+### Persistence lands here, not in T6
+
+T6 deliberately returns bytes and writes nothing (its round-1 notes argue this,
+and the round-1 review ruled the reasoning sound but the write **unassigned**).
+It belongs to T7 for a reason that dissolves the original difficulty:
+
+**A page becomes final when T7 approves it, not when T6 renders it.** Persist
+after the verdict and it is one write. Persist before, and every regeneration
+is a delete/insert against `SetMediaPlace`'s one-illustration-per-page unique
+slot — the churn T6 was right to avoid. Same for the reference sheets: they are
+final as soon as they render, so they persist immediately.
+
+T6 already left the seam cheap: content types are inside `mediastore`'s image
+set, stage names equal `store.MediaKind` values, and `Illustration.Reference` /
+`Book.Skipped` carry what `MediaPlace` needs.
+
+**Download on receipt.** If a render arrives as a URL rather than as bytes
+(T2b proved the queue returns `outcome.audio_url` for audio; T6b settles
+whether images do the same), fetch it before persisting — those URLs point at
+`storage.googleapis.com` and are assumed to expire (§T3).
+
 ---
 
 ## T8 — Audio
@@ -716,6 +805,31 @@ reads itself.
   never waits on audio.**
 * **Narration:** `minimax-tts-speech-2.8-hd`, per-page `emotion` from T5.
 * Default `voice_id`: `English_expressive_narrator`.
+
+**`SynthesizeSpeech` does NOT return audio bytes — read this before writing a
+line of T8.** Verified live 2026-09-05 (T2b). The request queue returns its own
+envelope, and the audio is a URL inside it:
+
+```json
+{"request_id":"…","model":"minimax-tts-speech-2.8-hd","status":"success",
+ "payload":{ … the request, echoed back … },
+ "outcome":{"audio_url":"https://storage.googleapis.com/…/….mp3",
+            "format":"mp3","status":"success"}}
+```
+
+* **Download `outcome.audio_url` and persist on receipt.** Those URLs point at
+  `storage.googleapis.com` and are assumed to expire (§T3). Confirmed
+  publicly fetchable with no credential: `200 audio/mpeg`, 63,348 bytes, a real
+  128 kbps MP3.
+* **The envelope echoes the request back in `payload`.** That echo is what
+  produced T6's round-1 H1 — a decoder scanning the whole body for content
+  found the echoed input before the real output. Key on `outcome`, not on "the
+  first thing in the body that looks like media".
+* One call took ~24s, so it goes through T3b's polling. Budget for that in the
+  questions path, where latency is the whole point.
+
+The same shape almost certainly applies to **T12's music call** — it is the
+same request queue. Do not assume; check the terminal record once, cheaply.
 * **Mobile autoplay is blocked.** iOS Safari refuses audio not triggered by a
   gesture, so spoken questions die silently on an iPad. One **"Tap to start"**
   gesture on entry unlocks an audio element; reuse that element for every later
@@ -762,8 +876,10 @@ Responsive, **tablet-first**:
 
 **Owns:** `static/book/**` and the book template under `internal/web/**`.
 
-**Depends on:** T6, T8, T9. **Done when:** a book reads and turns on a phone and
-on a laptop, and its URL opens cold.
+**Depends on:** T6, T8, T9 — **and on T7, which owns the illustration write.**
+T6 renders bytes and persists nothing by design; a book page cannot be served
+cold until T7's writer has put the image on disk and in `store`. **Done when:**
+a book reads and turns on a phone and on a laptop, and its URL opens cold.
 
 * **The book filling up is the progress bar.** Pages arrive one at a time over
   SSE; no percentage.
@@ -788,8 +904,20 @@ on a laptop, and its URL opens cold.
    experience. **The free window closes 2026-09-06 and judging runs to
    2026-09-11** — every generation a judge triggers after the 6th bills at
    standard pricing, out of pocket.
-3. **`GMI_API_KEY` never in the repo.** It is public for the whole judging
-   period. Pass by `docker run -e`; sweep git history before going public.
+3. **`GMI_API_KEY` never in the repo.** The repo is public for the whole
+   judging period. **Largely done at `e2d696c`** — the key lives in
+   `/etc/thutapi/env` (root, 0600) on the box, is sourced by
+   `deploy/docker-run.sh`, and reaches the container through docker's
+   **name-only** `--env GMI_API_KEY` form so it never enters the argument list.
+   Shell-history and `ps` exposure are closed; presence in `docker inspect` and
+   `config.v2.json` is **accepted deliberately** (it is what lets
+   `--restart unless-stopped` recover the service after a reboot with no
+   operator present) — see `deploy/README.md` §Safety for the full table.
+   History swept and verified clean 2026-09-05: the key appears in no object
+   across any ref, and `.env` has never been tracked. **What remains for T11:**
+   re-run the sweep immediately before the repo goes public, and **rotate the
+   key once judging closes** — it is an HS256 JWT with **no `exp` claim**, so
+   it cannot expire on its own and the only clock on it is one we set.
 4. **Cap disk.** 23G free on the box; generated media accumulates.
 
 ---
@@ -799,7 +927,12 @@ on a laptop, and its URL opens cold.
 **Owns:** `internal/audio/music.go`.
 
 **Depends on:** T10. Confirmed free. One `minimax-music-3.0` call plus one
-looping `<audio>` at ~0.15 under the narration — perhaps half an hour. Puts a
+looping `<audio>` at ~0.15 under the narration — perhaps half an hour.
+
+**Same request queue, so assume the same envelope as T8**: the result is a URL
+inside `outcome`, not bytes, and `payload` is echoed back beside it. Free, so
+capture the terminal record once before writing the decode rather than
+assuming — that single unchecked assumption is what T6 round-1 H1 cost. Puts a
 third MiniMax model on the form and strengthens the "sound" half of a track that
 is explicitly *picture and sound as a single output*.
 
@@ -821,6 +954,25 @@ plus dragon at `pitch: -8` with `spacious_echo`, robot with `robotic`, mouse at
 
 `source_audio` is a URL GMI downloads — it does not accept an upload — so the
 sample must be served over public HTTPS at a short-lived, unguessable path.
+
+### The consent decision, surfaced before anyone builds this
+
+`AGENTS.md` §Safety requires a child's voice sample to live at a short-lived,
+unguessable URL. That rule governs **what we host**. It does not reach **what
+GMI hosts**, and T2b established what GMI hosts:
+
+> Speech 2.8 returns its result at a `storage.googleapis.com` URL that is
+> **publicly fetchable with no credential** — verified 2026-09-05, `200
+> audio/mpeg`, a real MP3, no bearer token required.
+
+So a voice clone puts the child's *synthesised voice* at a permanent,
+unauthenticated public URL on infrastructure we do not control and cannot
+delete from. The input sample is ours to make short-lived; the output is not.
+
+That is a **consent decision, not a technical one**, and it is the reason T13
+is optional rather than merely deferred. Decide it before the first real clone
+call, not after. The library voice remains the default path and carries none of
+this.
 
 Optional throughout. The library voice is the default path.
 

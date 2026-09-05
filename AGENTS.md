@@ -113,10 +113,12 @@ precedent, T2b and T5b follow it.
   §Definition of done item 4 requires a cited check to pass from a clean tree.
   Paste the transcript into the record file *as well*, because the interesting
   part is often the response shape rather than the pass/fail.
-* **Probe the free paths by preference.** Where a paid path must be proven,
-  prove it at the cheapest point that still fails for the right reason — model
-  resolution rejects a bad id before it renders anything, which verifies auth
-  and routing for nothing.
+* **Spend the cent.** Free paths first where they answer the question, but do
+  not contort a probe to avoid a ~$0.01 image when the paid call is the one
+  that settles the shape. Guessing a response format and building on it is the
+  expensive option — that is what H1 cost T6. Where a probe only needs auth and
+  routing, model resolution rejects a bad id before rendering and verifies both
+  for free.
 
 ## Read order
 
@@ -249,9 +251,18 @@ So, per track:
    cannot silently unfix it. The `MiniMaxAI/` prefix, the `thinking` body
    field, the `need_volumn_normalization` typo and the five Traefik labels all
    need one.
-5. **Table-driven past two cases.** `t.Setenv`, never `os.Setenv`. `httptest`,
-   never a live call — live probes are transcripts pasted into a review file,
-   and they are evidence, never a CI gate.
+5. **Table-driven past two cases.** `t.Setenv`, never `os.Setenv`. The unit
+   suite is `httptest` — a live call never runs under `go test ./...` and
+   never gates CI, because CI has no key and an upstream outage must not
+   redden a build.
+   **But live calls are expected, and paid ones are fine.** Operator policy,
+   2026-09-05: prove it against the real API rather than against a fake whose
+   shape you guessed. An image is ~$0.01 and M3 and Speech 2.8 are free —
+   discovering a wire shape now is far cheaper than discovering it after two
+   tracks are built on the wrong assumption. T6's H1 (every page decoding to
+   its own reference sheet) is exactly the bug a single paid call would have
+   pre-empted. Put live probes behind `//go:build live` in the owning `b`
+   track and spend the cent.
 6. **A `Done when` line must be mechanically checkable from a clean tree.**
    If it says "an integration test does X", such a test exists and runs. If the
    check can only be performed by an operator, it goes in a `b`-suffixed track
