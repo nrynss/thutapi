@@ -115,7 +115,7 @@ size as the yardstick:
 | **T10b** | book template in `internal/web/**`, `static/book/**`, route lines | T9, T10a, T10c, T10d | **S–M** | Now also owns **C4, the catch-up read** — without it a reload at minute four restarts the race at zero |
 | ~~**T10d**~~ | `supportedTypes` in `internal/mediastore/` + its test | — | **DONE** | Closed at round 1: **APPROVE 0/0/0/0, zero residue**. Added `video/mp4` with Range support |
 | **T10f** | `internal/bookpdf/**` + its own `application/pdf` and `bookgen` stage lines | T5, T7 | **M** | Every book gets a PDF — and it is the whole artifact while TTS is out |
-| **T10g** | its own caption lines in `internal/bookvideo` + a wrap helper | T5, T10a | **S–M** | The film has no words today. Geometry moves to 2:3, so T10e needs a re-run |
+| **T10g** | its own caption lines in `internal/bookvideo` + a wrap helper | T5, T10a | **S–M** | **Not deferrable.** Captions make a silent film possible, which is the only video artifact while TTS is out. Geometry moves to 2:3, so T10e needs a re-run |
 | ~~**T10e**~~ | `internal/bookgen/live_test.go` + `t10e-live-record.md` | T10d | **DONE** | Closed at round-1 APPROVE 0/0/0/0. Full joined pipeline verified live end-to-end |
 | ~~**T10c**~~ | `internal/bookgen/**` + route lines | T5, T6, T7, T8, T10a | **DONE** | Closed at round-1 APPROVE 0/0/0/0 |
 | **T11** gate | `internal/gate/**` + route wrap | — | **S** | Middleware against no one else's code |
@@ -2201,10 +2201,36 @@ than assuming the change is free.
   predates §The look; T10g's lines use the token value and the cards come with
   them.
 
+### Captions make a SILENT film possible — and that rescues the demo
+
+**This is the reason T10g is not deferrable, and it reverses an earlier call
+of mine.** §T10f skips the film entirely when narration 503s, because
+§T10a's timing is `-shortest` against each page's clip and a wordless,
+voiceless slideshow says nothing. So while TTS is out the only artifact is a
+PDF — and a demo video whose centrepiece is a PDF being scrolled is a poor
+showing of a pipeline that works.
+
+**With the words on the page, none of that holds.** A film with captions and
+no narration is a legible book: silent, readable, shareable, and exactly what
+the demo needs to show. So:
+
+* **When narration exists**, `-shortest` against each page's clip governs, as
+  today. Nothing changes.
+* **When narration does not exist**, the page holds for a duration **derived
+  from its own text** — roughly reading pace, `2.5 words/second`, with a **4 s
+  floor and a 10 s ceiling**. Silent audio track, same geometry, same
+  `concat -c copy`.
+* `book_ready` therefore carries a `video_url` **even during the outage**, and
+  `narration_unavailable` means *"this book is silent"*, not *"there is no
+  film"*.
+
+**§T10f's contract shifts accordingly**: a PDF is still always produced, and a
+film is now also always produced. The outage costs the *voices*, not the video.
+
 ### What does not change
 
-* **The timing model.** `-shortest` against each page's own narration still
-  governs; a caption adds no duration and needs no measurement.
+* **The timing model, when there is narration.** `-shortest` against each
+  page's own clip still governs, and a caption adds no duration.
 * **`concat -c copy` stays free**, because every segment still matches.
 * **The PDF is unaffected** — §T10f already puts the words under the
   illustration, and remains the artifact that works with no voices at all.
