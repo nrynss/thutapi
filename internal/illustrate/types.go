@@ -61,6 +61,27 @@ type Config struct {
 	// Calls are serialised, so the callback needs no lock of its own;
 	// it runs on a render goroutine, so it should not block.
 	Progress func(Progress)
+	// Judge, when non-nil, runs T7's consistency loop on every page
+	// (PLAN.md §T7): the reference sheets the page was locked to and
+	// the page itself are sent to the judge in one message
+	// (MiniMaxAI/MiniMax-M3 — see DefaultJudgeModel) and a false
+	// verdict regenerates the page with the same prompt and sheets,
+	// up to maxPageRegenerations times. A page that never matches is
+	// ErrConsistency; a page byte-identical to its own reference
+	// sheet is ErrDecodeEcho before any verdict is asked; a judge
+	// error surfaces as internal/gmi's sentinel and is never retried
+	// here. A *gmi/text.Client satisfies Judge (invariant 3). Nil
+	// leaves the pipeline byte-for-byte the T6 render loop.
+	Judge Judge
+
+	// Persist, when non-nil, writes the run's finished renders
+	// through a BookWriter bound to one book: reference sheets as
+	// soon as they render, page illustrations only after their
+	// verdict approves them (PLAN.md §T7 "Persistence lands here" —
+	// one write per page, after the verdict, so regeneration never
+	// churns the one-illustration-per-page slot). The book's rows
+	// must already exist in the store. Nil writes nothing.
+	Persist *BookWriter
 }
 
 // Progress reports one completed render.

@@ -75,15 +75,18 @@
 // (invariant 8); the one retry inside the media client is the only
 // retry — this package adds no second layer (internal/gmi/errors.go).
 //
-// Illustrate returns the image bytes rather than persisting them.
-// That is deliberate: T7's consistency check regenerates a page that
-// drifted, and persisting inside the render loop would store pictures
-// T7 is about to discard. The bytes are materialised on receipt —
-// a request-queue result that names a storage.googleapis.com URL is
-// downloaded immediately, since those links expire (PLAN.md
-// invariant 7) — and Reference.ContentType / Illustration.ContentType
-// are already in the closed set internal/mediastore accepts, so the
-// caller's Persist cannot fail on a type this package let through.
+// Illustrate renders bytes first and writes nothing on its own: T7's
+// consistency loop (Config.Judge) may regenerate a page that drifted,
+// and persisting inside the render would store pictures the loop is
+// about to discard. When Config.Persist is set the run does write —
+// reference sheets immediately as they render, page illustrations
+// only after their verdict approves them (PLAN.md §T7) — but the
+// bytes are still materialised on receipt: a request-queue result
+// that names a storage.googleapis.com URL is downloaded immediately,
+// since those links expire (PLAN.md invariant 7), and
+// Reference.ContentType / Illustration.ContentType are already in the
+// closed set internal/mediastore accepts, so a Persist cannot fail on
+// a type this package let through.
 package illustrate
 
 import (
@@ -253,6 +256,13 @@ type renderer struct {
 	http     *http.Client
 	progress func(Progress)
 
+	// judge and persist are T7's closing loop, copied from Config by
+	// resolve. Both nil keeps the pipeline byte-for-byte the T6
+	// render loop; see closePage (verify.go) for what setting them
+	// engages.
+	judge   Judge
+	persist *BookWriter
+
 	mu    sync.Mutex
 	done  int
 	total int
@@ -280,7 +290,7 @@ func (cfg Config) resolve() (*renderer, error) {
 	if hc == nil {
 		hc = &http.Client{Timeout: defaultFetchTimeout, CheckRedirect: safeRedirectPolicy}
 	}
-	return &renderer{imager: cfg.Imager, model: model, limit: limit, http: hc, progress: cfg.Progress}, nil
+	return &renderer{imager: cfg.Imager, model: model, limit: limit, http: hc, progress: cfg.Progress, judge: cfg.Judge, persist: cfg.Persist}, nil
 }
 
 // report publishes one Progress event. Calls are serialised under the
@@ -308,8 +318,13 @@ func (r *renderer) report(stage, name string, n int) {
 // errgroup bounded to Config.Limit, and the first error cancels the
 // rest of that phase.
 //
-// The returned Book is zero on any error: a partially illustrated
-// book is not a book.
+// With Config.Judge or Config.Persist set, each page then runs T7's
+// closing loop (PLAN.md §T7): the echo guard, the judge verdict with
+// up to two regenerations, and — only on approval — the persist.
+// Reference sheets persist as soon as they render; page illustrations
+// persist only after their verdict approves them. Judge, persist and
+// regeneration failures all cost the run: the returned Book is zero
+// on any error, a partially illustrated book is not a book.
 func Illustrate(ctx context.Context, cfg Config, s story.Story) (Book, error) {
 	r, err := cfg.resolve()
 	if err != nil {
@@ -363,6 +378,12 @@ func Illustrate(ctx context.Context, cfg Config, s story.Story) (Book, error) {
 // lock 2 is "one reference image per cast member first, then every
 // page as image-to-image against it", and a page that started early
 // would have no sheet to use.
+//
+// With Config.Persist set, each sheet is written as soon as it
+// finishes rendering — a reference sheet is final the moment it
+// renders, so it persists immediately rather than waiting for the
+// pages (PLAN.md §T7). A persist failure fails the run: a book whose
+// sheets cannot be stored is not a book.
 func (r *renderer) renderReferences(ctx context.Context, members []story.CastMember) ([]Reference, error) {
 	refs := make([]Reference, len(members))
 	g, gctx := errgroup.WithContext(ctx)
@@ -388,6 +409,11 @@ func (r *renderer) renderReferences(ctx context.Context, members []story.CastMem
 				return fmt.Errorf("illustrate: reference sheet for %q decoded to bytes but the response named no media URL, so there is nothing to chain into the page renders", m.Name)
 			}
 			refs[i] = Reference{Name: m.Name, Visual: m.Visual, Prompt: prompt, ContentType: ct, Image: img, URL: url}
+			if r.persist != nil {
+				if err := r.persist.storeReference(gctx, refs[i]); err != nil {
+					return err
+				}
+			}
 			r.report(StageReference, m.Name, 0)
 			return nil
 		})
@@ -399,11 +425,13 @@ func (r *renderer) renderReferences(ctx context.Context, members []story.CastMem
 }
 
 // renderPages renders every page image-to-image against its reference
-// sheets and returns them in page order. prompts and bases are indexed
-// alongside pages; bases[i] holds the indexes into refs of the sheets
+// sheets and returns them in page order. locked[i] holds the sheets
 // page i is locked to — one per character the page names, resolved by
 // the same buildPage pass that wrote the prompt — so the attached
 // references and the prompt's claim about them cannot disagree.
+// Every page reaches the fan-out with at least one sheet: buildPage
+// refused a page that named no sheet-owning character (ErrNoReference)
+// before any render, so locked[0] is the page's lead sheet.
 //
 // EditImage is the only call here. There is no GenerateImage fallback
 // for a page, by design: image-to-image against the sheets is lock 2,
@@ -412,26 +440,26 @@ func (r *renderer) renderReferences(ctx context.Context, members []story.CastMem
 // sheets' URLs, every named character's sheet among them
 // (t6b-live-record.md item 1b: multi-reference is live-verified and
 // keeps every entity).
+//
+// With Config.Judge or Config.Persist set, each rendered page then
+// runs T7's closing loop (closePage in verify.go): the echo guard,
+// the judge verdict with up to two regenerations of the same prompt
+// and sheets, and — only on approval — the persist. The loop is the
+// page's last step before its Progress event, so Done counts pages
+// that are final, not raw renders; the extra renders a drifted page
+// costs are not separate progress events.
 func (r *renderer) renderPages(ctx context.Context, pages []story.Page, prompts []string, bases [][]int, refs []Reference) ([]Illustration, error) {
 	out := make([]Illustration, len(pages))
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(r.limit)
 	for i, p := range pages {
-		var (
-			sheetURLs  []string
-			sheetBytes [][]byte
-			lead       Reference
-		)
+		locked := make([]Reference, len(bases[i]))
 		for j, bi := range bases[i] {
-			ref := refs[bi]
-			sheetURLs = append(sheetURLs, ref.URL)
-			sheetBytes = append(sheetBytes, ref.Image)
-			if j == 0 {
-				lead = ref
-			}
+			locked[j] = refs[bi]
 		}
+		lead := locked[0]
 		g.Go(func() error {
-			raw, err := r.imager.EditImage(gctx, prompts[i], r.model, sheetURLs, media.ImageOptions{})
+			raw, err := r.imager.EditImage(gctx, prompts[i], r.model, refURLs(locked), media.ImageOptions{})
 			if err != nil {
 				return fmt.Errorf("illustrate: page %d: %w", p.N, err)
 			}
@@ -439,11 +467,16 @@ func (r *renderer) renderPages(ctx context.Context, pages []story.Page, prompts 
 			// the record's payload (t6b-live-record.md §3); what this
 			// call sent can never be the result, so the decode excludes
 			// it explicitly.
-			img, ct, _, err := r.decodeImage(gctx, raw, sentImages{bytes: sheetBytes, urls: sheetURLs})
+			img, ct, _, err := r.decodeImage(gctx, raw, sentImages{bytes: refImages(locked), urls: refURLs(locked)})
 			if err != nil {
 				return fmt.Errorf("illustrate: page %d: %w", p.N, err)
 			}
 			out[i] = Illustration{N: p.N, Prompt: prompts[i], Reference: lead.Name, ContentType: ct, Image: img}
+			if r.judge != nil || r.persist != nil {
+				if err := r.closePage(gctx, &out[i], locked); err != nil {
+					return fmt.Errorf("illustrate: page %d: %w", p.N, err)
+				}
+			}
 			r.report(StageIllustration, "", p.N)
 			return nil
 		})
