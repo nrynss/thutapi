@@ -14,10 +14,13 @@
 //     inline base64 (t6b-live-record.md §4), and chains GMI's own
 //     public output URLs, so nothing needs hosting mid-generation
 //     (project.md §2b, amended 2026-09-05).
-//   - SynthesizeSpeech: text-to-speech. Text + voice. The TTS payload
-//     uses the typo'd flag need_volumn_normalization (no 'u' in volume)
-//     — project.md §4 spells it out: match the typo or the flag is
-//     silently ignored by the upstream.
+//   - SynthesizeSpeech: text-to-speech. Text + voice + the per-page
+//     narration emotion (contract row C1 of t8-round1.md: an empty
+//     emotion omits the payload key, keeping the question path's
+//     payload byte-identical to the live-verified shape). The TTS
+//     payload uses the typo'd flag need_volumn_normalization (no 'u'
+//     in volume) — project.md §4 spells it out: match the typo or the
+//     flag is silently ignored by the upstream.
 //
 // All three POST the same envelope {model, payload} to a single path.
 // The base URL is GMI_MEDIA_BASE_URL when set, otherwise the production
@@ -282,10 +285,34 @@ func (c *Client) EditImage(ctx context.Context, prompt, model string, refImages 
 	return c.drive(ctx, model, acceptJSON, opts.payload(prompt, refImages))
 }
 
-// SynthesizeSpeech runs a TTS call and returns the raw audio bytes.
+// SynthesizeSpeech runs one TTS call and returns the terminal
+// request-queue response body raw. The audio is not in the body: the
+// terminal record carries outcome.audio_url naming a public object the
+// caller downloads on receipt (t2b-t5b-live-record.md).
+//
 // voice is the voice_id ("English_expressive_narrator" for the default
-// narrator; a cloned voice id for T13). The two audio flags pin the
-// GMI API quirk in project.md §4:
+// narrator; a cloned voice id for T13). model defaults to
+// minimax-tts-speech-2.8-hd when empty. emotion is the per-page
+// narration emotion (story.Emotions — e.g. "happy"), sent verbatim as
+// the payload's emotion key only when non-empty: questions carry none,
+// and an empty emotion keeps the payload byte-identical to the
+// live-verified question shape (t8-round1.md contract row C1).
+// The emotion payload key is asserted-but-unverified live as of
+// 2026-09-05: its top-level placement and the in-set vocabulary
+// (story.Emotions) are pinned on the wire (contract row C1) but have
+// never been confirmed against the minimax-tts-speech-2.8-hd queue
+// adapter — the TTS pool answered every settlement call with HTTP 503
+// "Upstream capacity temporarily exhausted" that evening, so no live
+// echo of an emotion-carrying call exists yet. If upstream ignores or
+// rejects the key, narration renders emotion-less with every check
+// green (the silent-ignore class; t8-round2.md H1). The committed
+// settlement probe is TestLiveSynthesizeSpeech_EmotionKeyEchoed
+// (live_test.go, //go:build live); flip this note when it passes
+// against a recovered upstream (t8-remediation-round2.md). The
+// empty-emotion path is unaffected: byte-identical to the
+// live-verified question shape (t2b-t5b-live-record.md).
+//
+// The two audio flags pin the GMI API quirk in project.md §4:
 //
 //   - need_noise_reduction: true (spelled correctly)
 //   - need_volumn_normalization: true (note the missing 'u' — spelled
@@ -293,7 +320,7 @@ func (c *Client) EditImage(ctx context.Context, prompt, model string, refImages 
 //
 // We keep the literal typo'd key in the Go source so a code review can
 // see it, and the test pins the wire-level payload to the same string.
-func (c *Client) SynthesizeSpeech(ctx context.Context, text, voice, model string) ([]byte, error) {
+func (c *Client) SynthesizeSpeech(ctx context.Context, text, emotion, voice, model string) ([]byte, error) {
 	if strings.TrimSpace(text) == "" {
 		return nil, errors.New("media: SynthesizeSpeech text is empty")
 	}
@@ -308,6 +335,9 @@ func (c *Client) SynthesizeSpeech(ctx context.Context, text, voice, model string
 		"voice_id":                  voice,
 		"need_noise_reduction":      true,
 		"need_volumn_normalization": true, // sic — see project.md §4
+	}
+	if emotion != "" {
+		payload["emotion"] = emotion
 	}
 	return c.drive(ctx, model, acceptAudio, payload)
 }
@@ -384,8 +414,11 @@ func (c *Client) attempt(ctx context.Context, endpoint, accept, apiKey string, b
 
 	// PLAN.md §T2 counts a request-queue "failed" status as transient.
 	// Peek only the status field — the model-specific result fields
-	// stay raw for the caller (T6/T8) — and retry it like a 5xx. TTS
-	// returns audio bytes, which are not JSON; the peek then no-ops.
+	// stay raw for the caller (T6/T8) — and retry it like a 5xx. Every
+	// request-queue answer is the same JSON envelope, TTS included —
+	// the audio sits at outcome.audio_url, not in the body
+	// (t2b-t5b-live-record.md) — so a TTS record's status is peeked
+	// like any other's.
 	var status queueStatus
 	if err := json.Unmarshal(raw, &status); err == nil && strings.ToLower(status.Status) == "failed" {
 		return nil, fmt.Errorf("%w: request queue reported failed: %s", gmi.ErrTransient, strings.TrimSpace(string(raw)))

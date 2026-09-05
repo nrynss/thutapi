@@ -199,7 +199,7 @@ func TestSynthesizeSpeech(t *testing.T) {
 	t.Setenv("GMI_MEDIA_BASE_URL", srv.URL)
 
 	c := New()
-	_, err := c.SynthesizeSpeech(context.Background(), "Once upon a time", "English_expressive_narrator", "minimax-tts-speech-2.8-hd")
+	_, err := c.SynthesizeSpeech(context.Background(), "Once upon a time", "", "English_expressive_narrator", "minimax-tts-speech-2.8-hd")
 	if err != nil {
 		t.Fatalf("SynthesizeSpeech: %v", err)
 	}
@@ -263,13 +263,85 @@ func TestSynthesizeSpeech_TypoPinnedInRawJSON(t *testing.T) {
 	t.Setenv("GMI_MEDIA_BASE_URL", srv.URL)
 
 	c := New()
-	if _, err := c.SynthesizeSpeech(context.Background(), "hi", "English_expressive_narrator", "minimax-tts-speech-2.8-hd"); err != nil {
+	if _, err := c.SynthesizeSpeech(context.Background(), "hi", "", "English_expressive_narrator", "minimax-tts-speech-2.8-hd"); err != nil {
 		t.Fatalf("SynthesizeSpeech: %v", err)
 	}
 
 	const needle = `"need_volumn_normalization":true`
 	if !strings.Contains(string(raw), needle) {
 		t.Errorf("raw body missing %q\nbody: %s", needle, raw)
+	}
+}
+
+// TestSynthesizeSpeech_EmptyEmotionKeepsPayloadByteIdenticalInRawJSON
+// pins the empty-value omission of contract row C1 (t8-round1.md) at
+// the marshalled bytes: a call with no emotion must send exactly the
+// payload the question path has always sent — the live-verified shape
+// of t2b-t5b-live-record.md, typo'd flag included, with no emotion
+// key. The full body is compared byte-for-byte, so an accidental
+// "emotion":"" or a key re-ordering cannot slip through; the text
+// differs per call, everything around it must not.
+func TestSynthesizeSpeech_EmptyEmotionKeepsPayloadByteIdenticalInRawJSON(t *testing.T) {
+	var raw []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
+			return
+		}
+		raw = body
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(fakeResponse))
+	}))
+	defer srv.Close()
+
+	t.Setenv("GMI_API_KEY", "k")
+	t.Setenv("GMI_MEDIA_BASE_URL", srv.URL)
+
+	c := New()
+	if _, err := c.SynthesizeSpeech(context.Background(), "hi", "", "English_expressive_narrator", "minimax-tts-speech-2.8-hd"); err != nil {
+		t.Fatalf("SynthesizeSpeech: %v", err)
+	}
+
+	const want = `{"model":"minimax-tts-speech-2.8-hd","payload":{"need_noise_reduction":true,"need_volumn_normalization":true,"text":"hi","voice_id":"English_expressive_narrator"}}`
+	if string(raw) != want {
+		t.Errorf("raw body differs from the live-verified question payload\n got: %s\nwant: %s", raw, want)
+	}
+	if strings.Contains(string(raw), "emotion") {
+		t.Errorf("raw body carries an emotion key on an empty emotion\nbody: %s", raw)
+	}
+}
+
+// TestSynthesizeSpeech_EmotionPinnedInRawJSON is the present-direction
+// half of contract row C1: a non-empty emotion must reach the wire
+// verbatim, as the payload's emotion key spelled exactly, byte-for-byte
+// beside the flags — a dropped key, a renamed key or a changed value
+// fails here.
+func TestSynthesizeSpeech_EmotionPinnedInRawJSON(t *testing.T) {
+	var raw []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
+			return
+		}
+		raw = body
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(fakeResponse))
+	}))
+	defer srv.Close()
+
+	t.Setenv("GMI_API_KEY", "k")
+	t.Setenv("GMI_MEDIA_BASE_URL", srv.URL)
+
+	c := New()
+	if _, err := c.SynthesizeSpeech(context.Background(), "hi", "happy", "English_expressive_narrator", "minimax-tts-speech-2.8-hd"); err != nil {
+		t.Fatalf("SynthesizeSpeech: %v", err)
+	}
+
+	const want = `{"model":"minimax-tts-speech-2.8-hd","payload":{"emotion":"happy","need_noise_reduction":true,"need_volumn_normalization":true,"text":"hi","voice_id":"English_expressive_narrator"}}`
+	if string(raw) != want {
+		t.Errorf("raw body missing the verbatim emotion key\n got: %s\nwant: %s", raw, want)
 	}
 }
 
@@ -346,10 +418,10 @@ func TestEmptyInputs(t *testing.T) {
 	if _, err := c.EditImage(context.Background(), "", "seedream-5.0-lite", []string{pngRefURL}, ImageOptions{}); err == nil {
 		t.Error("EditImage accepted empty prompt")
 	}
-	if _, err := c.SynthesizeSpeech(context.Background(), "", "v", ""); err == nil {
+	if _, err := c.SynthesizeSpeech(context.Background(), "", "", "v", ""); err == nil {
 		t.Error("SynthesizeSpeech accepted empty text")
 	}
-	if _, err := c.SynthesizeSpeech(context.Background(), "x", "", ""); err == nil {
+	if _, err := c.SynthesizeSpeech(context.Background(), "x", "", "", ""); err == nil {
 		t.Error("SynthesizeSpeech accepted empty voice")
 	}
 }
@@ -412,7 +484,7 @@ func TestSynthesizeSpeech_DefaultModelPinnedInRawJSON(t *testing.T) {
 	t.Setenv("GMI_MEDIA_BASE_URL", srv.URL)
 
 	c := New()
-	if _, err := c.SynthesizeSpeech(context.Background(), "hello", "English_expressive_narrator", ""); err != nil {
+	if _, err := c.SynthesizeSpeech(context.Background(), "hello", "", "English_expressive_narrator", ""); err != nil {
 		t.Fatalf("SynthesizeSpeech: %v", err)
 	}
 
