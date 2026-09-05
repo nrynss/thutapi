@@ -105,7 +105,8 @@ size as the yardstick:
 | ~~**T7**~~ | — | — | **DONE** `fa3a516` | Closed at round-2 APPROVE 0/0/0/0 |
 | ~~**T6b‑3**~~ | — | — | **DONE** `6664be3` | render → persist → serve, live PASS |
 | ~~**T8**~~ | `internal/audio/**` | — | **DONE** `8b7066b` | Round-3 APPROVE 0/0/0/0. Wire-contract-2 amendment in round 4 |
-| **T8b** | nothing in `internal/` (operator run) + `t8b-live-record.md` | T8, and the GMI TTS pool | **S** | Waiting on someone else's capacity, not on us |
+| ~~**T8b**~~ | `t8b-live-record.md` | — | **DONE** | Settled by a GET; never needed the pool |
+| **T5c** | `internal/story/story.go` + 3 test sites, 2 doc-only contract rows | T8b | **S** | One constant. The risk is ordering, not size — see below |
 | **T9** | `static/**`, `internal/web/**`, route lines | T4 — and see below on T8 | **L** | The only track whose verification is a **real phone**, not a test. Largest remaining surface |
 | ~~**T9a**~~ | `static/race/**` | — | **DONE** | Closed at round-2 APPROVE 0/0/0/0 |
 | **T10a** | `internal/bookvideo/**`, ffmpeg lines in `Dockerfile` | — | **S–M** | Nothing: recipe proven, fixtures on disk (t10-video-record.md). `exec.Command` hygiene, `t.Skip` when ffmpeg is absent |
@@ -158,8 +159,13 @@ event**, not a field.
 
 #### The critical path
 
-**~~T7~~ → ~~T8~~ → T10c → T9 → T10b → T11 → T14**, with ~~T10a~~ and ~~T9a~~ done,
-and **T8b** a retry that can fire any time the TTS pool recovers.
+**~~T7~~ → ~~T8~~ → T10c → T9 → T10b → T11 → T14**, with ~~T10a~~, ~~T9a~~ and
+~~T8b~~ done.
+
+**T5c slots in before T11's prewarm** — it is one constant, but a book
+structured before it carries `emotion:"neutral"` and `audio`'s validator
+refuses that afterwards. Loud, not silent, which is right; it just means the
+prewarmed books judges land on must be generated after T5c, not before.
 
 **T10c moved onto the critical path on 2026-09-05** and it sits *before* T9,
 not after: screen 5 cannot be built against a stream that does not exist, and
@@ -195,7 +201,7 @@ routes anyway; not worth doing speculatively before then.**
 | **T6b** | **DONE** 2026-09-05 — all three items closed, ~$1.00 total. Item 1 (~$0.25): settled the model question (seedream-5.0-lite; Flux2-Klein/Z-Image never generate), the response shape (`outcome.media_urls[].url`, array of objects) and H1's severity. Item 2 (10 calls, ~$0.35): full eight-page constant-cast book live after T6 closed — PASS, 236 s, no page byte-identical to its sheet (H1 echo absent live), multi-reference pages hold both entities, M3-as-judge `match=true, drift=none` on all eight pages; renders under `data/live/t6b-book/` for human review. Item 3 (8 calls over two runs, ~$0.28): render → persist → serve end to end after T7 closed — T7's BookWriter placed 2 sheets + 2 pages (immediate sheets, post-approval pages, echo guard held), every id fetched back 200 `image/jpeg` byte-identical through the real `GET /media/{id}` route pattern; the first run's 404s were the probe's own serve-leg bug (bare-mount vs route pattern), not the product. Full record: t6b-live-record.md. The download/mux tail after serve is T10's (offline chain proven in t10-video-record.md). |
 | **T7** | **DONE** 2026-09-05, closed at `fa3a516`. Round-1 review (t7-round1.md) REMEDIATE 0C/0H/2M/1L → remediation (t7-remediation-round1.md) pinned all three → **round-2 APPROVE 0/0/0/0, zero residue** (t7-round2.md; all seven mutants re-run red/hang, byte-identical restores). Implemented T6's closing loop in `internal/illustrate/verify.go` + `persist.go`: echo guard (a page byte-identical to a locked sheet is `ErrDecodeEcho` — a decode defect, judged never, regenerated never), M3-as-judge verdict with up to 2 regenerations of the same prompt+sheets (`ErrConsistency` after the cap), judge transport errors surfaced unretried, `ErrBadVerdict` on unusable replies; sheets persist immediately per render, pages only post-approval, `ErrConflict` re-run replaces the occupant. Config gains `Judge` + `Persist` (nil = off; zero value byte-for-byte T6, no T6 test edited). Six contract rows C1–C6 sanctioned. The judge mechanism was pre-verified live (T6b item 2: M3 verdicts over the eight-page book). Live half of T7's loop (render → persist → serve end to end) is T6b item 3, which opens now. |
 | **T8** | **DONE** 2026-09-05, closed at `8b7066b` — round 1 (0C/0H/0M/2L) → round 2 (0C/1H/0M/0L, the emotion-key evidence chain) → **round 3 APPROVE 0/0/0/0**. `NarrateBook` (one clip per page, in page order, blob-first then `MediaNarration` place, `ErrConflict` replaces the occupant) and `SynthesizeQuestion`; sanctioned contract row C1 gave `media.SynthesizeSpeech` an emotion parameter. **Rider (a) closed at `028efe4`** — the wire-contract-2 amendment (round 4, APPROVE 0/0/0/0): question audio persists as an **unplaced** media row and `SynthesizeQuestion` returns its id, because a `question_audio` event needs a URL that exists; supersedes round-1's D3. The `question_audio` SSE event half is the flow track's. **Rider (b) is T8b**: the emotion key is asserted-but-unverified live, settlement probe committed. |
-| **T8b** | **Not started. Recorded 2026-09-05** — T8's commit called it "a recorded T8b obligation" and no such row existed until now. Settles the one thing T8 could not: the emotion key's live behaviour. See §T8b. |
+| **T8b** | **DONE** 2026-09-05 — **and it was never blocked on the TTS pool.** The 503 is on POST synthesis; the parameter schema is behind a GET that answered 200 throughout: `GET console.gmicloud.ai/api/v1/ie/requestqueue/apikey/models/{id}` — the exact route t8-round2.md H1 named, which the remediation replaced with a weaker catalog-membership check. **Placement CONFIRMED CORRECT** (`emotion` is top-level in GMI's flattened dialect; round 2's `voice_setting` worry was right about MiniMax, wrong about GMI). **`neutral` is NOT in the provider enum** (`auto, calm, happy, sad, angry, fearful, disgusted, surprised`) — H1's silent-ignore class, live, on the value a gentle book reaches for most; handed to **T5c**. Bonus: T13's cast knobs confirmed against the schema (`pitch` ±12, `timbre`/`intensity` ±100, `sound_effects` incl. `robotic`, `spacious_echo`). Cost $0.00. See t8b-live-record.md. |
 | **T9** | Not started. |
 | **T9a** | **DONE** 2026-09-05. Closed after round-1 remediation and **round-2 APPROVE 0/0/0/0, zero residue** (t9a-round1.md, t9a-remediation-round1.md, t9a-round2.md). Delivered in `static/race/**`: standalone `race.html` and `index.html` with single-property `--done: 0..8` interface, 8 markers, composite-only `transform: scaleX(...)` progress bar, 5 distinct custom animal sprites (Hare, Tortoise, Fox, Duck, Mouse) with unique silhouettes at 64×44, `.runner svg{overflow:visible}` preventing ear clipping during `.bob`, non-overshooting deceleration curve `cubic-bezier(.25, 1, .5, 1)` preventing finish line clipping, full palette tokenization via CSS `var()`, and `prefers-reduced-motion` support. Suite passes in `race_test.go`. |
 | **T10c** | **Not started. Assigned 2026-09-05** on an outside review of the T9 spec — the Phase B orchestration seam. Every stage is built and APPROVE'd and **nothing joins them**: `closeTurn` publishes `ended` and returns, and no caller of `story.Structure`, `illustrate.Illustrate` or `internal/bookvideo` exists outside their own tests. Now on the critical path, **ahead of T9**. See §T10c. |
@@ -765,6 +771,72 @@ cast. The corrective-system-message acceptance holds.
 
 Neither is a T5 defect: the schema and validator do what they were specified to
 do. Both are T6's to absorb.
+
+## T5c — The emotion vocabulary, corrected
+
+**Owns:** `internal/story/story.go` (the `Emotions` constant and its doc) and
+the three test sites that spell the vocabulary out, plus the doc-note flips
+listed as contract rows below.
+
+**Depends on:** T8b (done — the evidence). **Done when:** no value Thutapi can
+send is outside GMI's enum, the byte pin on the taught prompt reflects the new
+list, and no doc still says the key is unverified.
+
+**Assigned 2026-09-05 from T8b's finding 2.** `story.Emotions` teaches
+**`neutral`**, which is not in GMI's `minimax-tts-speech-2.8-hd` enum
+(`auto, calm, happy, sad, angry, fearful, disgusted, surprised` — provider
+schema, t8b-live-record.md). `internal/audio` validates against **Thutapi's own
+list**, so `neutral` passes every gate we have, reaches the wire, and is not
+recognised: **emotion-less narration with everything green.** For a gentle
+children's book it is also the value M3 is most likely to reach for.
+
+### `neutral` → `calm`, and `auto` stays out
+
+`calm` is the closest documented meaning and the register GMI offers. **`auto`
+is deliberately not added**: it is the provider default and the safe choice for
+a page with no strong emotion, but a vocabulary that offers it invites M3 to
+pick it everywhere, and per-page emotion is the reason this book is narrated
+rather than read. Six explicit emotions, no escape hatch.
+
+### Every code change, in order
+
+The vocabulary flows from **one constant**, so most of this is automatic — the
+system prompt interpolates it (`structure.go:41`), and both validators iterate
+it (`validate.go:96`, `audio.go:502`). What follows is the complete list of
+places that spell it out and therefore do **not** update themselves.
+
+| # | File · line | Change |
+| --- | --- | --- |
+| 1 | `internal/story/story.go:70` | `Emotions`: `"neutral"` → `"calm"`. **The one behavioural edit.** |
+| 2 | `internal/story/story.go:62-68` | Doc comment lists the set — update it, and cite **GMI's model-details schema** as the authority rather than MiniMax's native docs. That mis-citation is what produced the defect. |
+| 3 | `internal/story/wire_test.go:87` | Byte pin on the taught prompt: `"exactly one of happy, sad, angry, fearful, disgusted, surprised, neutral"` → `…, calm`. **This pin firing is it working**; do not weaken it to a substring match. |
+| 4 | `internal/story/validate_test.go:65` | Fixture `Emotion: "neutral"` → `"calm"`. |
+| 5 | `internal/story/structure_test.go:28` | One decode fixture carries `"emotion":"neutral"` → `"calm"`. (Its `"curious"` fixture is a deliberate out-of-set case — **leave it**.) |
+| 6 | `internal/gmi/media/client.go:300-310` | **Contract row.** The asserted-but-unverified note flips: placement is confirmed against the provider schema (t8b-live-record.md). Doc-only. |
+| 7 | `internal/audio/audio.go:36, :46-56, :177` | **Contract row.** Same flip, plus `:36`'s "the emotion vocabulary of MiniMax Speech" should name GMI's enum — the two differ, and that difference is the whole defect. Doc-only. |
+
+**A new pin is owed**, because nothing today would catch this class again: a
+test asserting every value in `story.Emotions` is a member of the provider's
+enum, with that enum written down as a literal beside the citation. Without it
+the next vocabulary edit repeats `t5-round1.md:182` — a review round confirming
+the list against the wrong authority.
+
+### Ordering — it must land before any book is generated for keeps
+
+A book structured **before** this change carries `emotion:"neutral"` in its
+persisted pages, and after the change `audio`'s validator refuses it as
+out-of-set. That is loud rather than silent, which is right, but it means:
+
+* **T5c lands before T11's prewarmed books are generated** (§T11 item 2), or
+  they must be regenerated. Those are the judges' default landing experience.
+* Any book generated during T10c bring-up before this lands is disposable.
+
+### What it does not touch
+
+`internal/illustrate/prompt.go:43` also contains the word "neutral" — *"neutral
+pose"* in the reference-sheet directive. **Unrelated. Leave it.**
+
+---
 
 ## T6 — Illustration  *(DONE — closed 2026-09-05 after round-2 APPROVE 0/0/0/0, zero residue; t6-round1.md → t6-remediation-round1.md → t6-round2.md; live verification in T6b items 2–3)*
 
