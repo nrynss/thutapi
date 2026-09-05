@@ -401,4 +401,58 @@ entities is the load-bearing result for T10's book.
 ~$0.39 (8 pages + ~3 sheets at $0.035). Two books' worth of evidence now on
 record for ~$0.70.
 
-Item 3 (render → persist → serve) opens once T7's writer exists.
+
+# Item 3 — render → persist → serve, end to end
+
+**Date:** 2026-09-05, after T7 closed at `fa3a516`.
+**Cost:** 2 runs × 4 calls ≈ $0.28 (the first run spent its money proving
+the probe's own serve-leg bug — see below; the fix was in the probe, not
+the product).
+**Probe:** `internal/illustrate/live_test.go` `TestLiveRenderPersistServe`
+(`//go:build live`).
+
+## The run
+
+One two-page book ("Mira and Bramble's Short Day", pages 1 and 2 single/
+multi-reference) renders against seedream-5.0-lite with T7's `BookWriter`
+attached (`Config.Persist`) and NO judge — the persist-without-judge path
+where a successful decode is the approval (the echo guard still runs, so an
+H1 echo could never be written). Store (`store.Open`, temp SQLite) and
+mediastore blobs are created first, then the book's rows
+(`CreateBook`/`CreatePage`/`CreateCastMember` — BookWriter's place calls
+fire the anchor foreign keys), then `Illustrate`. Each sheet persists the
+moment it renders; each page persists post-decode. Afterwards each sheet and
+page is looked up (`CastMedia`/`PageMedia`) and fetched through the exact
+route the box serves — `mediastore.ServeHTTP` mounted behind the
+`GET /media/{id}` pattern, the way cmd/thutapi's newServer registers it.
+
+```console
+$ go test -tags live -run TestLiveRenderPersistServe -v -count=1 ./internal/illustrate/
+    live_test.go:546: sheet Mira: persisted id=137321b8…, served 248311 bytes as image/jpeg
+    live_test.go:546: sheet Bramble: persisted id=f7c05af6…, served 343179 bytes as image/jpeg
+    live_test.go:560: page 1: persisted id=b642a287…, served 478405 bytes as image/jpeg
+    live_test.go:560: page 2: persisted id=232b0dd5…, served 300399 bytes as image/jpeg
+    live_test.go:572: render → persist → serve: 2 sheets + 2 pages placed and served byte-identical
+--- PASS: TestLiveRenderPersistServe (150.73s)
+```
+
+## Findings
+
+* **Persist leg: PASS.** 2 sheets + 2 pages placed (BookMedia returns 4 rows,
+  nothing unplaced); content types image/jpeg (the pinned production format);
+  the echo guard held.
+* **Serve leg: PASS.** Every id fetched back 200 `image/jpeg` with
+  byte-identical bodies through the real route pattern (Range/ETag/HEAD are
+  `http.ServeContent`'s business, already unit-pinned in mediastore).
+* **First-run bug was the probe's, not the product's.** The initial version
+  mounted `httptest.NewServer(blobs)` bare; `ServeHTTP` reads its id via
+  `r.PathValue("id")`, which only the `GET /media/{id}` route pattern
+  populates — so every fetch 404'd after a successful, fully-persisted
+  render. Mounting behind the same pattern main.go uses fixed it. The 404s
+  were themselves evidence the persist leg had already landed all four rows.
+
+**T6b is complete: items 1 (shape + model), 2 (eight-page constant cast,
+M3-judge verified) and 3 (render → persist → serve) all pass against
+production.** The remaining download/mux tail is T10's, whose offline record
+(t10-video-record.md) already proved the ffmpeg chain on item 2's own
+renders.

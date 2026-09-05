@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync"
@@ -39,6 +40,8 @@ import (
 	"time"
 
 	"thutapi/internal/gmi/media"
+	"thutapi/internal/mediastore"
+	"thutapi/internal/store"
 	"thutapi/internal/story"
 )
 
@@ -427,4 +430,144 @@ func refNamesLive(refs []Reference) []string {
 		out = append(out, r.Name)
 	}
 	return out
+}
+
+// TestLiveRenderPersistServe is T6b item 3: the render → persist →
+// serve path end to end against the real API. One book renders with
+// T7's BookWriter attached (Config.Persist), the sheets and pages land
+// in mediastore blobs + store rows, and each page's illustration is
+// then fetched back through the same GET /media/{id} handler the
+// server wires (mediastore's ServeHTTP — cmd/thutapi/main.go delegates
+// its route to exactly this) with the correct content type and
+// byte-identical body.
+//
+// No Config.Judge: with the judge nil a successful decode IS the
+// approval (the persist-without-judge path T7 documented), and the
+// echo guard still runs, so an H1 echo could never be written. The
+// judge half of the loop was verified live separately (t6b-live-record
+// item 2, M3 verdicts on the eight-page book).
+//
+// Cost: 2 sheets + 2 pages = 4 calls, ~$0.14. Store and blobs live in
+// a temp dir removed at the end — the assertion is byte-equality
+// through the serve handler, not retained files.
+func TestLiveRenderPersistServe(t *testing.T) {
+	s := story.Story{
+		Title: "Mira and Bramble's Short Day",
+		Cast: []story.CastMember{
+			{Name: "Mira", Visual: "a small girl with two red plaits, round glasses and green wellington boots"},
+			{Name: "Bramble", Visual: "a shaggy brown dog with one white ear and a red collar"},
+		},
+		Pages: []story.Page{
+			{N: 1, Prompt: "Mira waters the garden.", Characters: []string{"Mira"}},
+			{N: 2, Prompt: "Mira and Bramble watch the clouds.", Characters: []string{"Mira", "Bramble"}},
+		},
+	}
+
+	dir, err := os.MkdirTemp("", "thutapi-t6b-item3-")
+	if err != nil {
+		t.Fatalf("temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	db, err := store.Open(ctx, store.Config{Path: filepath.Join(dir, "thutapi.db")})
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer db.Close()
+	blobs, err := mediastore.Open(ctx, mediastore.Config{Dir: filepath.Join(dir, "media"), DB: db})
+	if err != nil {
+		t.Fatalf("mediastore.Open: %v", err)
+	}
+
+	// The book's rows must exist first — BookWriter's place calls fire
+	// the anchor foreign keys.
+	bk, err := db.CreateBook(ctx, s.Title)
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+	for _, m := range s.Cast {
+		if err := db.CreateCastMember(ctx, store.CastMember{BookID: bk.ID, Name: m.Name}); err != nil {
+			t.Fatalf("CreateCastMember(%s): %v", m.Name, err)
+		}
+	}
+	for _, p := range s.Pages {
+		if err := db.CreatePage(ctx, store.Page{BookID: bk.ID, N: p.N, Text: p.Text, Prompt: p.Prompt, Characters: p.Characters}); err != nil {
+			t.Fatalf("CreatePage(%d): %v", p.N, err)
+		}
+	}
+
+	book, err := Illustrate(ctx, Config{
+		Imager:  liveMediaClient(t),
+		Model:   "seedream-5.0-lite",
+		Limit:   1,
+		Persist: NewBookWriter(db, blobs, bk.ID),
+	}, s)
+	if err != nil {
+		t.Fatalf("Illustrate: %v", err)
+	}
+	if len(book.Pages) != 2 {
+		t.Fatalf("Pages = %d, want 2", len(book.Pages))
+	}
+	// Serve exactly the way the box does: cmd/thutapi registers
+	// mediastore.ServeHTTP behind the "GET /media/{id}" pattern (main.go
+	// newServer, PLAN.md invariant 5), and the handler reads the id via
+	// r.PathValue — so the pattern is part of the contract under test.
+	mux := http.NewServeMux()
+	mux.Handle("GET /media/{id}", blobs)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	fetch := func(id string) (int, string, []byte) {
+		resp, err := http.Get(srv.URL + "/media/" + id) //nolint:noctx,gosec // local httptest
+		if err != nil {
+			t.Fatalf("GET /media/%s: %v", id, err)
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		return resp.StatusCode, resp.Header.Get("Content-Type"), body
+	}
+
+	for _, sheet := range book.References {
+		m, err := db.CastMedia(ctx, bk.ID, sheet.Name)
+		if err != nil {
+			t.Fatalf("CastMedia(%s): %v", sheet.Name, err)
+		}
+		status, ct, body := fetch(m.ID)
+		if status != http.StatusOK || ct != "image/jpeg" {
+			t.Errorf("sheet %s served: HTTP %d ct=%q, want 200 image/jpeg", sheet.Name, status, ct)
+		}
+		if string(body) != string(sheet.Image) {
+			t.Errorf("sheet %s served %d bytes, want the persisted %d", sheet.Name, len(body), len(sheet.Image))
+		}
+		t.Logf("sheet %s: persisted id=%s, served %d bytes as %s", sheet.Name, m.ID, len(body), ct)
+	}
+	for i, page := range book.Pages {
+		m, err := db.PageMedia(ctx, bk.ID, page.N, store.MediaIllustration)
+		if err != nil {
+			t.Fatalf("PageMedia(page %d): %v", page.N, err)
+		}
+		status, ct, body := fetch(m.ID)
+		if status != http.StatusOK || ct != "image/jpeg" {
+			t.Errorf("page %d served: HTTP %d ct=%q, want 200 image/jpeg", page.N, status, ct)
+		}
+		if string(body) != string(book.Pages[i].Image) {
+			t.Errorf("page %d served %d bytes, want the persisted %d", page.N, len(body), len(book.Pages[i].Image))
+		}
+		t.Logf("page %d: persisted id=%s, served %d bytes as %s", page.N, m.ID, len(body), ct)
+	}
+
+	// Nothing unplaced: sheets and pages both landed (2+2 rows), and
+	// no stray unplaced blob row exists.
+	all, err := db.BookMedia(ctx, bk.ID)
+	if err != nil {
+		t.Fatalf("BookMedia: %v", err)
+	}
+	if len(all) != len(s.Cast)+len(s.Pages) {
+		t.Errorf("BookMedia = %d rows, want %d (2 sheets + 2 pages)", len(all), len(s.Cast)+len(s.Pages))
+	}
+	t.Logf("render → persist → serve: 2 sheets + 2 pages placed and served byte-identical")
 }
