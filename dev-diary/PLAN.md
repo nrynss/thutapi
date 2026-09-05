@@ -1890,7 +1890,26 @@ n9.0.1.
 * Tests that shell out must `t.Skip` when the binary is absent, in the shape
   `live_test.go` already uses.
 
-### What the player owes — T10b's C4, the catch-up read
+### What the player owes — the composition, and C4
+
+**Screen 6 is a container for the book, not the book.** The `<video>`, the two
+download buttons and the shareable URL are UI; the book's own composition —
+art above, words below — lives inside the film (§T10g) and inside the PDF
+(§T10f), where it belongs.
+
+**With one exception, and it is the one that matters.** §T10 requires a
+**server-rendered book page so a shared link works without JS** — and with no
+JS there is no `<video>`, so a cold open must still show the book. That
+fallback is **exactly the film's composition in HTML**: each page's
+illustration with its own text beneath it, in §The look's tokens — art full
+width, words on `--surface`, `--ink` at 11.25:1, Fredoka.
+
+Do it that way and the three artifacts are visibly one book: the film, the
+PDF, and the page a judge lands on with JS disabled. Do it any other way and
+the shared link is the odd one out — which is the link most people will meet
+first.
+
+### C4, the catch-up read
 
 **T10c's stream is from-now-on.** It publishes `page_approved` as each page is
 approved and `book_ready` at the end, and a subscriber that joins late gets
