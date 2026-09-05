@@ -104,7 +104,8 @@ size as the yardstick:
 | --- | --- | --- | --- | --- |
 | ~~**T7**~~ | — | — | **DONE** `fa3a516` | Closed at round-2 APPROVE 0/0/0/0 |
 | ~~**T6b‑3**~~ | — | — | **DONE** `6664be3` | render → persist → serve, live PASS |
-| **T8** | `internal/audio/**` + one nil-able hook in `internal/interview` | — (T2, T5 closed) | **M**, in flight | Mid-remediation. **Carries one new contract change**: question audio must persist and arrive as a second SSE event (§The flow → wire contract 2) |
+| ~~**T8**~~ | `internal/audio/**` | — | **DONE** `8b7066b` | Round-3 APPROVE 0/0/0/0. Wire-contract-2 amendment in round 4 |
+| **T8b** | nothing in `internal/` (operator run) + `t8b-live-record.md` | T8, and the GMI TTS pool | **S** | Waiting on someone else's capacity, not on us |
 | **T9** | `static/**`, `internal/web/**`, route lines | T4 — and see below on T8 | **L** | The only track whose verification is a **real phone**, not a test. Largest remaining surface |
 | ~~**T9a**~~ | `static/race/**` | — | **DONE** | Closed at round-2 APPROVE 0/0/0/0 |
 | **T10a** | `internal/bookvideo/**`, ffmpeg lines in `Dockerfile` | — | **S–M** | Nothing: recipe proven, fixtures on disk (t10-video-record.md). `exec.Command` hygiene, `t.Skip` when ffmpeg is absent |
@@ -157,7 +158,8 @@ event**, not a field.
 
 #### The critical path
 
-**~~T7~~ → T8 → T10c → T9 → T10b → T11 → T14**, with ~~T10a~~ and ~~T9a~~ done.
+**~~T7~~ → ~~T8~~ → T10c → T9 → T10b → T11 → T14**, with ~~T10a~~ and ~~T9a~~ done,
+and **T8b** a retry that can fire any time the TTS pool recovers.
 
 **T10c moved onto the critical path on 2026-09-05** and it sits *before* T9,
 not after: screen 5 cannot be built against a stream that does not exist, and
@@ -192,7 +194,8 @@ routes anyway; not worth doing speculatively before then.**
 | **T6** | **DONE** 2026-09-05. Round-1 review (0C/3H/3M/2L) remediated and re-reviewed: **round 2 APPROVE 0/0/0/0, zero residue** (t6-round1.md → t6-remediation-round1.md → t6-round2.md). T6b item 1 (live, ~$0.25) had already established the model change beneath the round: **`Flux2-Klein` and `Z-Image` never generate** (accept, sit at `queued` forever) — they moved onto the forbidden table; **`seedream-5.0-lite`** is `DefaultModel`, synchronous, references as an **array of URLs**, results at `outcome.media_urls[].url` (array of objects beside `thumbnail_image_url`). H1 (payload echo beats the result) was confirmed Critical and fixed by keying the decode on `outcome.media_urls` by name; the echoing fixture now lives in the suite and page bytes are asserted ≠ sheet bytes. Round-1 remediation also landed the sanctioned `media.EditImage`/`GenerateImage` contract change (`ImageOptions`, `refImages []string` URL array, clean cutover) and fixed H2 (variant fusion only same-entity), H3 (absence words drawable), M1 (normalised forbidden-id guard incl. dead models and video stems), M2 (zero-Book pinned on render paths, M-k red), M3 (deferred unsupported candidates), L1, L2 (redirect scheme allow-list per hop + cap). Full M-a..M-k table re-run 11/11 red by the round-2 reviewer, tree byte-identical. Pinned production settings: `size:"1792x2240"` (not the `2K` preset), `output_format:"jpeg"`, `max_images:1`, `watermark:false`. The live half of the Done when (eight pages, constant cast; render → persist → serve) is T6b items 2–3, which open now that T6 has closed. |
 | **T6b** | **DONE** 2026-09-05 — all three items closed, ~$1.00 total. Item 1 (~$0.25): settled the model question (seedream-5.0-lite; Flux2-Klein/Z-Image never generate), the response shape (`outcome.media_urls[].url`, array of objects) and H1's severity. Item 2 (10 calls, ~$0.35): full eight-page constant-cast book live after T6 closed — PASS, 236 s, no page byte-identical to its sheet (H1 echo absent live), multi-reference pages hold both entities, M3-as-judge `match=true, drift=none` on all eight pages; renders under `data/live/t6b-book/` for human review. Item 3 (8 calls over two runs, ~$0.28): render → persist → serve end to end after T7 closed — T7's BookWriter placed 2 sheets + 2 pages (immediate sheets, post-approval pages, echo guard held), every id fetched back 200 `image/jpeg` byte-identical through the real `GET /media/{id}` route pattern; the first run's 404s were the probe's own serve-leg bug (bare-mount vs route pattern), not the product. Full record: t6b-live-record.md. The download/mux tail after serve is T10's (offline chain proven in t10-video-record.md). |
 | **T7** | **DONE** 2026-09-05, closed at `fa3a516`. Round-1 review (t7-round1.md) REMEDIATE 0C/0H/2M/1L → remediation (t7-remediation-round1.md) pinned all three → **round-2 APPROVE 0/0/0/0, zero residue** (t7-round2.md; all seven mutants re-run red/hang, byte-identical restores). Implemented T6's closing loop in `internal/illustrate/verify.go` + `persist.go`: echo guard (a page byte-identical to a locked sheet is `ErrDecodeEcho` — a decode defect, judged never, regenerated never), M3-as-judge verdict with up to 2 regenerations of the same prompt+sheets (`ErrConsistency` after the cap), judge transport errors surfaced unretried, `ErrBadVerdict` on unusable replies; sheets persist immediately per render, pages only post-approval, `ErrConflict` re-run replaces the occupant. Config gains `Judge` + `Persist` (nil = off; zero value byte-for-byte T6, no T6 test edited). Six contract rows C1–C6 sanctioned. The judge mechanism was pre-verified live (T6b item 2: M3 verdicts over the eight-page book). Live half of T7's loop (render → persist → serve end to end) is T6b item 3, which opens now. |
-| **T8** | **In flight** 2026-09-05 (`t8-round1.md`, `t8-remediation-round1.md`). **One contract change is owed on top**, found by an outside review of the T9 spec and recorded in §The flow → wire contract 2: `SynthesizeQuestion` returns bytes and touches no store by design (`internal/audio/audio.go:380`, `:326`), so there is no URL for the UI to play. Question audio must persist like narration and arrive as a **second** SSE event — putting `audio_url` on `questionEvent` would make text wait on audio, the one rule this track leads with. |
+| **T8** | **DONE** 2026-09-05, closed at `8b7066b` — round 1 (0C/0H/0M/2L) → round 2 (0C/1H/0M/0L, the emotion-key evidence chain) → **round 3 APPROVE 0/0/0/0**. `NarrateBook` (one clip per page, in page order, blob-first then `MediaNarration` place, `ErrConflict` replaces the occupant) and `SynthesizeQuestion`; sanctioned contract row C1 gave `media.SynthesizeSpeech` an emotion parameter. **Two things ride on top.** (a) **Round 4, in review now**: the wire-contract-2 amendment — question audio persists as an **unplaced** row and returns its id, because a `question_audio` event needs a URL that exists; this supersedes round-1's D3. (b) **T8b**: the emotion key is asserted-but-unverified live. |
+| **T8b** | **Not started. Recorded 2026-09-05** — T8's commit called it "a recorded T8b obligation" and no such row existed until now. Settles the one thing T8 could not: the emotion key's live behaviour. See §T8b. |
 | **T9** | Not started. |
 | **T9a** | **DONE** 2026-09-05. Closed after round-1 remediation and **round-2 APPROVE 0/0/0/0, zero residue** (t9a-round1.md, t9a-remediation-round1.md, t9a-round2.md). Delivered in `static/race/**`: standalone `race.html` and `index.html` with single-property `--done: 0..8` interface, 8 markers, composite-only `transform: scaleX(...)` progress bar, 5 distinct custom animal sprites (Hare, Tortoise, Fox, Duck, Mouse) with unique silhouettes at 64×44, `.runner svg{overflow:visible}` preventing ear clipping during `.bob`, non-overshooting deceleration curve `cubic-bezier(.25, 1, .5, 1)` preventing finish line clipping, full palette tokenization via CSS `var()`, and `prefers-reduced-motion` support. Suite passes in `race_test.go`. |
 | **T10c** | **Not started. Assigned 2026-09-05** on an outside review of the T9 spec — the Phase B orchestration seam. Every stage is built and APPROVE'd and **nothing joins them**: `closeTurn` publishes `ended` and returns, and no caller of `story.Structure`, `illustrate.Illustrate` or `internal/bookvideo` exists outside their own tests. Now on the critical path, **ahead of T9**. See §T10c. |
@@ -1199,6 +1202,67 @@ equally-sized ways forward — *try again* and *look at other books*.**
 
 ---
 
+## T8b — The emotion key, settled live
+
+**Owns:** nothing under `internal/` — an operator run, plus its record
+`dev-diary/adversarial-review/t8b-live-record.md`.
+
+**Depends on:** T8 (done, `8b7066b`) and on the GMI TTS pool having capacity.
+**Done when:** `TestLiveSynthesizeSpeech_EmotionKeyEchoed` passes against
+production and the two asserted-but-unverified doc notes flip
+(`internal/audio/audio.go:46-56`, `internal/gmi/media/client.go:300-310`).
+
+**Recorded 2026-09-05.** T8's own commit calls this "a recorded T8b
+obligation" — and no T8b row existed anywhere in this plan until now. The
+obligation was real; the place it pointed at was not.
+
+### Why it cannot be skipped: the failure is silent
+
+T5 gives every page an `emotion`, and T8 sends it as a **top-level key** on the
+`minimax-tts-speech-2.8-hd` payload. That placement and the in-set vocabulary
+are pinned on the wire by contract row C1 — but **never confirmed against the
+upstream**. The TTS pool answered every settlement call on the evening of
+2026-09-05 with `HTTP 503 "Upstream capacity temporarily exhausted"`, so no
+live echo of an emotion-carrying call exists.
+
+If the upstream ignores or rejects the key, **narration renders emotion-less
+with every check green** (t8-round2.md H1, the silent-ignore class). Nothing
+fails, no test reddens, the book still reads itself — just flatly, in one
+register, for all eight pages. That is precisely the kind of defect this
+project has been bitten by before: T6's H1 was an unchecked assumption about
+a payload shape, and it took a live call to find.
+
+It also touches the entry's pitch. Per-page emotion is part of the claim that
+the models were *pushed*, not merely called (§T14, track Multimodality). A
+demo whose narration is uniformly flat quietly gives that up.
+
+### The run
+
+```console
+$ set -a; . ./.env; set +a
+$ go test -tags live -run TestLiveSynthesizeSpeech_EmotionKeyEchoed -v -count=1 ./internal/gmi/media/
+```
+
+The probe is committed and mechanically runnable — this track is a **retry on
+someone else's capacity**, not new work. Retry it whenever the pool recovers;
+it is one short TTS call and costs approximately nothing (T2b's TTS probes
+billed zero).
+
+**Three outcomes, and only one needs a track after it:**
+
+| Result | What it means | Next |
+| --- | --- | --- |
+| Key echoed in `payload` | Placement and vocabulary confirmed | Flip both doc notes; T8b closes |
+| Key absent from the echo | Upstream silently drops it — the H1 failure, live | A media contract change: find the right placement, as T2b did for `outcome.audio_url` |
+| Call rejects the key | Loud, and therefore the good case | Same, but the upstream tells us why |
+
+**If the pool never recovers before the deadline**, the honest close is to
+record the 503s and ship with the notes standing as written — narration works
+either way, and it is the expressiveness, not the audio, that is at risk. Say
+so in the record rather than letting an unverified pin read as a verified one.
+
+---
+
 ## T9 — Frontend shell and the interview UI
 
 **Owns:** `static/**` (including `static/vendor/`), `internal/web/**` templates, plus its route lines in `newServer`.
@@ -1549,7 +1613,37 @@ that spends a gate token rather than something the pipeline does on its own.
    re-run the sweep immediately before the repo goes public, and **rotate the
    key once judging closes** — it is an HS256 JWT with **no `exp` claim**, so
    it cannot expire on its own and the only clock on it is one we set.
-4. **Cap disk.** 23G free on the box; generated media accumulates.
+4. **Cap disk, and sweep the orphans.** 23G free on the box; generated media
+   accumulates. Two classes, and only one of them is reachable by any existing
+   delete path:
+
+   * **Placed blobs** — references, illustrations, narration — are anchored to
+     a book and `DeleteBook` cascades them
+     (`media.book_id … ON DELETE CASCADE`, `internal/store/store.go:196`).
+     Deleting a book is enough; the sweep only decides *when* a book goes.
+   * **Unplaced blobs have no book, and nothing can ever cascade to them.**
+     `media.book_id` is nullable and the table's `CHECK` explicitly permits
+     `book_id IS NULL AND kind = '' AND page_n IS NULL AND cast_name IS NULL`
+     (`store.go:196`, `:205-207`). With no `book_id` there is no parent row to
+     cascade *from*, so `DeleteBook` never reaches one, and `BookMedia` never
+     lists one either — *"Unplaced blobs have no book and are never listed"*
+     (`internal/store/media.go:184`). They are invisible to every query the
+     product uses and immortal under every delete it performs.
+
+   **This is not hypothetical and it is not small.** Since T8's round-4
+   amendment (wire contract 2), **every spoken question persists as an
+   unplaced row** — question audio is interview-scoped and exists before Phase
+   B creates any book to anchor to. At roughly 6–10 questions an interview
+   (`internal/interview/prompt.go:34`) plus retries, that is **~8–14 orphan
+   blobs per interview, forever**, on a box with 23G and a public URL.
+   The same class also collects the crash-window orphans of narration's and
+   illustration's replace paths (blob written, row not yet placed).
+
+   **The sweep therefore has to target unplaced rows by age**, not by book:
+   delete `media` rows with `book_id IS NULL` older than a threshold, blob and
+   row, using `mediastore.Delete`'s row-first ordering. A few hours is
+   generous — a question clip is worthless the moment its turn is answered.
+   Nothing else deletes these, so if the sweep does not, nothing does.
 
 ---
 
