@@ -46,17 +46,126 @@ T0 ─→ T1 ─→ T2 ─→ T3 ─┬─→ T4 ─→ T5 ─→ T6 ─→ T7 �
 
 T0  repo skeleton              T8  audio: TTS + narration
 T1  deploy path, end to end    T9  frontend shell + interview UI
-T2  GMI clients                T10 book renderer + flipbook
+T2  GMI clients                T10 book video (ffmpeg) + player
 T3  store and media            T11 hardening: gate, cap, prewarm
 T4  interview loop (Phase A)   T12 music bed        (optional)
 T5  structuring (Phase B)      T13 voice clone      (optional)
 T6  illustration               T14 submission       (last, always)
-T7  consistency verification
+T7  consistency verification   T9a the waiting race (subtask)
 ```
 
 T1 comes second on purpose. **T14 is last and is never skipped** — an unsubmitted
 project scores zero. T12 and T13 are the two optional models: scored, not
 required, and the first things cut.
+
+### The generation path, end to end
+
+The task graph above is dependency order. This is what actually happens to one
+book at runtime, and **how much of each hop is already proven against
+production** — because the tracks were built out of order, most of this chain
+is verified well ahead of the code that will finally call it. Read this before
+estimating anything: the unproven hops are the only ones that can still
+surprise us.
+
+| # | Hop | What crosses it | Proven? | Evidence |
+| --- | --- | --- | --- | --- |
+| 1 | child ⇄ **M3** | short questions, short typed answers → transcript | **live** (transport + model), **code** (loop) | T2b real `Chat` through the typed structs; T4 e2e start → turns → self-ended, transcript persisted and ordered |
+| 2 | **M3** → story | transcript → 8 pages + cast bible + per-page prompt & emotion | **live** | T5b — two independent live calls with `thinking` ON over a 14-turn transcript, both schema-valid, both 8 pages, corrective system message obeyed |
+| 3 | **t2i** → sheets | one reference image per cast member | **live** | T6b item 1 — `seedream-5.0-lite`, `outcome.media_urls[].url`, sizes pinned |
+| 4 | **i2i** → pages | 8 pages locked to the sheets, multi-reference where two characters share a page | **live** | T6b item 2 — full eight-page book, 236 s, zero skips, no page byte-identical to its sheet, pages 3/4/7/8 hold both entities |
+| 5 | **M3-as-judge** → verdict | sheet + page as inline base64 → `{match, drift}` | **live** | T6b item 2 — `match=true, drift=none` on all eight pages |
+| 6 | verdict → **disk** | approved page → `mediastore` blob + `store` row | **live** | T6b item 3 (`6664be3`) — sheets and pages persisted by T7's `BookWriter` and fetched back through the real `GET /media/{id}` as 200 `image/jpeg`, byte-identical; `BookMedia` returns exactly 4 placed rows |
+| 7 | **Speech 2.8** → narration | per-page text + emotion → one MP3 per page | **live** (transport + shape), track not built | T2b — real round-trip, result at `outcome.audio_url`, publicly fetchable, verified a real 128 kbps MP3. **T8 owes T10 one persisted clip per page, in page order** |
+| 8 | pages + clips → **MP4** | ffmpeg segments + `concat -c copy` → one downloadable film | **verified, including inside the shipping image** | t10-video-record.md — the eight real T6b renders muxed to a playable 49.2 s file in 13.3 s; full chain re-run under the containerised ffmpeg 7.1 as uid 65532. Narration was **stand-in**, and serving/on-device playback are **not** covered — see that record's §What is NOT verified |
+| 9 | MP4 → **the child** | book page, `<video controls playsinline>`, download, shareable URL | **not yet** | T10 |
+
+Hops 1–6 are proven against production. Hop 8 is proven against real inputs
+offline. **Hops 7 and 9 are the remaining risk**, and they are exactly T8 and
+T10b.
+
+### Sequencing, dependencies and complexity — what is left
+
+Written 2026-09-05; **updated the same day** when T7 and T6b closed
+(`fa3a516`, `6664be3`) and T10a opened.
+
+**Complexity is calibrated against tracks already landed**, in this repo's own
+currency (implement + at least one review round + remediation), using package
+size as the yardstick:
+
+| | Scale | Landed comparable |
+| --- | --- | --- |
+| **S** | one seam, offline-testable, a clean round is plausible | `internal/stream` 763 lines, `internal/job` 888 |
+| **M** | two or three seams, or one live dependency | `internal/story` 1,587, `internal/mediastore` 1,291 |
+| **L** | many seams, or the verification is human rather than mechanical | `internal/interview` 3,566, `internal/illustrate` 6,653 |
+
+#### The remaining work
+
+| Track | Owns | Blocked by | Cx | What makes it hard |
+| --- | --- | --- | --- | --- |
+| ~~**T7**~~ | — | — | **DONE** `fa3a516` | Closed at round-2 APPROVE 0/0/0/0 |
+| ~~**T6b‑3**~~ | — | — | **DONE** `6664be3` | render → persist → serve, live PASS |
+| **T8** | `internal/audio/**` + one nil-able hook in `internal/interview` | — (T2, T5 closed) | **M** | 8 narration calls at ~24 s each need fan-out, not a loop; questions must never wait on TTS |
+| **T9** | `static/**`, `internal/web/**`, route lines | T4 — and see below on T8 | **L** | The only track whose verification is a **real phone**, not a test. Largest remaining surface |
+| **T9a** | `static/race/**` | — | **S** | The sprites, not the motion. Prototype already runs (`dev-diary/prototypes/race.html`) |
+| **T10a** | `internal/bookvideo/**`, ffmpeg lines in `Dockerfile` | — | **S–M** | Nothing: recipe proven, fixtures on disk (t10-video-record.md). `exec.Command` hygiene, `t.Skip` when ffmpeg is absent |
+| **T10b** | book template in `internal/web/**`, `static/book/**`, route lines | T9, T10a, and T7+T8 for real data | **S** | One route, one `<video>`, `Content-Disposition`. Small *because* T10a took the work |
+| **T11** gate | `internal/gate/**` + route wrap | — | **S** | Middleware against no one else's code |
+| **T11** sweep | retention sweep in `internal/mediastore/` | — (T3 closed) | **S** | Disk cap arithmetic |
+| **T11** prewarm | fixtures | T10b | **M** | Needs real finished books: money, clock, free window |
+| **T12** | `internal/audio/music.go` | T8, T10a | **S** | Nothing left: the mix is a **verified 1.1 s final pass** over the finished MP4 (below). One free live call to get the bed |
+| **T13** | `internal/audio/clone.go`, **plus both capture modes in `static/**` and one upload route** — the recorded Owns line was incomplete | T8, T9 (adult corner), **T10a** (transcode), + the consent decision | **M** | Not the clone call — the **sample**. Recording is non-negotiable, and the recorder hands back opus/mp4, never mp3 |
+| **T14** | `README.md`, submission assets | T11 (+T12/T13) | **M** | Fixed 4-hour box; the demo video is an edit, not a build |
+
+#### Order: T8 before T9, and the rework question disappears
+
+The recorded `T9 depends on T4, T8` is real, and **the cheapest way to honour
+it is to build T8 first**, not to run the two in parallel and reconcile them.
+
+Run them the other way round and T9 owes T8 a seam it cannot retrofit: the
+**"Tap to start" entry gesture and the single unlocked `Audio` element it
+creates** — an entry *screen*, and an object whose lifetime is the whole
+session. Adding it after the flow exists means inserting a first screen and
+re-plumbing every playback call, and the naive retrofit (`new Audio()` per
+clip) is the exact silent iOS failure §T8 warns about. Sequencing removes the
+seam question entirely: T9 builds against a wire that already carries the URL.
+
+What T8 hands T9 is small and additive either way — `questionEvent`
+(`internal/interview/turn.go:19`) gains
+`AudioURL string \`json:"audio_url,omitempty"\``, and the clip serves over T3's
+existing `GET /media/{id}`, so **T8 adds no route and never touches
+`newServer`.**
+
+#### Two dependencies this plan overstates
+
+1. **T10's renderer needs nothing.** `internal/bookvideo` is a pure function —
+   page images and audio files in, one MP4 out — already proven against
+   `data/live/t6b-book/` with stand-in clips (t10-video-record.md). Only the
+   *player* needs the shell and real data. Hence the T10a / T10b split above:
+   T10a is **not on anyone's critical path and carries no merge risk**, so it
+   fills any gap in the schedule — including a stall waiting on T7.
+   What makes that safe is the contract already pinned in §T8: **one persisted
+   clip per page, in page order.** T10a's `-shortest` timing model depends on
+   nothing else about T8.
+2. **T12 got cheaper when the book became a video.** Recorded as depending on
+   T10; it now needs **T10a only**, and is an `amix` filter argument rather
+   than a looping `<audio>` racing the page. Re-rate it S.
+
+#### The critical path
+
+**~~T7~~ → T8 → T9 → T10b → T11 → T14**, with **T10a in flight** ahead of T10b
+and **T9a** droppable anywhere.
+
+That is close to a straight line, and deliberately so. The one place a second
+worker pays for itself is **T14's README and demo-video prep**, which is prose,
+touches no code, and can be drafted against a book that already exists.
+
+If two route-adding tracks ever do end up in flight together, the collision is
+`newServer` (`cmd/thutapi/main.go:141`, also spelled at `main.go:272` and
+`main_test.go:59`) — a positional parameter list plus a contiguous block of
+adjacent `HandleFunc` lines. Taking a deps struct and one `Routes(mux, deps)`
+per package fixes it in minutes. **Worth doing when T9 adds the second batch of
+routes anyway; not worth doing speculatively before then.**
+
 
 ### Status
 
@@ -73,11 +182,13 @@ required, and the first things cut.
 | **T5** | DONE. Round 1 (t5-round1.md): REMEDIATE 0C/0H/3M/2L — transport-error pin had an empty assertion body (swallow mutant went green), the Done when's live half had no owner, the prompt taught "exactly 8 pages" while the validator enforced no count, a prose-embedded decoy JSON object could be taken as the book (full-story decoy silently in one call), and cast uniqueness was case-sensitive (Mira+mira split the T6 lock). Remediation round 1 fixed all five (real transport pins incl. six-sentinel probe; T5b operator row + amended Done-when; `PageCount = 8` taught by prompt and enforced by validator, cut-to-6 changes exactly that rule; extractStory scans all candidates for first decode-AND-validate with first-candidate fallback errors; EqualFold uniqueness with exact references). **Round 2: APPROVE 0/0/0/0, zero residue** (t5-round2.md). Coverage: story 100%. Live half owned by **T5b**. |
 | **T5b** | **DONE** 2026-09-05. Closes the live half of T5's original `Done when`: two independent live M3 calls with `thinking` ON over a realistic 14-turn transcript, both schema-valid, both 8 pages, all emotions in the taught vocabulary, every page character present in the cast (14s and 37s). Corrective-system-message acceptance **confirmed** — MiniMax obeyed a `system`-role message placed after an assistant turn, which is the mechanism `story.Structure`'s corrective retry depends on. **Two findings handed to T6** (not T5 defects — the validator does what it was specified to do): live casts contain non-visual members (`Narrator`, `visual:"no visual"` / `"an unseen storyteller with no appearance"` — two phrasings, so no literal match works) which would each burn a ~$0.01 reference sheet on nothing; and one entity can occupy two cast slots (`Grumpy River` + `Happy River`, the latter's visual opening "the same wide blue river"), which the image lock would render as two unrelated rivers — the exact drift T6 exists to prevent. Also: M3's page prompts already carry their own style language, which competes with T6's constant style suffix. Probes committed as `//go:build live` tests. Zero cost. See t2b-t5b-live-record.md. |
 | **T6** | **DONE** 2026-09-05. Round-1 review (0C/3H/3M/2L) remediated and re-reviewed: **round 2 APPROVE 0/0/0/0, zero residue** (t6-round1.md → t6-remediation-round1.md → t6-round2.md). T6b item 1 (live, ~$0.25) had already established the model change beneath the round: **`Flux2-Klein` and `Z-Image` never generate** (accept, sit at `queued` forever) — they moved onto the forbidden table; **`seedream-5.0-lite`** is `DefaultModel`, synchronous, references as an **array of URLs**, results at `outcome.media_urls[].url` (array of objects beside `thumbnail_image_url`). H1 (payload echo beats the result) was confirmed Critical and fixed by keying the decode on `outcome.media_urls` by name; the echoing fixture now lives in the suite and page bytes are asserted ≠ sheet bytes. Round-1 remediation also landed the sanctioned `media.EditImage`/`GenerateImage` contract change (`ImageOptions`, `refImages []string` URL array, clean cutover) and fixed H2 (variant fusion only same-entity), H3 (absence words drawable), M1 (normalised forbidden-id guard incl. dead models and video stems), M2 (zero-Book pinned on render paths, M-k red), M3 (deferred unsupported candidates), L1, L2 (redirect scheme allow-list per hop + cap). Full M-a..M-k table re-run 11/11 red by the round-2 reviewer, tree byte-identical. Pinned production settings: `size:"1792x2240"` (not the `2K` preset), `output_format:"jpeg"`, `max_images:1`, `watermark:false`. The live half of the Done when (eight pages, constant cast; render → persist → serve) is T6b items 2–3, which open now that T6 has closed. |
-| **T6b** | **Items 1–2 DONE** 2026-09-05. Item 1 (~$0.25): settled the model question (seedream-5.0-lite; Flux2-Klein/Z-Image never generate), the response shape (`outcome.media_urls[].url`, array of objects) and H1's severity — t6b-live-record.md. Item 2 (10 calls, ~$0.35): a full eight-page book against a constant cast ran live after T6 closed — **PASS, 236 s**, two sheets + eight pages, no skips, no page byte-identical to its sheet (H1 echo absent live), multi-reference pages 3/4/7/8 hold both entities, **M3-as-judge verdicts: match=true, drift=none on all eight pages**; renders under `data/live/t6b-book/` for human review. The item-1b experiments settled the same open questions (sequential mode = unusable text-labelled grid; multi-reference works). **Item 3 (render → persist → serve end to end) opens once T7's writer exists** — it is T6b's remaining half and runs after T7 closes. |
-| **T7** | Not started. Capability **verified live** 2026-09-04 — see T7. |
+| **T6b** | **DONE** 2026-09-05 — all three items closed, ~$1.00 total. Item 1 (~$0.25): settled the model question (seedream-5.0-lite; Flux2-Klein/Z-Image never generate), the response shape (`outcome.media_urls[].url`, array of objects) and H1's severity. Item 2 (10 calls, ~$0.35): full eight-page constant-cast book live after T6 closed — PASS, 236 s, no page byte-identical to its sheet (H1 echo absent live), multi-reference pages hold both entities, M3-as-judge `match=true, drift=none` on all eight pages; renders under `data/live/t6b-book/` for human review. Item 3 (8 calls over two runs, ~$0.28): render → persist → serve end to end after T7 closed — T7's BookWriter placed 2 sheets + 2 pages (immediate sheets, post-approval pages, echo guard held), every id fetched back 200 `image/jpeg` byte-identical through the real `GET /media/{id}` route pattern; the first run's 404s were the probe's own serve-leg bug (bare-mount vs route pattern), not the product. Full record: t6b-live-record.md. The download/mux tail after serve is T10's (offline chain proven in t10-video-record.md). |
+| **T7** | **DONE** 2026-09-05, closed at `fa3a516`. Round-1 review (t7-round1.md) REMEDIATE 0C/0H/2M/1L → remediation (t7-remediation-round1.md) pinned all three → **round-2 APPROVE 0/0/0/0, zero residue** (t7-round2.md; all seven mutants re-run red/hang, byte-identical restores). Implemented T6's closing loop in `internal/illustrate/verify.go` + `persist.go`: echo guard (a page byte-identical to a locked sheet is `ErrDecodeEcho` — a decode defect, judged never, regenerated never), M3-as-judge verdict with up to 2 regenerations of the same prompt+sheets (`ErrConsistency` after the cap), judge transport errors surfaced unretried, `ErrBadVerdict` on unusable replies; sheets persist immediately per render, pages only post-approval, `ErrConflict` re-run replaces the occupant. Config gains `Judge` + `Persist` (nil = off; zero value byte-for-byte T6, no T6 test edited). Six contract rows C1–C6 sanctioned. The judge mechanism was pre-verified live (T6b item 2: M3 verdicts over the eight-page book). Live half of T7's loop (render → persist → serve end to end) is T6b item 3, which opens now. |
 | **T8** | Not started. |
 | **T9** | Not started. |
-| **T10** | Not started. |
+| **T9a** | Not started. The race (§The flow screen 5). Prototype committed at `dev-diary/prototypes/race.html` — mechanism settled, sprites outstanding. Buildable at any point; depends on nothing. |
+| **T10a** | **DONE** 2026-09-05. Closed after round-1 remediation and **round-2 APPROVE 0/0/0/0, zero residue** (t10a-round1.md, t10a-remediation-round1.md, t10a-round2.md). Implemented video pipeline in `internal/bookvideo` (`types.go`, `command.go`, `video.go`, `bookvideo_test.go`): title card (blurred page 1 with title + byline via `textfile=`), page segments (`-shortest`, scale/pad/setsar 1080x1350 4:5 portrait, libx264/aac), end card (flat `0x1b1614` with domain attribution), and concat demuxer (`-c copy +faststart` with MP4 metadata tags). Bounded concurrency via `errgroup.SetLimit`. Added static ffmpeg 7.1 pinned by immutable sha256 digest to `Dockerfile`. Coverage 89.1%. |
+| **T10b** | Not started. Book template under `internal/web/**`, `static/book/**`, and route lines in `newServer`. |
 | **T11** | Not started. |
 | **T12** | Optional. Not started. |
 | **T13** | Optional. Not started. |
@@ -152,7 +263,7 @@ Things the task graph assumes exist, that no track's `Owns` line covers.
 | **Job orchestration** (start → job id → progress events → result) | T4, T5, T6, T8, and every SSE consumer | **Assigned: T3b** as `internal/job`, alongside the broker. |
 | **Request-queue polling** | T6, T8 | **Assigned: T3b** — built inside `internal/gmi/media` per invariant 4, so it lands once. |
 | **`internal/web`** (shell template, book template) | T9, T10 | Now named in T9's and T10's `Owns`. Previously implied by AGENTS.md's file layout and by nothing else. |
-| **Illustration persistence** (render → `mediastore` blob → `store.SetMediaPlace`) | T6 renders and deliberately writes nothing; T10 serves what must already be on disk | **Assigned: T7** (2026-09-05, on the round-1 review's ruling 2). A page is final when T7 approves it, not when T6 renders it — persisting after the verdict is one write, persisting before makes every regeneration a delete/insert against the one-illustration-per-page unique slot. T6b proves the render → persist → serve path live. |
+| **Illustration persistence** (render → `mediastore` blob → `store.SetMediaPlace`) | T6 renders and deliberately writes nothing; T10 serves what must already be on disk | **Resolved: T7** (2026-09-05 — assigned on round-1 ruling 2, implemented in `persist.go`, closed at `fa3a516`). A page is final when the judge approves it; sheets persist immediately, pages post-approval, `ErrConflict` re-run replaces the occupant. T10 now reads what T7 wrote; T6b item 3 proves the render → persist → serve path live. |
 
 
 ## The deadline's timezone
@@ -195,7 +306,7 @@ hardcoded story, on the live URL. Ugly is fine; the pipeline must be real.
 
 | Time (IST) | |
 | --- | --- |
-| → 16:00 | T8–T11 (+T12/T13 if reached): audio, interview UI, flipbook, hardening |
+| → 16:00 | T8–T11 (+T12/T13 if reached): audio, interview UI, book video, hardening |
 | **16:00** | **Hard stop on building.** Whatever is unfinished gets cut. |
 | 16:00–20:00 | T14: video, repo public, form, X post |
 | **20:00** | **Submit.** 90 minutes before the earliest plausible deadline. |
@@ -758,7 +869,7 @@ tenth of one book — see project.md §3, where the column is per *book*, not pe
 image. Operator policy (2026-09-05) is to spend it: proving the shape now is
 cheaper than building two tracks on a wrong assumption.
 
-## T7 — Consistency verification
+## T7 — Consistency verification  *(DONE — closed 2026-09-05 at fa3a516; t7-round1.md → t7-remediation-round1.md → t7-round2.md, round-2 APPROVE 0/0/0/0 zero residue; live tail is T6b item 3)*
 
 **Owns:** `internal/illustrate/verify.go` and `internal/illustrate/persist.go`
 (same package as T6 — it is T6's closing loop, not a separate seam), plus the
@@ -869,6 +980,121 @@ same request queue. Do not assume; check the terminal record once, cheaply.
   gesture, so spoken questions die silently on an iPad. One **"Tap to start"**
   gesture on entry unlocks an audio element; reuse that element for every later
   clip. Without this the headline feature does not work on the primary device.
+  **This now applies to the interview only.** Since T10's reshape (2026-09-05)
+  the narration does not play in the browser at all — it is muxed into the
+  book MP4, where the native controls are themselves the gesture. What T8 owes
+  T10 is one persisted clip per page, in page order, nothing more.
+
+---
+
+## The flow — screen by screen
+
+*Written 2026-09-05, on the operator's ruling. Until now the plan had
+principles (§T9) and components (§T9, §T10, §T11, §T13) but no sequence
+connecting them, and no document stated how long the child waits.*
+
+**The number that drives this section:** post-interview generation is **about
+six minutes**, best case, before any regeneration — 236 s for images measured
+live (T6b item 2), plus T7's judge pass, plus eight narration calls at ~24 s
+fanned out, plus structuring and the video render. Every screen below exists
+to make that six minutes survivable.
+
+| # | Screen | What it is | Owns |
+| --- | --- | --- | --- |
+| 1 | **Shelf** | Two or three prewarmed books, and one big *Make your own book*. Cost control (§T11 item 2) and the judge's default landing | T9 + T11 |
+| 2 | *(no screen)* | **The CTA on screen 1 *is* the "Tap to start" gesture.** It unlocks the `Audio` element §T8 needs and costs no extra tap and no extra screen | T9 |
+| 3 | **Interview** | Chips, text box as the escape hatch. Questions stream over SSE and speak; text never waits on audio | T9 + T4/T8 |
+| 4 | **The grown-up step** | Interview ends → *"a grown-up can add a voice"* → record / upload / skip. **One screen, skippable, exactly once** | T13 |
+| 5 | **The wait** | The race (below) plus pages landing as they are approved. ~6 minutes | T9 |
+| 6 | **The book** | Video plays, download, shareable URL, cold-open works without JS | T10b |
+
+### Screen 4 — the grown-up step: voice, and the byline
+
+**The byline comes from here, not from the interview** (decided 2026-09-05).
+§T10's title card reads *"a book by <name>"*, and the interview cannot supply
+it: its checklist is six **story** slots — hero, companion, want, obstacle,
+turn, ending (`internal/interview/reply.go:13`) — the child's name is not one
+of them, and T4 is closed. Adding a seventh slot would reopen a closed track to
+collect something that is not a story element.
+
+So screen 4 carries **one short text field beside record / upload / skip.** The
+adult is already on this screen, is the one who will upload the file, and can
+change anything before it goes anywhere — the person who owns the decision is
+the person who types it. Left blank, the title card carries the title alone and
+nothing else changes. Typing is §T9's friction point, and this is the one
+screen where an adult is holding the device on purpose.
+
+### Voice capture sits at the interview's end (decided)
+
+Not before the interview: an adult-facing detour in front of every child's
+first run. Not after the book: that means re-synthesising narration and
+re-rendering the video for a book that was already "done". At the end of the
+interview, narration has not started yet, so the clone is ready exactly when
+§T8 needs it and **nothing regenerates**. The cost is that it lands at the
+moment the child most wants the book to begin — so it is one screen, one
+sentence, and *skip* is as large as the other two buttons.
+
+### Screen 5 — the wait is a race, not a spinner
+
+§T9's rule is *no naked spinners — every wait is a character doing something*.
+The wait is the longest screen in the product, so it gets the most character:
+**a field of SVG animals running a race**, one lane each.
+
+**The race is the progress bar.** The track is divided into **eight markers,
+one per page**; the pack advances one marker each time a page is approved, and
+the per-animal jitter on top is cosmetic. This keeps §T10's *"the book filling
+up is the progress bar — no percentage"* rule while giving a four-year-old
+something to watch for six minutes. A decorative loop would not have earned
+its place; a loop that encodes real state does.
+
+* **Prototyped 2026-09-05** — mechanism confirmed at ~60 lines of CSS and JS,
+  desktop and 390 px. Body bob plus two leg pairs rotating out of phase; **no
+  sprite sheet, no animation library, no build step.** Per-animal stride
+  duration is jittered so nobody runs in lockstep.
+* **The cost is the art, not the motion.** The prototype's five animals are
+  ellipses and rounded rects; they read as animals but the silhouettes are too
+  alike and the ears barely register at 64 px. Budget the time there, not on
+  the mechanism, which is done.
+* Animate `transform` only, and honour `prefers-reduced-motion` — under it the
+  animals hold position and the markers still light.
+* **It is genuinely separable.** No backend, no SSE, no data: it takes one
+  number (pages approved) and renders. It can be built and reviewed in a
+  browser on its own, ahead of or behind anything else in T9.
+
+### Screen 5's other state — the failure path (decided)
+
+T6 and T7 return a **zero Book on any error**, so a failure is total, not
+partial: there is no five-page book to show. §T9's *no failure text, never a
+dead end* is a tone rule, and this is the behaviour behind it.
+
+**Decided 2026-09-05: the animals stop and sit down, one warm line, and two
+equally-sized ways forward — *try again* and *look at other books*.**
+
+* **No automatic retry.** A regeneration is another ~$0.35 and another six
+  minutes, and after 2026-09-06 it bills at standard rates. An auto-retry on a
+  public URL is an open wallet, which is the exact thing §T11 item 1 exists to
+  prevent. A retry is a tap, and it spends a §T11 gate token like any other
+  generation.
+* **Two doors is what "never a dead end" means here** — one forward, one
+  sideways to the shelf. A single "try again" on a failing pipeline is a dead
+  end with extra steps.
+* **No error codes, no classes, no prose about what broke** (AGENTS.md pin).
+  The operator gets the detail in `log/slog`; the child gets a sentence.
+
+### The rest of screen 5, decided
+
+* **Layout: the race is a band pinned at the bottom, pages stack above it.**
+  Portrait phone is the primary device and vertical space is the scarce
+  resource; the pages are the payload and get the room, the race is the engine
+  and gets a strip.
+* **The wait is silent.** No music bed, no narration-as-it-lands. The bed is
+  muxed into the film (§T12) and the book is where the sound lives — six
+  minutes of loop under a wait is worse than quiet, and it buys a second
+  autoplay problem for nothing.
+* **The interview's own micro-waits reuse the race.** M3 takes seconds per
+  turn, and §T9's no-spinner rule applies there too: **one animal from the
+  race, trotting in place**, is the thinking indicator. One component, two
+  screens, one visual language.
 
 ---
 
@@ -891,7 +1117,7 @@ Child-facing rules:
 
 * **Tappable chips**, text box as the escape hatch. Typing is the friction point.
 * **~60px targets**, generously spaced. Fine motor control is poor.
-* **No naked spinners** — every wait is a character doing something.
+* **No naked spinners** — every wait is a character doing something. The six-minute generation wait is **the race** (§The flow, screen 5): SVG animals, one lane each, the pack advancing one marker per approved page. Prototyped; the mechanism is ~60 lines and the remaining cost is the sprites.
 * **Chunky rounded type** (Fredoka, Baloo 2), warm palette.
 * **No failure text.** Errors are warm and never a dead end.
 * **Adult corner.** Voice-sample capture and settings sit out of the child's
@@ -907,22 +1133,201 @@ Responsive, **tablet-first**:
 
 ---
 
-## T10 — The book
+## T9a — The race
 
-**Owns:** `static/book/**` and the book template under `internal/web/**`.
+**Owns:** `static/race/**`.
+
+**Depends on:** nothing. **Done when:** the race renders on a phone and a
+laptop, advances one marker per approved page, holds still under
+`prefers-reduced-motion`, and its five animals are distinguishable at a glance.
+
+A subtask of T9, given its own number because it has its own boundary and can
+be built and reviewed before the shell exists. It is screen 5's waiting state
+and, trotting in place, the interview's per-turn thinking indicator (§The
+flow).
+
+**It takes one number and renders.** No backend, no SSE, no store, no model
+call: `pagesApproved` in, animation out. That is the whole interface, and it is
+why this can be built at any point in the schedule — including while T7 is in
+review.
+
+**Start from `dev-diary/prototypes/race.html`**, committed 2026-09-05. It is a
+standalone page that already runs: eight markers, five animals, jittered
+strides, the pack advancing on a button. The mechanism is settled — roughly
+sixty lines of CSS and JS, no sprite sheet, no animation library, no build step
+(§T0's *no Node in the build* holds).
+
+**The work that is actually left is the sprites.** In the prototype the animals
+are ellipses and rounded rects; they read as animals, but the silhouettes are
+too alike and the ears vanish at 64 px. Five clearly-different animals at a
+glance, in the warm palette, is the deliverable — the motion is done.
+
+* **Animate `transform` only.** Nothing that triggers layout, on a screen that
+  holds for six minutes on a phone.
+* **`prefers-reduced-motion`**: animals hold position, markers still light. The
+  progress information must survive the motion being switched off.
+* **The markers are the progress bar** (§T10: no percentage). Eight of them,
+  one per page. If §Decisions row 8 ever cuts the book to six pages, this is
+  one constant.
+* **Five lanes is a guess, not a pin.** Enough for a race, few enough to read
+  on a 390 px screen. Change it if it looks thin.
+* Keep it in one file with its SVGs inline. It has no dependencies and should
+  not acquire any.
+
+---
+
+## T10 — The book: one MP4, played and downloadable
+
+**Owns:** `internal/bookvideo/**`, the book template under `internal/web/**`,
+`static/book/**`, and the ffmpeg lines in the `Dockerfile`.
 
 **Depends on:** T6, T8, T9 — **and on T7, which owns the illustration write.**
-T6 renders bytes and persists nothing by design; a book page cannot be served
-cold until T7's writer has put the image on disk and in `store`. **Done when:**
-a book reads and turns on a phone and on a laptop, and its URL opens cold.
+T6 renders bytes and persists nothing by design; a book cannot be muxed until
+T7's writer has put the images on disk and in `store`. **Done when:** a
+finished book plays and downloads on a phone and on a laptop, and its URL opens
+cold.
 
-* **The book filling up is the progress bar.** Pages arrive one at a time over
-  SSE; no percentage.
-* **Layout fork, not fluid resizing:** portrait phone → one page; tablet
-  landscape and desktop → **two-page spread**, which reads like a real book and
-  is considerably cuter.
-* Swipe on touch; arrow keys and click zones on desktop.
-* Server-rendered book page so a shared link works without JS.
+### The decision — MP4, not flipbook (operator, 2026-09-05)
+
+**The finished book is a video file.** `ffmpeg` stitches each persisted page
+image to its own narration clip; the browser gets one `<video controls
+playsinline>` and a download link. This **supersedes project.md §"The book is a
+layout fork"** — the two-page spread, swipe-to-turn, arrow keys and click zones
+are cut by decision, not by the clock.
+
+Why the trade is one-sided on a Sunday:
+
+* **It deletes the most expensive UI on the board.** Flipbook = swipe gestures,
+  a portrait/landscape layout fork, page-turn state, prefetch, and per-page
+  `<audio>` sequencing kept in sync with the page the reader is actually on —
+  all of it needing a **real phone** to test (§T9), on the compressed day.
+  A `<video>` element is none of that, and its controls, scrubbing, fullscreen
+  and background-audio behaviour are the platform's problem, not ours.
+* **It collapses the mobile-autoplay hazard** (§T8). Native controls *are* the
+  gesture; there is no unlock-an-element-on-first-tap trick to get wrong, and
+  no way for narration to desync from the page, because there are no longer two
+  things to sync.
+* **The artifact is the deliverable.** T14 must produce a ≤3-minute demo video
+  and **an X post** — a shareable MP4 of the book is exactly what those want,
+  already rendered, instead of a screen-capture of someone hand-turning pages
+  while audio plays.
+* **It makes "picture and sound as a single output" literal**, which is the
+  Multimodality track's own framing.
+* **T12's music bed gets cheaper, not harder** — one `amix` at ~0.15 under the
+  narration inside the render, instead of a looping `<audio>` racing the page.
+
+**What is kept.** *The book filling up is still the progress bar* (§T10's
+original first bullet). Pages arrive over SSE as they are approved and land as
+a growing strip of `<img>`s — appending an image per event is a handful of
+lines, none of the flipbook's cost — and the `<video>` replaces the strip when
+the render finishes. The server-rendered cold-open URL is also kept: the book
+page renders from `store` without JS, with the MP4 and the page images in the
+markup.
+
+### The recipe, verified 2026-09-05 on the real T6b renders
+
+**Full record: `adversarial-review/t10-video-record.md`** — commands,
+transcripts, a six-row *what is verified* table and a six-row *what is NOT*
+table. Cost $0.00; every input was already on disk.
+
+Proven end to end against `data/live/t6b-book/` (8 pages, 1792×2240 JPEG) with
+stand-in clips of varying length: **49.2 s output, 2.6 MB, 13.3 s wall** to
+encode and concat on the workstation, and **the same chain re-run inside the
+shipping image** under ffmpeg 7.1 as uid 65532.
+
+**What that record does not cover, and this track therefore still owns:** real
+Speech 2.8 narration (the clips were generated tones), serving the file
+(`Content-Disposition`, Range for a scrubbing `<video>`), playback on an actual
+phone, the Fredoka face in place of the stand-in font, pinning the ffmpeg base
+image by digest, and wall time on foleyflow rather than the workstation.
+
+Per page — one segment, **audio-driven, with no duration arithmetic anywhere**:
+
+```
+ffmpeg -loop 1 -i page-NN.jpg -i narration-NN.mp3 \
+  -vf "scale=1080:1350:force_original_aspect_ratio=decrease,\
+pad=1080:1350:(ow-iw)/2:(oh-ih)/2:color=0x1b1614,setsar=1,format=yuv420p" \
+  -r 25 -c:v libx264 -preset veryfast -crf 20 \
+  -c:a aac -b:a 128k -ar 44100 -ac 2 -shortest -movflags +faststart seg-NN.mp4
+```
+
+then `-f concat -safe 0 -i list.txt -c copy -movflags +faststart book.mp4`.
+
+* **`-shortest` is the whole timing model.** The page holds exactly as long as
+  its own narration; nothing calls `ffprobe`, nothing sums durations, and a
+  re-narrated page cannot drift.
+* **The scale/pad/setsar/format chain is not optional.** libx264 needs even
+  dimensions and the concat demuxer needs every segment to agree on geometry,
+  SAR, pixel format, frame rate and audio layout — `-c copy` concat is what
+  keeps the join free, and it only stays free if the segments match.
+* **`+faststart`** so the browser can start playing before the file is down.
+* 1080×1350 (4:5) matches the pages' own aspect and is the right portrait shape
+  for a phone and for X. Do not letterbox to 16:9.
+* A ≤0.5 s `xfade` between pages is the one nice-to-have worth the time.
+  **Ken Burns (`zoompan`) is not** — a picture book wants the page held.
+
+### The file leaves the site — build it to stand alone
+
+Downloading is not the end of the artifact's life: a parent uploads it to
+YouTube, sends it to a grandparent, posts it. Everything below is cheap and all
+of it was **built and verified 2026-09-05** (`title card + end card + tags`:
+55.7 s, 2.7 MB).
+
+* **A title card and an end card, not a nice-to-have.** A bare sequence of
+  pages arriving on someone else's timeline has no title, no author and no
+  attribution. Title card = page 1 through `boxblur=18:2,eq=brightness=-0.22`
+  with the story title and the child's byline over it (no design assets
+  needed); end card = flat `0x1b1614` with "made with Thutapi" and the domain.
+  Both are ordinary segments built to the same geometry, so they concat with
+  `-c copy` like any page. The static build has freetype/fontconfig — point
+  `fontfile` at the Fredoka TTF T9 vendors. **The byline is typed by the adult
+  at screen 4** (§The flow, decision 14); left blank it drops the line, not the
+  card.
+* **Text goes in via `textfile=`, never `text=`.** The title is model output
+  and a child's own words: apostrophes, colons, commas and backslashes are all
+  live ammunition in a filtergraph. Write the string to a file under `/data`
+  and point `drawtext` at it — that is the same rule as "never interpolate
+  model output into an argument", applied where it actually bites.
+* **Set the MP4 metadata** — `-metadata title=` / `artist=Thutapi` /
+  `comment=` with the URL. It is what YouTube and every player read.
+* **Serve it under the story's name**, via `Content-Disposition: attachment;
+  filename=`, slugified — `Mira-and-Brambles-Long-Day.mp4`, not `book.mp4`.
+* **Aspect: stay at 4:5.** Vertical and ~90 s means YouTube will most likely
+  ingest it as a Short, which is the right shape for how this gets shared
+  (worth one check on the day, not a claim). If a landscape master is ever
+  wanted it is a second render off the same segments, not a redesign.
+
+### ffmpeg in the image — verified, and the one real cost
+
+The runtime is distroless (no shell, no apt, `nonroot`). A **static** ffmpeg
+copied in runs there as uid 65532 — built and executed 2026-09-05:
+
+```dockerfile
+FROM mwader/static-ffmpeg:7.1 AS ff
+...
+COPY --from=ff /ffmpeg /usr/local/bin/ffmpeg
+```
+
+`ffmpeg version 7.1` reports in, with libx264/aac/freetype/fontconfig present
+— and the **whole chain** (title card with `drawtext`+`textfile`, a page
+segment, `concat -c copy` with `-metadata`) was then executed inside that image
+as uid 65532, closing the version-skew question against the workstation's
+n9.0.1.
+
+* **Cost: image grows 33.8 MB → 222 MB.** Deploy pull time on the box; nothing
+  else. 23 G free (§T11 item 4).
+* `CGO_ENABLED=0` is untouched — ffmpeg is a subprocess, not a link-time
+  dependency, so the pure-Go/distroless posture in §T0 survives intact.
+* **Invoke it by absolute path with an argument slice, never through a shell**
+  (there is no shell), and never interpolate a story title, cast name or any
+  other model output into an argument. Write scratch under the `/data` volume,
+  not `/tmp`.
+* **The "no Node in the build" invariant (§T0) is untouched.** That rule bars a
+  build step that generates assets; this is one `COPY --from` of a prebuilt
+  binary, and nothing is compiled or regenerated at image-build time.
+* A judge's `docker run` gains no network dependency — the binary is baked in.
+* Tests that shell out must `t.Skip` when the binary is absent, in the shape
+  `live_test.go` already uses.
 
 ---
 
@@ -971,21 +1376,121 @@ assuming — that single unchecked assumption is what T6 round-1 H1 cost. Puts a
 third MiniMax model on the form and strengthens the "sound" half of a track that
 is explicitly *picture and sound as a single output*.
 
-**The cheapest remaining win.** First thing added back if Sunday goes well.
+**The mix, verified 2026-09-05** on the finished proof book (55.7 s) with a
+deliberately-too-short 30 s bed. It is a **separate final pass over the whole
+MP4**, not a change to the per-page segments — so §T10's free `concat -c copy`
+is untouched, and adding music re-encodes audio only:
+
+```
+ffmpeg -i book.mp4 -stream_loop -1 -i music.mp3 \
+  -filter_complex "[1:a]volume=0.15,afade=t=out:st=<dur-3>:d=3[bed];\
+[0:a][bed]amix=inputs=2:duration=first:normalize=0[a]" \
+  -map 0:v -map "[a]" -c:v copy -c:a aac -b:a 128k -movflags +faststart out.mp4
+```
+
+**1.1 s wall. Video stream copied. Duration byte-for-byte unchanged.** Three
+pins:
+
+* **`normalize=0` is not optional.** `amix` normalises by default, which halves
+  the narration the moment a bed appears — the bug would sound like "the music
+  is fine but the voice went quiet", and it is one flag.
+* **`-stream_loop -1` + `duration=first`** means Music 3.0's clip length simply
+  does not matter: a short bed loops, a long one is cut at the book's end. One
+  less thing to check on the live call.
+* **`afade=t=out` over the last 3 s**, or the book ends on a cut bed.
+
+**The cheapest remaining win**, and cheaper still since the reshape: it needs
+T10a's renderer, not the browser, and it is now one post-pass rather than a
+looping `<audio>` racing the page.
 
 ---
 
 ## T13 — Voice clone (optional)
 
-**Owns:** `internal/audio/clone.go`.
+**Owns:** `internal/audio/clone.go`, **both capture modes in `static/**`
+(adult corner) and the one upload route that receives them.**
 
-**Depends on:** T8, and on the public-fetchability check (originally T1
-check 5, **moved to T3** — the T1 stub has no file route to prove it with).
+*Owns corrected 2026-09-05.* The recorded line was `internal/audio/clone.go`
+alone, which is a PLAN.md defect of the kind AGENTS.md names: a clone needs a
+sample, a sample has to be captured and stored, and none of that fits in
+`clone.go`. Whoever picks this up would have had to guess their boundary.
+
+**Depends on:** T8, T9 (the adult corner), **T10a** (see the transcode below),
+and the public-fetchability check (originally T1 check 5, **moved to T3** — the
+T1 stub has no file route to prove it with).
+
+### Two front doors, one pipe
+
+**Both modes ship. In-browser recording is non-negotiable** (operator,
+2026-09-05) — a voice clone the parent cannot make on the spot is a feature
+nobody at the judging table will see. File upload sits beside it for the
+prepared sample and for any device where the recorder misbehaves.
+
+**It sits at the interview's end** — screen 4 of §The flow, one skippable
+step, decided 2026-09-05. Narration has not started at that point, so the
+clone is ready exactly when §T8 needs it and nothing regenerates.
+
+```
+record (MediaRecorder)  ─┐
+                         ├─→ POST /voice-sample → /data tmp → ffmpeg → mp3
+upload (<input type=file>)┘        → mediastore.Persist(audio/mpeg)
+                                   → GET /media/{id}  → GMI source_audio
+```
+
+The two differ only in how the blob is obtained. Everything after the POST is
+one path.
+
+**Serving the sample needs no new route — settled 2026-09-05.** `source_audio`
+must be a public HTTPS URL at a short-lived, unguessable path, and T3 already
+built exactly that: `GET /media/{id}`, ids **128 bits of `crypto/rand`**, with
+`Persist` documenting the id as unguessable
+(`internal/mediastore/mediastore.go:132`, `:311`). T11's retention sweep
+supplies the "short-lived" half.
+
+**The recorder does not produce mp3, and that is why T13 now depends on T10a.**
+Chrome and Firefox hand back `audio/webm;codecs=opus`; Safari and iOS hand back
+`audio/mp4`. Neither is in `mediastore`'s closed content-type set, and neither
+is a safe bet for what GMI will accept. **Transcode on receipt, before
+`Persist`** — verified 2026-09-05, both formats, inside the shipping image as
+uid 65532:
+
+```
+ffmpeg -i sample.<webm|m4a> -vn -c:a libmp3lame -b:a 128k -ar 44100 -ac 1 sample.mp3
+```
+
+8 s in → 8 s out, mono 44.1 kHz, ~129 KB, from both inputs. Because the
+transcode happens before `Persist`, **`mediastore` only ever sees
+`audio/mpeg`** — the closed type set is untouched and T13 never edits T3's
+package. Without §T10's ffmpeg already in the image this would need an opus
+decoder in Go, which is not a Sunday task; the video reshape paid for it.
+
+**Three browser facts that will otherwise cost an afternoon:**
+
+* **`getUserMedia` needs a secure context.** Production is HTTPS (T1b), and
+  `localhost` counts — but **a LAN IP over plain HTTP does not**, and testing
+  on a real phone against `http://192.168.x.x:8080` is exactly how §T9 says to
+  verify. The recorder will fail there and look like a code bug.
+* **Do not hardcode a `mimeType`.** Ask `MediaRecorder.isTypeSupported`, send
+  whatever came out, and let the server transcode. That is the whole reason
+  the pipe converges on the server.
+* **It needs a gesture and a mic-permission prompt**, which is precisely why it
+  belongs in the adult corner rather than the child's flow.
+
+Cap the recording (a countdown to ~8–15 s) in the UI *and* by size on the
+route. The model wants about eight seconds; an unbounded upload is an open
+disk.
 
 `minimax-audio-voice-clone-speech-2.8-turbo`, one synchronous call. Where a
 sample is supplied, one short recording can voice the whole cast — narrator
 plus dragon at `pitch: -8` with `spacious_echo`, robot with `robotic`, mouse at
 `+6`.
+
+**This does not disturb T10a.** §T8's contract is *one persisted clip per page,
+in page order* — it says nothing about how many calls built that clip. With
+T13 landed, a page's clip is **assembled** from several synths (narrator line,
+then the dragon's line at `pitch: -8`, then narrator again) and handed over as
+one file. The renderer's `-shortest` timing model neither knows nor cares. It
+is the one place the sequencing pays off for free.
 
 `source_audio` is a URL GMI downloads — it does not accept an upload — so the
 sample must be served over public HTTPS at a short-lived, unguessable path.
@@ -1038,6 +1543,9 @@ unsubmitted project scores zero.
 **Cut first:** T12 music, T13 clone, multi-character voices, page count to 6,
 controlnet.
 
+**Cut by decision, not by the clock:** the flipbook. §T10 is now an MP4 render
+plus a `<video>`; there is no page-turn UI left to run out of time on.
+
 **Do not cut:** the interview (T4 — it is the entry's reason to exist) and
 character consistency (T6 — without it there is no book).
 
@@ -1054,9 +1562,14 @@ character consistency (T6 — without it there is no book).
 | ~~5~~ | ~~Music 3.0 free~~ | — | **Confirmed free.** |
 | ~~6~~ | ~~Voice clone scope~~ | — | **Decided: optional throughout.** Library voice is the default. |
 | 7 | Image provider: `$0.01` tier or `gemini-2.5-flash-image` | T6 | Cheap. One-line switch by design; decide from the first reference sheet. |
-| 8 | Page count: 6 or 8 | T5, T6 | Cheap early, annoying after the flipbook is laid out. |
+| 8 | Page count: 6 or 8 | T5, T6 | Cheap early, annoying once the book render is laid out. |
 | 9 | Gate mechanism: passcode or per-IP cap | T11 | Cheap, but it must exist before the URL is public. |
 | 11 | T1 artifacts vs T1b live verification — split T1 into artifact-only close + operator-dependent T1b (DNS + foleyflow SSH). | T13, T14 | Done 2026-09-04 — T1 closed at 65df379, T1b unblocks operator run; without the split T2-T13 all blocked on operator work. |
+| 13 | Book delivery: flipbook or MP4. | T10, T14 | **Decided 2026-09-05: MP4.** Free to decide now, expensive once a page-turn UI is laid out. Deletes the swipe/spread/audio-sync work, collapses the T8 autoplay hazard, and hands T14 a shareable artifact it needs anyway. |
+| 14 | Byline on the title card. | T10, T13 | **Decided 2026-09-05: the child's name, typed by the adult at screen 4.** The parent is the publisher — they upload the file and can change anything before it goes anywhere — so the person who owns the decision is the person who types it. Not from the interview: that checklist is six *story* slots and T4 is closed. Skipped ⇒ the card carries the title alone. |
+| 15 | The ~6-minute wait: spinner, or something to watch. | T9, T9a | **Decided 2026-09-05: the race** (§The flow screen 5). Eight markers, one per page — the animation encodes real progress, so §T10's "no percentage" rule survives. Prototyped the same day; the mechanism is settled and only the sprites are left. |
+| 16 | Where voice capture sits in the flow. | T9, T13 | **Decided 2026-09-05: at the interview's end**, one skippable screen. Narration has not started, so the clone is ready exactly when T8 needs it and nothing regenerates. |
+| 17 | What the child sees when generation fails. | T9 | **Decided 2026-09-05: animals sit down, one warm line, two equal doors — *try again* and *look at other books*. No automatic retry** — a regeneration is ~$0.35 and six minutes, and after 2026-09-06 it bills; an auto-retry on a public URL is the open wallet §T11 item 1 exists to prevent. |
 | 12 | Operator runbook for T1b (DNS record, `docker run` on foleyflow, five live checks, transcript placeholders). | T1b | Free if operator can find the runbook; 15+ hours of clock if not. |
 Decision 7 is deliberately deferred to evidence rather than argued now: the
 spread across the whole image catalog is about 23 cents a book, so the only

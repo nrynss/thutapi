@@ -16,6 +16,9 @@
 #
 # Pin from project.md §Packaging and AGENTS.md §Stack and ground rules.
 
+# --- static ffmpeg ---------------------------------------------------------
+FROM mwader/static-ffmpeg:7.1@sha256:a8090df5f5608daef387e1b2e93b98aaacb4d92153ad904e7d715c725724fca4 AS ff
+
 # --- builder ---------------------------------------------------------------
 FROM golang:1.27.1-bookworm AS builder
 
@@ -66,6 +69,7 @@ VOLUME ["/data"]
 
 EXPOSE 8080
 
+COPY --from=ff /ffmpeg /usr/local/bin/ffmpeg
 COPY --from=builder /out/thutapi /thutapi
 
 USER nonroot:nonroot
