@@ -29,14 +29,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"thutapi/internal/gmi/media"
+	"thutapi/internal/story"
 )
 
 // liveQueueRecord mirrors the terminal request-queue envelope's documented
@@ -93,13 +96,15 @@ func dumpRecord(t *testing.T, phase string, raw []byte) liveQueueRecord {
 	return rec
 }
 
-// extractImage gets the rendered PNG and its URL out of the terminal record
-// by name — outcome.media_urls, a list of objects {"id","url"} — fetching
-// the first entry's URL from GMI's public bucket (t2b confirmed bucket
-// objects are publicly fetchable). The thumbnail_image_url beside it is
-// deliberately never consulted. The bytes are asserted to start with the PNG
-// magic and written to data/live/ for the operator's eyeball.
-func extractImage(t *testing.T, phase string, rec liveQueueRecord) (png []byte, url string) {
+// extractImage gets the rendered image and its URL out of the terminal
+// record by name — outcome.media_urls, a list of objects {"id","url"} —
+// fetching the first entry's URL from GMI's public bucket (t2b confirmed
+// bucket objects are publicly fetchable). The thumbnail_image_url beside
+// it is deliberately never consulted. The bytes are asserted to start with
+// PNG or JPEG magic (the pinned production format is jpeg — the payload
+// sends output_format:"jpeg" unless overridden) and written to data/live/
+// for the operator's eyeball.
+func extractImage(t *testing.T, phase string, rec liveQueueRecord) (img []byte, url string) {
 	t.Helper()
 
 	var outcome struct {
@@ -136,16 +141,22 @@ func extractImage(t *testing.T, phase string, rec liveQueueRecord) (png []byte, 
 	if err != nil {
 		t.Fatalf("%s: reading body failed: %v", phase, err)
 	}
-	if !bytes.HasPrefix(body, []byte("\x89PNG\r\n\x1a\n")) {
-		t.Fatalf("%s: fetched %d bytes do not start with the PNG magic (first 16: %.16q)", phase, len(body), body)
+	ext := ".bin"
+	switch {
+	case bytes.HasPrefix(body, []byte("\x89PNG\r\n\x1a\n")):
+		ext = ".png"
+	case bytes.HasPrefix(body, []byte("\xff\xd8\xff")):
+		ext = ".jpg"
+	default:
+		t.Fatalf("%s: fetched %d bytes start with neither PNG nor JPEG magic (first 16: %.16q)", phase, len(body), body)
 	}
-	t.Logf("%s: PNG fetched: %d bytes", phase, len(body))
+	t.Logf("%s: image fetched: %d bytes (%s)", phase, len(body), ext)
 
 	dir := filepath.Join("data", "live")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("%s: creating data/live failed: %v", phase, err)
 	}
-	path := filepath.Join(dir, "t6b-"+phase+".png")
+	path := filepath.Join(dir, "t6b-"+phase+ext)
 	if err := os.WriteFile(path, body, 0o644); err != nil {
 		t.Fatalf("%s: writing %s failed: %v", phase, path, err)
 	}
@@ -199,4 +210,221 @@ func TestLiveURLChaining(t *testing.T) {
 	} else {
 		t.Logf("edit: rendered bytes differ from the reference (%d vs %d bytes) — a real edit", len(genPNG), len(editPNG))
 	}
+}
+
+// savingImager wraps the live client so every render is written to disk
+// the instant its terminal record arrives — before the pipeline's own
+// decode runs. Illustrate holds the whole book in memory and returns the
+// zero Book on any error, so without this a single failed page would
+// discard every render that already completed, and with it the run's
+// evidence. Each save writes the terminal record verbatim (for the shape
+// record) and the image its media_urls names; the probe renames the
+// files by byte-matching them to the finished book afterwards.
+type savingImager struct {
+	inner Imager
+	dir   string
+	mu    sync.Mutex
+	seq   int
+}
+
+func (s *savingImager) GenerateImage(ctx context.Context, prompt, model string, opts media.ImageOptions) ([]byte, error) {
+	raw, err := s.inner.GenerateImage(ctx, prompt, model, opts)
+	if err == nil {
+		s.save("sheet", raw)
+	}
+	return raw, err
+}
+
+func (s *savingImager) EditImage(ctx context.Context, prompt, model string, refImages []string, opts media.ImageOptions) ([]byte, error) {
+	raw, err := s.inner.EditImage(ctx, prompt, model, refImages, opts)
+	if err == nil {
+		s.save("page", raw)
+	}
+	return raw, err
+}
+
+// save writes one terminal record and the image it names. It parses
+// media_urls independently of decodeImage — the shape evidence must not
+// depend on the decoder under suspicion. A fetch or write failure is
+// logged and swallowed: the render itself succeeded, and the probe must
+// not lose the book to a disk hiccup after the money was spent.
+func (s *savingImager) save(kind string, raw []byte) {
+	var rec struct {
+		Outcome struct {
+			MediaURLs []struct {
+				URL string `json:"url"`
+			} `json:"media_urls"`
+		} `json:"outcome"`
+	}
+	if json.Unmarshal(raw, &rec) != nil || len(rec.Outcome.MediaURLs) == 0 || rec.Outcome.MediaURLs[0].URL == "" {
+		return // not the terminal image shape; nothing to save
+	}
+	u := rec.Outcome.MediaURLs[0].URL
+	resp, err := http.Get(u) //nolint:noctx,gosec // live probe; URL from the authenticated queue's own answer
+	if err != nil {
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+	resp.Body.Close()
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return
+	}
+	ext := ".bin"
+	switch {
+	case bytes.HasPrefix(body, []byte("\x89PNG\r\n\x1a\n")):
+		ext = ".png"
+	case bytes.HasPrefix(body, []byte("\xff\xd8\xff")):
+		ext = ".jpg"
+	}
+	s.mu.Lock()
+	s.seq++
+	n := s.seq
+	s.mu.Unlock()
+	name := fmt.Sprintf("%s-%02d%s", kind, n, ext)
+	if err := os.WriteFile(filepath.Join(s.dir, name), body, 0o644); err != nil {
+		return
+	}
+	_ = os.WriteFile(filepath.Join(s.dir, kind+"-"+fmt.Sprintf("%02d", n)+".json"), raw, 0o644)
+}
+
+// TestLiveEightPagesConstantCast is T6b item 2: T6's original Done
+// when, run live — one book of eight pages against a constant cast,
+// through the real client and the real decode, on seedream-5.0-lite.
+// Cost: 2 reference sheets + 8 pages at $0.035 each ≈ $0.35.
+//
+// The mechanically checkable half is asserted here: two sheets, eight
+// pages, no skips, every page a decode of the OUTCOME (never its
+// reference sheet — the round-1 H1 echo), every page's lead reference
+// matching the story. The "recognisably constant cast" half cannot be
+// asserted by a test: the operator eyeballs the renders saved under
+// data/live/t6b-book/ and records the verdict in t6b-live-record.md.
+func TestLiveEightPagesConstantCast(t *testing.T) {
+	s := story.Story{
+		Title: "Mira and Bramble's Long Day",
+		Cast: []story.CastMember{
+			{Name: "Mira", Visual: "a small girl with two red plaits, round glasses and green wellington boots"},
+			{Name: "Bramble", Visual: "a shaggy brown dog with one white ear and a red collar"},
+		},
+		Pages: []story.Page{
+			{N: 1, Prompt: "Mira opens the garden gate.", Characters: []string{"Mira"}},
+			{N: 2, Prompt: "Bramble chases a butterfly across the lawn.", Characters: []string{"Bramble"}},
+			{N: 3, Prompt: "Mira and Bramble pick apples from the old tree.", Characters: []string{"Mira", "Bramble"}},
+			{N: 4, Prompt: "The rain comes and they shelter under the oak.", Characters: []string{"Mira", "Bramble"}},
+			{N: 5, Prompt: "Bramble shakes the raindrops off in the kitchen.", Characters: []string{"Bramble"}},
+			{N: 6, Prompt: "Mira bakes an apple pie while Bramble watches.", Characters: []string{"Mira"}},
+			{N: 7, Prompt: "They share the pie on the porch at sunset.", Characters: []string{"Mira", "Bramble"}},
+			{N: 8, Prompt: "Bramble curls up beside Mira's bed, fast asleep.", Characters: []string{"Bramble", "Mira"}},
+		},
+	}
+
+	dir := filepath.Join("data", "live", "t6b-book")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("creating %s failed: %v", dir, err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	defer cancel()
+	book, err := Illustrate(ctx, Config{
+		Imager: &savingImager{inner: liveMediaClient(t), dir: dir},
+		Model:  "seedream-5.0-lite",
+		Limit:  2,
+	}, s)
+	if err != nil {
+		t.Fatalf("Illustrate: %v", err)
+	}
+
+	if len(book.References) != len(s.Cast) {
+		t.Errorf("References = %v, want both cast members drawn", refNamesLive(book.References))
+	}
+	if len(book.Skipped) != 0 {
+		t.Errorf("Skipped = %+v, want none — every cast member is drawable", book.Skipped)
+	}
+	if len(book.Pages) != len(s.Pages) {
+		t.Fatalf("Pages = %d, want %d", len(book.Pages), len(s.Pages))
+	}
+	sheetByName := map[string]Reference{}
+	for _, r := range book.References {
+		sheetByName[r.Name] = r
+	}
+	for i, p := range book.Pages {
+		want := s.Pages[i]
+		if p.N != want.N {
+			t.Errorf("Pages[%d].N = %d, want %d", i, p.N, want.N)
+		}
+		// H1's exact failure mode, live: the page must not be its own
+		// reference sheet, whatever the queue echoed.
+		for _, sheet := range sheetByName {
+			if bytes.Equal(p.Image, sheet.Image) {
+				t.Errorf("page %d is byte-identical to %s's sheet — the decode picked the echo", p.N, sheet.Name)
+			}
+		}
+		lead := sheetByName[p.Reference]
+		if lead.Name == "" {
+			t.Errorf("page %d names a lead reference %q that is not a sheet", p.N, p.Reference)
+		}
+		t.Logf("page %d: lead=%s bytes=%d ct=%s", p.N, p.Reference, len(p.Image), p.ContentType)
+	}
+	for _, r := range book.References {
+		t.Logf("sheet %s: bytes=%d ct=%s url=%s", r.Name, len(r.Image), r.ContentType, r.URL)
+	}
+
+	// Name the incrementally-saved files after the finished book by
+	// byte-matching them to its pages and sheets.
+	if err := nameSavedRenders(dir, book); err != nil {
+		t.Errorf("naming saved renders: %v", err)
+	}
+	t.Logf("book renders saved under %s — operator eyeball verdict goes in t6b-live-record.md item 2", dir)
+}
+
+// nameSavedRenders renames the savingImager's arrival-order files to
+// page-01..08 and sheet-<Name>, keeping each file's own extension, by
+// matching their bytes to the finished book's pages and sheets.
+func nameSavedRenders(dir string, book Book) error {
+	ext := filepath.Ext
+	match := func(want []byte) (string, bool) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return "", false
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+			if err == nil && bytes.Equal(b, want) {
+				return e.Name(), true
+			}
+		}
+		return "", false
+	}
+	rename := func(want []byte, base string) error {
+		cur, ok := match(want)
+		if !ok {
+			return fmt.Errorf("no saved file carries these bytes")
+		}
+		final := base + ext(cur)
+		if cur == final {
+			return nil
+		}
+		return os.Rename(filepath.Join(dir, cur), filepath.Join(dir, final))
+	}
+	for _, p := range book.Pages {
+		if err := rename(p.Image, fmt.Sprintf("page-%02d", p.N)); err != nil {
+			return fmt.Errorf("page %d: %v", p.N, err)
+		}
+	}
+	for _, r := range book.References {
+		if err := rename(r.Image, "sheet-"+r.Name); err != nil {
+			return fmt.Errorf("sheet %s: %v", r.Name, err)
+		}
+	}
+	return nil
+}
+
+func refNamesLive(refs []Reference) []string {
+	out := make([]string, 0, len(refs))
+	for _, r := range refs {
+		out = append(out, r.Name)
+	}
+	return out
 }

@@ -324,3 +324,81 @@ round-1 design lived with does not need to survive remediation.
    reference) but still decide which characters get sheets at all (H3).
 4. `sequential_image_generation` and `max_images`: do not use — one image per
    request, always.
+
+---
+
+# Item 2 — eight pages render with a recognisably constant cast
+
+**Date:** 2026-09-05, ~14:20 IST, after T6 closed at `c9ac7ec`.
+**Cost:** 10 image calls ($0.035 each ≈ $0.35) + 8 M3 vision verdicts.
+**Probe:** `internal/illustrate/live_test.go`
+`TestLiveEightPagesConstantCast` (`//go:build live`) — the committed,
+clean-tree-runnable probe (incremental-save variant).
+
+## The run
+
+One book, "Mira and Bramble's Long Day": two reference sheets, eight pages,
+pages 3/4/7/8 multi-reference (both characters in one i2i call). Model
+seedream-5.0-lite, pinned `ImageOptions` defaults (`1792x2240`, jpeg,
+`watermark:false`), `Limit: 2` fan-out. Command:
+
+```console
+$ set -a; . ./.env; set +a
+$ go test -tags live -run TestLiveEightPagesConstantCast -v -count=1 ./internal/illustrate/
+=== RUN   TestLiveEightPagesConstantCast
+    live_test.go:281: page 1: lead=Mira bytes=548941 ct=image/jpeg
+    live_test.go:281: page 2: lead=Bramble bytes=467157 ct=image/jpeg
+    live_test.go:281: page 3: lead=Mira bytes=699027 ct=image/jpeg
+    live_test.go:281: page 4: lead=Mira bytes=656127 ct=image/jpeg
+    live_test.go:281: page 5: lead=Bramble bytes=539586 ct=image/jpeg
+    live_test.go:281: page 6: lead=Mira bytes=420824 ct=image/jpeg
+    live_test.go:281: page 7: lead=Mira bytes=609789 ct=image/jpeg
+    live_test.go:281: page 8: lead=Bramble bytes=329552 ct=image/jpeg
+    live_test.go:292: sheet Mira: bytes=230820 ct=image/jpeg url=https://storage.googleapis.com/…
+    live_test.go:292: sheet Bramble: bytes=316496 ct=image/jpeg url=https://storage.googleapis.com/…
+--- PASS: TestLiveEightPagesConstantCast (236.31s)
+```
+
+Wall clock 236 s for ten calls at fan-out 2 (~24 s/image effective — matches
+item 1b's 14–43 s per-image latency).
+
+## Machine half — asserted in the probe, all PASS
+
+* 2 reference sheets (Mira, Bramble), 8 pages, zero skips.
+* Every page decoded from the **outcome**, never the echoed payload: no page
+  is byte-identical to any sheet (round-1 H1's exact failure mode, live).
+* Every page's lead reference matches the story's character order.
+* All bytes `image/jpeg` (the pinned production format).
+
+## Operator half — the constant-cast verdict
+
+Renders saved under `data/live/t6b-book/` (`page-01..08.jpg`,
+`sheet-Mira.jpg`, `sheet-Bramble.jpg`) for human review.
+
+**M3-as-judge verdicts** — for each page, `MiniMaxAI/MiniMax-M3` received the
+page's reference sheet(s) and the page as inline base64 jpeg (the exact
+mechanism T7 codifies; ~450 KB request per call), and was asked whether the
+character(s) match the reference(s):
+
+| Page | Characters | Verdict |
+| --- | --- | --- |
+| 1 | Mira | `{"match": true, "drift": "none"}` |
+| 2 | Bramble | `{"match": true, "drift": "none"}` |
+| 3 | Mira + Bramble | `{"match": true, "drift": "none"}` |
+| 4 | Mira + Bramble | `{"match": true, "drift": "none"}` |
+| 5 | Bramble | `{"match": true, "drift": "none"}` |
+| 6 | Mira | `{"match": true, "drift": "none"}` |
+| 7 | Mira + Bramble | `{"match": true, "drift": "none"}` |
+| 8 | Bramble + Mira | `{"match": true, "drift": "none"}` |
+
+**Verdict: PASS.** Eight pages, two-character cast, zero feature drift
+reported across all pages, including the four multi-character pages rendered
+by multi-reference i2i — the URL-chaining + multi-reference design from item
+1b holds across a full book. The multi-reference pages (3/4/7/8) keeping both
+entities is the load-bearing result for T10's book.
+
+**Cost note:** 10 × $0.035 = $0.35, against the §3 per-book estimate of
+~$0.39 (8 pages + ~3 sheets at $0.035). Two books' worth of evidence now on
+record for ~$0.70.
+
+Item 3 (render → persist → serve) opens once T7's writer exists.
