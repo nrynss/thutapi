@@ -115,6 +115,7 @@ size as the yardstick:
 | **T10b** | book template in `internal/web/**`, `static/book/**`, route lines | T9, T10a, T10c, T10d | **S–M** | Now also owns **C4, the catch-up read** — without it a reload at minute four restarts the race at zero |
 | ~~**T10d**~~ | `supportedTypes` in `internal/mediastore/` + its test | — | **DONE** | Closed at round 1: **APPROVE 0/0/0/0, zero residue**. Added `video/mp4` with Range support |
 | **T10f** | `internal/bookpdf/**` + its own `application/pdf` and `bookgen` stage lines | T5, T7 | **M** | Every book gets a PDF — and it is the whole artifact while TTS is out |
+| **T10g** | its own caption lines in `internal/bookvideo` + a wrap helper | T5, T10a | **S–M** | The film has no words today. Geometry moves to 2:3, so T10e needs a re-run |
 | ~~**T10e**~~ | `internal/bookgen/live_test.go` + `t10e-live-record.md` | T10d | **DONE** | Closed at round-1 APPROVE 0/0/0/0. Full joined pipeline verified live end-to-end |
 | ~~**T10c**~~ | `internal/bookgen/**` + route lines | T5, T6, T7, T8, T10a | **DONE** | Closed at round-1 APPROVE 0/0/0/0 |
 | **T11** gate | `internal/gate/**` + route wrap | — | **S** | Middleware against no one else's code |
@@ -164,7 +165,7 @@ event**, not a field.
 
 #### The critical path
 
-**~~T7~~ → ~~T8~~ → ~~T10c~~ → ~~T10d~~ → ~~T10e~~ → T10f → T9 → T10b → T11 → T14**, with ~~T10a~~,
+**~~T7~~ → ~~T8~~ → ~~T10c~~ → ~~T10d~~ → ~~T10e~~ → T10f → T10g → T9 → T10b → T11 → T14**, with ~~T10a~~,
 ~~T9a~~, ~~T8b~~ and ~~T5c~~ done.
 
 **T10d jumps the queue.** It is one map entry, it depends on nothing, and until
@@ -218,6 +219,7 @@ routes anyway; not worth doing speculatively before then.**
 | **T10c** | **DONE** 2026-09-05, closed at `61e4da5` — **round-1 APPROVE 0/0/0/0, zero residue** (t10c-round1.md; five reviewer mutations red, byte-identical restores). `internal/bookgen` joins every stage: `POST /interviews/{id}/generate` → job on the book's topic; 409-busy double-fire refusal, fresh run after terminal; stages in order (structure with byline/page-cast rows → illustrate with Judge+Persist → narrate → bookvideo → film persisted + attached); events `page_approved {n,image_url}` (drives T9a's `--done`) / `book_ready {video_url}` / `failed {}` exactly-once incl. panic; failure total + terminal, no auto retry; store-side catch-up pinned. Contract rows C1–C6 sanctioned. **Two cross-track deliverables ride on this:** C2 — mediastore's closed type set lacks `video/mp4`, so production film persist lands when its owner adds the type (lifecycle pinned via the filmStore seam meanwhile); C4 — the HTTP book-state catch-up read is T10b's. |
 | **T10a** | **DONE** 2026-09-05. Closed after round-1 remediation and **round-2 APPROVE 0/0/0/0, zero residue** (t10a-round1.md, t10a-remediation-round1.md, t10a-round2.md). Implemented video pipeline in `internal/bookvideo` (`types.go`, `command.go`, `video.go`, `bookvideo_test.go`): title card (blurred page 1 with title + byline via `textfile=`), page segments (`-shortest`, scale/pad/setsar 1080x1350 4:5 portrait, libx264/aac), end card (flat `0x1b1614` with domain attribution), and concat demuxer (`-c copy +faststart` with MP4 metadata tags). Bounded concurrency via `errgroup.SetLimit`. Added static ffmpeg 7.1 pinned by immutable sha256 digest to `Dockerfile`. Coverage 89.1%. |
 | **T10b** | Not started. Book template under `internal/web/**`, `static/book/**`, and route lines in `newServer`. **Also owns T10c's contract row C4** — the HTTP book-state catch-up read (§T10, *What the player owes*). |
+| **T10g** | **Not started. Assigned 2026-09-05.** The film shows **no words** — every `drawtext` in `internal/bookvideo` is on the title or end card, and the illustrations deliberately carry none (`prompt.go:43`, correctly: image models garble lettering). So the story is spoken and never shown, which is a slideshow with a voiceover rather than a picture book, and it fails a muted phone, an early reader and every YouTube viewer. Adds a 270px caption band below the art at **1080×1620**, superseding §T10's 4:5 bullet. **T10a stays closed** — T10g's lines, under contract rows. See §T10g. |
 | **T10f** | **Not started. Assigned 2026-09-05.** MiniMax TTS is out across the whole family (2.8/2.6/02/01, hd and turbo — every one 503s) and non-MiniMax narration is ruled out, so a book with no voice has no film: §T10a's timing model is `-shortest` against each page's own clip. **Every book now also gets a PDF, always**, beside the film; when narration 503s the run still **succeeds** with the PDF and emits `narration_unavailable`. Owns its own lines in `bookgen` and `mediastore` under contract rows — **T10c/T10d/T10e stay closed**. Carries the repo's third dependency (`github.com/go-pdf/fpdf`, pure Go, MIT) with its reason written down per §T0. See §T10f. |
 | **T10e** | **DONE** 2026-09-05. Closed at round 1: **APPROVE 0/0/0/0, zero residue** (t10e-live-record.md, t10e-round1.md). Full generation pipeline verified live end-to-end: Phase-A interview transcript structured by M3 (22.4s); 3 reference sheets + 8 pages illustrated via seedream-5.0-lite with M3 consistency judge; live judge caught character drift on pages 4 and 8, triggering T7 regeneration loop, and approved on re-render; upstream TTS 503 capacity outage documented; video rendered via ffmpeg 7.1 in 5.1s (title card + 8 segments + end card); MP4 persisted in mediastore; HTTP serving verified (200 OK immutable + 206 Partial Content Range); ffprobe confirmed 1080x1350 h264/aac; SSE sequence verified: 8 page_approved, 1 book_ready, 0 failed. Probe in `internal/bookgen/live_test.go`. |
 | **T10d** | **DONE** 2026-09-05. Closed at round 1: **APPROVE 0/0/0/0, zero residue** (t10d-round1.md). Resolves T10c's contract row C2: added `"video/mp4": true` to closed `mediastore.supportedTypes`, updated package doc and set doc comment, replaced `"video/mp4"` in unsupported test cases with `"video/webm"`, and pinned persistence, serving, and Range requests (206 Partial Content, sub-slice and suffix) via `TestPersistAndServeVideoMP4_RangeRequest`. Coverage: mediastore 95.6%. |
@@ -2120,6 +2122,92 @@ structure → illustrate+judge+persist → narrate → PDF → film
 * **A "try again with voices" button** re-POSTs `/interviews/{id}/generate`,
   which is the same retry the failure path already uses and spends a §T11 gate
   token. When TTS returns, the same book regenerates with narration.
+
+---
+
+## T10g — The words on the page
+
+**Owns:** **its own** caption lines in `internal/bookvideo` and the line-wrap
+helper they need.
+
+**T10a is closed and stays closed.** These lines are T10g's, declared as
+contract rows naming file, line, change and reason — the mechanism T7 used into
+T6's files and T10d used into `internal/mediastore`.
+
+**Depends on:** T5 (the page text already persisted), T10a (the renderer it
+adds to). **Done when:** every page of the film shows its own words, legibly,
+on a phone.
+
+**Assigned 2026-09-05.** Today the film has **no words at all**. Every
+`drawtext` in `internal/bookvideo` is on the title or end card
+(`video.go:95, 96, 98, 201, 202`); the pages carry none, and the illustrations
+deliberately contain none — `referenceDirective` ends *"no text and no speech
+bubbles"* (`internal/illustrate/prompt.go:43`), which is right, because image
+models garble lettering. So the story's words are **spoken and never shown**.
+
+**That is a slideshow with a voiceover, not a picture book.** The form is words
+and pictures on the page together. Concretely it costs us:
+
+* a muted phone, a noisy room, or a deaf or hard-of-hearing viewer gets **no
+  story at all**;
+* an early reader cannot follow along, which is much of why a picture book has
+  words on the page;
+* on YouTube — the sharing path §T10 was reshaped around — the film is
+  wordless.
+
+It does not bite while TTS is out, because there is no film and §T10f's PDF is
+the whole artifact. **It bites the moment TTS returns.**
+
+### Geometry: 1080×1620, image above, words below
+
+The band goes **beside** the art, not over it — a picture book does not print
+its text on top of the illustration.
+
+```
+1080 × 1620   (2:3, portrait)
+┌──────────────┐
+│ 1080 × 1350  │  the page illustration, full width, unchanged
+├──────────────┤
+│  270 px band │  the page's words, --film ground, --bg text
+└──────────────┘
+```
+
+**This supersedes §T10's "1080×1350 (4:5) … do not letterbox" bullet.** That
+line was right when narration carried the words. Full width is kept, so the
+illustration is not pillarboxed, and 2:3 is still vertical — still the right
+shape for a phone, for X, and for a Shorts ingest.
+
+**Every segment shares the geometry**, title and end cards included: `concat
+-c copy` is only free while all segments agree on geometry, SAR, pixel format,
+frame rate and audio layout (§T10). One constant, three call sites
+(`video.go:91, 143, 209`).
+
+**T10e verified the pipeline live at 4:5.** Changing the master geometry means
+that verification no longer covers the shipped shape — **re-run it** rather
+than assuming the change is free.
+
+### The text itself
+
+* **`textfile=`, never `text=`.** The page text is model output and a child's
+  own words; apostrophes, colons and backslashes are all filtergraph syntax.
+  This is already the pinned rule (§T10, t10-video-record.md).
+* **`drawtext` does not wrap.** Wrap in Go before writing the file — measure by
+  rune count against the band width, break on spaces, never mid-word. A
+  sentence that overflows three lines is **shrunk one step, then truncated with
+  an ellipsis**; the words also live in the PDF (§T10f), which has room.
+* **Fredoka**, the same TTF §T10f embeds and §T9 vendors as `woff2`.
+* **Colours from §The look**: band `--film` `#12241e`, text `--bg` `#eef8f2` —
+  14.92:1. Note `internal/bookvideo` currently hardcodes `0x1b1614`, which
+  predates §The look; T10g's lines use the token value and the cards come with
+  them.
+
+### What does not change
+
+* **The timing model.** `-shortest` against each page's own narration still
+  governs; a caption adds no duration and needs no measurement.
+* **`concat -c copy` stays free**, because every segment still matches.
+* **The PDF is unaffected** — §T10f already puts the words under the
+  illustration, and remains the artifact that works with no voices at all.
 
 ---
 
