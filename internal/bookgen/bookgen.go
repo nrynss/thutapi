@@ -1,9 +1,10 @@
 // Package bookgen runs the generation pipeline that turns a closed
-// interview into a finished book (PLAN.md §T10c): story.Structure over
-// the transcript, illustrate.Illustrate with T7's judge-and-persist
-// loop, audio.NarrateBook, the bookvideo render, and the store write
-// that makes the book ready. Until this package existed every stage was
-// built and APPROVE'd and nothing called them (PLAN.md §Unowned seams,
+// interview into a finished book (PLAN.md §T10c/§T10f): story.Structure
+// over the transcript, illustrate.Illustrate with T7's judge-and-persist
+// loop, audio.NarrateBook, the printable PDF render (PLAN.md §T10f),
+// the bookvideo render, and the store write that makes the book ready.
+// Until this package existed every stage was built and APPROVE'd and
+// nothing called them (PLAN.md §Unowned seams,
 // "Phase B orchestration").
 //
 // # Trigger and product surface
@@ -28,22 +29,25 @@
 // is the book's topic, not the interview's (which carries turns and
 // ends at "ended") and not the job's:
 //
-//	event: page_approved  → {"n":3,"image_url":"/media/<id>"}
-//	event: book_ready     → {"video_url":"/media/<id>"}
-//	event: failed         → {}
+//	event: page_approved         → {"n":3,"image_url":"/media/<id>"}
+//	event: narration_unavailable → {}
+//	event: book_ready            → {"pdf_url":"/media/<id>","video_url":"/media/<id>"}
+//	event: failed                → {}
 //
 // page_approved fires the moment a page's illustration is approved and
 // persisted (the count screen 5's race reads into --done — PLAN.md
-// §T9a); book_ready fires after the film is rendered, persisted and
-// attached to the book; failed fires on ANY error, including a panic,
+// §T9a); book_ready fires once the run's finished artifacts are in
+// place: the PDF always, and the film whenever narration clips exist (a
+// transient narration outage leaves video_url out of the payload —
+// see the stage list); failed fires on ANY error, including a panic,
 // and means the whole run (T6/T7 return a zero Book on error — there
 // is no partial book to serve). The stream is from-now-on: a late
 // subscriber catches up from the store (approved pages are
-// MediaIllustration rows; the film is the book's video/mp4 media row),
-// the way GET /interviews/{id} catches up on turns. The HTTP read that
-// serves that state on the book's own route is T10b's surface —
-// recorded as contract row C4 of the T10c round-1 record, not invented
-// here.
+// MediaIllustration rows; the finished film and PDF are the book's
+// video/mp4 and application/pdf media rows), the way GET
+// /interviews/{id} catches up on turns. The HTTP read that serves that
+// state on the book's own route is T10b's surface — recorded as
+// contract row C4 of the T10c round-1 record, not invented here.
 //
 // # The stages, in order (all inside the job)
 //
@@ -62,11 +66,23 @@
 //     after the verdict approves them. Page approvals reach the broker
 //     as page_approved events (see the bridge below).
 //  3. audio.NarrateBook — one persisted clip per page, in page order.
-//  4. The film: bookvideo renders title card + page segments + end
+//     A transient narration failure (gmi.ErrTransient, e.g. a 503
+//     capacity outage) is an outage, not an error: narration and the
+//     film are skipped, narration_unavailable {} is published once,
+//     and the run continues to the PDF stage and succeeds PDF-only.
+//     Any other narration failure is total — the run ends before the
+//     PDF stage.
+//  4. The printable PDF (PLAN.md §T10f): bookpdf renders the cover and
+//     pages from the persisted illustrations and text; the PDF is
+//     persisted, attached to the book, and supersedes any earlier PDF
+//     on regeneration. The PDF stage always runs once reached: its
+//     inputs (illustrations, text) never depend on narration, so the
+//     outage path reaches it too.
+//  5. The film: bookvideo renders title card + page segments + end
 //     card + concat from the persisted illustrations and narration;
 //     the MP4 is persisted and attached to the book (the row that
-//     makes GET /book/{id} serve cold, and the URL book_ready names).
-//  5. book_ready is published only after the film row is placed.
+//     makes GET /book/{id} serve cold, and the video_url book_ready
+//     names). Rendered only when narration clips exist.
 //
 // A failure anywhere is total: the run returns an error, failed {}
 // fires, the job lands its terminal error state, and nothing retries
@@ -92,11 +108,10 @@
 // packages declare (story.Chatter, illustrate.Imager/Judge,
 // audio.TTS) plus the two seams this package declares for the film — a
 // videoRenderer over bookvideo.Render and a filmStore over the blob
-// store — so the whole ordering is pinned with fakes. The one seam
-// with a recorded production gap is the film's content type: see
-// dev-diary/adversarial-review/t10c-round1.md contract row C2
-// (mediastore's closed content-type set must gain video/mp4 before a
-// production run can land its film).
+// store — so the whole ordering is pinned with fakes. The film's content
+// type was once a recorded production gap (t10c-round1.md contract row
+// C2); T10d closed it — video/mp4 is in mediastore's closed set on main —
+// so a production run can land its film.
 package bookgen
 
 import (
@@ -110,6 +125,7 @@ import (
 	"sync"
 
 	"thutapi/internal/audio"
+	"thutapi/internal/bookpdf"
 	"thutapi/internal/bookvideo"
 	"thutapi/internal/illustrate"
 	"thutapi/internal/interview"
@@ -133,11 +149,17 @@ const BookTopicPrefix = "book:"
 func Topic(bookID string) string { return BookTopicPrefix + bookID }
 
 // filmContentType is the MIME type the finished film is persisted as.
-// mediastore's closed content-type set does not yet carry it (contract
-// row C2 of the T10c round-1 record); until it does, a production run
-// fails at the film persist step and failed {} fires — loudly, never a
-// book_ready naming a URL that cannot be stored.
+// mediastore's closed content-type set carries it (T10d closed the
+// t10c-round1.md C2 gap), so a production run persists the film and
+// book_ready names its URL; a persist failure still fails the run loudly,
+// never a book_ready naming a URL that cannot be stored.
 const filmContentType = "video/mp4"
+
+// pdfContentType is the MIME type the finished printable PDF is persisted as.
+const pdfContentType = "application/pdf"
+
+// narrationUnavailableData is the narration_unavailable event's payload: {}
+const narrationUnavailableData = "{}"
 
 // Wire event payloads. These are the exact SSE data lines screen 5
 // (and the T9a race's --done counter) consume; the JSON tags are the
@@ -148,7 +170,8 @@ type pageApprovedEvent struct {
 }
 
 type bookReadyEvent struct {
-	VideoURL string `json:"video_url"`
+	PDFURL   string `json:"pdf_url"`
+	VideoURL string `json:"video_url,omitempty"`
 }
 
 // failedData is the failed event's payload: {} — no code, no prose
@@ -218,8 +241,14 @@ type jobRunner interface {
 // events on the book's topic and serve it as a stream. Satisfied by
 // *stream.Broker.
 type broadcaster interface {
-	Publish(topic string, event stream.Event)
+	Publish(topic string, ev stream.Event)
 	ServeTopic(w http.ResponseWriter, r *http.Request, topic string)
+}
+
+// pdfRenderer is bookgen's view of the printable PDF renderer: story and
+// illustrations in, PDF bytes out. Satisfied by *bookpdf.Renderer.
+type pdfRenderer interface {
+	Render(ctx context.Context, in bookpdf.Input) ([]byte, error)
 }
 
 // videoRenderer is bookgen's view of the film renderer (PLAN.md
@@ -230,11 +259,8 @@ type videoRenderer interface {
 	Render(ctx context.Context, in bookvideo.Input) error
 }
 
-// filmStore is bookgen's view of the blob store for the finished film.
-// Satisfied by *mediastore.Store, whose Persist currently rejects
-// filmContentType — the recorded contract row C2. The seam exists so
-// the pipeline's film step is testable today and production-correct
-// the moment the closed set gains the type.
+// filmStore is bookgen's view of the media store for finished
+// films: write one MP4 blob, remove older ones on retry.
 type filmStore interface {
 	Persist(ctx context.Context, src io.Reader, contentType string) (string, error)
 	Delete(ctx context.Context, id string) error
@@ -278,6 +304,9 @@ type Config struct {
 	Broker broadcaster
 	// Jobs runs the pipeline off the request path.
 	Jobs jobRunner
+	// PDF renders the printable PDF book. Production wires a
+	// *bookpdf.Renderer; tests substitute a fake.
+	PDF pdfRenderer
 	// Video renders the finished film. Production wires an
 	// *FFmpegRenderer; tests substitute a fake, so no test needs
 	// ffmpeg.
@@ -316,7 +345,7 @@ func New(cfg Config) (*Handler, error) {
 	if cfg.DB == nil || cfg.Blobs == nil || cfg.MediaDir == "" ||
 		cfg.Chat == nil || cfg.Judge == nil || cfg.Imager == nil ||
 		cfg.TTS == nil || cfg.Broker == nil || cfg.Jobs == nil ||
-		cfg.Video == nil || cfg.Film == nil {
+		cfg.PDF == nil || cfg.Video == nil || cfg.Film == nil {
 		return nil, ErrNotConfigured
 	}
 	if cfg.Log == nil {
@@ -440,11 +469,17 @@ func (h *Handler) generateJob(bookID, ivID string) job.Func {
 				publish("failed", failedData)
 			}
 		}()
-		videoID, err := h.runBook(ctx, bookID, ivID)
+		pdfID, videoID, err := h.runBook(ctx, bookID, ivID)
 		if err != nil {
 			return nil, err
 		}
-		b, merr := json.Marshal(bookReadyEvent{VideoURL: "/media/" + videoID})
+		ready := bookReadyEvent{
+			PDFURL: "/media/" + pdfID,
+		}
+		if videoID != "" {
+			ready.VideoURL = "/media/" + videoID
+		}
+		b, merr := json.Marshal(ready)
 		if merr != nil {
 			// A fixed struct of strings cannot fail to marshal; keep
 			// the compiler honest without a silent empty payload.

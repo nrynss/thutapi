@@ -1,6 +1,6 @@
 // Package mediastore persists generated media — the images and audio
-// GMI returns, and the MP4 book film — under the data dir and serves
-// it back over HTTP.
+// GMI returns, the MP4 book film, and the printable PDF book — under
+// the data dir and serves it back over HTTP.
 //
 // GMI's response URLs point at storage.googleapis.com and are assumed
 // to expire (PLAN.md invariant 7), so the bytes are handed over the
@@ -66,15 +66,17 @@ var ErrInvalid = errors.New("mediastore: invalid config")
 
 // supportedTypes is the closed content-type set (see
 // ErrInvalidContentType): the image types the request-queue image
-// models return, Speech 2.8's mp3, wav as the TTS fallback, and
-// video/mp4 for the book film from internal/bookvideo/bookgen.
+// models return, Speech 2.8's mp3, wav as the TTS fallback,
+// video/mp4 for the book film from internal/bookvideo/bookgen, and
+// application/pdf for the printable book PDF from internal/bookpdf/bookgen.
 var supportedTypes = map[string]bool{
-	"image/png":  true,
-	"image/jpeg": true,
-	"image/webp": true,
-	"audio/mpeg": true,
-	"audio/wav":  true,
-	"video/mp4":  true,
+	"image/png":       true,
+	"image/jpeg":      true,
+	"image/webp":      true,
+	"audio/mpeg":      true,
+	"audio/wav":       true,
+	"video/mp4":       true,
+	"application/pdf": true,
 }
 
 // Config configures Open.

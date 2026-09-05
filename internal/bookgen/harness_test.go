@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"thutapi/internal/bookpdf"
 	"thutapi/internal/bookvideo"
 	"thutapi/internal/gmi/media"
 	"thutapi/internal/gmi/text"
@@ -328,6 +329,37 @@ func newClipServer() *clipServer {
 	return s
 }
 
+// fakePDFRenderer is the pdfRenderer seam: it records the Input (title,
+// byline and pages) and returns deterministic PDF bytes.
+type fakePDFRenderer struct {
+	order *orderRecorder
+	err   error
+	mu    sync.Mutex
+	ins   []bookpdf.Input
+}
+
+func (f *fakePDFRenderer) Render(ctx context.Context, in bookpdf.Input) ([]byte, error) {
+	f.mu.Lock()
+	f.ins = append(f.ins, in)
+	err := f.err
+	f.mu.Unlock()
+	if f.order != nil {
+		f.order.mark("pdf")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return []byte("%PDF-1.4 " + in.Title + ":" + in.Byline), nil
+}
+
+func (f *fakePDFRenderer) inputs() []bookpdf.Input {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]bookpdf.Input, len(f.ins))
+	copy(out, f.ins)
+	return out
+}
+
 // fakeRenderer is the videoRenderer seam: it records the Input (title,
 // byline and the page image/audio bytes the film was built from) and
 // writes the film bytes to in.OutputPath, so the persist leg reads a
@@ -444,6 +476,7 @@ type pipelineHarness struct {
 	judge    *scriptedJudge
 	imager   *fakeImager
 	tts      *fakeTTS
+	pdf      *fakePDFRenderer
 	render   *fakeRenderer
 	film     *fakeFilmStore
 	order    *orderRecorder
@@ -472,6 +505,7 @@ func newPipelineHarness(t *testing.T) *pipelineHarness {
 	judge := &scriptedJudge{}
 	imager := &fakeImager{order: order}
 	tts := &fakeTTS{order: order, audioBase: clips.URL}
+	pdf := &fakePDFRenderer{order: order}
 	render := &fakeRenderer{order: order}
 	film := newFakeFilmStore(t, db, mediaDir)
 	film.order = order
@@ -487,6 +521,7 @@ func newPipelineHarness(t *testing.T) *pipelineHarness {
 		TTS:      tts,
 		Broker:   broker,
 		Jobs:     runner,
+		PDF:      pdf,
 		Video:    render,
 		Film:     film,
 		Log:      log,
@@ -496,7 +531,7 @@ func newPipelineHarness(t *testing.T) *pipelineHarness {
 	}
 	return &pipelineHarness{
 		t: t, db: db, blobs: blobs, mediaDir: mediaDir, broker: broker, runner: runner,
-		h: h, chat: chat, judge: judge, imager: imager, tts: tts, render: render,
+		h: h, chat: chat, judge: judge, imager: imager, tts: tts, pdf: pdf, render: render,
 		film: film, order: order, clips: clips,
 	}
 }

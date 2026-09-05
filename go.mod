@@ -3,6 +3,7 @@ module thutapi
 go 1.27.1
 
 require (
+	github.com/go-pdf/fpdf v0.9.0
 	golang.org/x/sync v0.22.0
 	modernc.org/sqlite v1.58.0
 )

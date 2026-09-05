@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"thutapi/internal/gmi"
 	"thutapi/internal/interview"
 	"thutapi/internal/job"
 	"thutapi/internal/store"
@@ -58,6 +59,7 @@ func TestPipeline_EndToEnd(t *testing.T) {
 	}
 	ready := ph.waitEvent(sub, "book_ready")
 	videoURL, _ := ready["video_url"].(string)
+	pdfURL, _ := ready["pdf_url"].(string)
 	if len(approved) != story.PageCount {
 		t.Fatalf("page_approved events = %d, want %d", len(approved), story.PageCount)
 	}
@@ -73,6 +75,9 @@ func TestPipeline_EndToEnd(t *testing.T) {
 	}
 	if len(videoURL) < len("/media/x") || videoURL[:len("/media/")] != "/media/" {
 		t.Fatalf("book_ready video_url = %q, want /media/<id>", videoURL)
+	}
+	if len(pdfURL) < len("/media/x") || pdfURL[:len("/media/")] != "/media/" {
+		t.Fatalf("book_ready pdf_url = %q, want /media/<id>", pdfURL)
 	}
 
 	// The job landed its terminal state in the runner's registry.
@@ -129,16 +134,19 @@ func TestPipeline_EndToEnd(t *testing.T) {
 		}
 	}
 
-	// The film: exactly one book-attached video/mp4 row, whose bytes
-	// are the renderer's and serve over the real /media route.
+	// The artifacts: exactly one book-attached video/mp4 row and one application/pdf row,
+	// whose bytes serve over the real /media route.
 	all, err := ph.db.BookMedia(t.Context(), bookID)
 	if err != nil {
 		t.Fatalf("book media: %v", err)
 	}
-	var filmRows []store.Media
+	var filmRows, pdfRows []store.Media
 	for _, m := range all {
-		if m.ContentType == "video/mp4" {
+		switch m.ContentType {
+		case "video/mp4":
 			filmRows = append(filmRows, m)
+		case "application/pdf":
+			pdfRows = append(pdfRows, m)
 		}
 	}
 	if len(filmRows) != 1 {
@@ -147,10 +155,42 @@ func TestPipeline_EndToEnd(t *testing.T) {
 	if filmRows[0].ID != videoURL[len("/media/"):] {
 		t.Fatalf("book_ready video id %q != the attached film row %q", videoURL, filmRows[0].ID)
 	}
-	got := getMedia(t, srv, filmRows[0].ID)
-	want := []byte("film:" + st.Title + ":Mira")
-	if string(got) != string(want) {
-		t.Fatalf("served film bytes = %q, want %q", got, want)
+	gotFilm := getMedia(t, srv, filmRows[0].ID)
+	wantFilm := []byte("film:" + st.Title + ":Mira")
+	if string(gotFilm) != string(wantFilm) {
+		t.Fatalf("served film bytes = %q, want %q", gotFilm, wantFilm)
+	}
+
+	if len(pdfRows) != 1 {
+		t.Fatalf("pdf rows = %d, want exactly 1", len(pdfRows))
+	}
+	if pdfRows[0].ID != pdfURL[len("/media/"):] {
+		t.Fatalf("book_ready pdf id %q != the attached pdf row %q", pdfURL, pdfRows[0].ID)
+	}
+	gotPDF := getMedia(t, srv, pdfRows[0].ID)
+	wantPDF := []byte("%PDF-1.4 " + st.Title + ":Mira")
+	if string(gotPDF) != string(wantPDF) {
+		t.Fatalf("served pdf bytes = %q, want %q", gotPDF, wantPDF)
+	}
+
+	// The PDF stage read the real page blobs:
+	pdfIns := ph.pdf.inputs()
+	if len(pdfIns) != 1 {
+		t.Fatalf("pdf render calls = %d, want 1", len(pdfIns))
+	}
+	if pdfIns[0].Title != st.Title || pdfIns[0].Byline != "Mira" {
+		t.Fatalf("pdf input title/byline = %q/%q, want the authored title and byline", pdfIns[0].Title, pdfIns[0].Byline)
+	}
+	if len(pdfIns[0].Pages) != story.PageCount {
+		t.Fatalf("pdf input pages = %d, want %d", len(pdfIns[0].Pages), story.PageCount)
+	}
+	for i, p := range pdfIns[0].Pages {
+		if p.N != i+1 {
+			t.Fatalf("pdf input page %d has n=%d, want page order 1..%d", i, p.N, story.PageCount)
+		}
+		if len(p.ImageBytes) == 0 {
+			t.Fatalf("pdf input page %d lacks image bytes", p.N)
+		}
 	}
 
 	// The film stage read the real page blobs: the renderer's input
@@ -219,7 +259,7 @@ func TestPipeline_StageOrder(t *testing.T) {
 	}
 
 	order := ph.order.snapshot()
-	stages := []string{"imager:gen", "imager:edit", "tts", "render", "film"}
+	stages := []string{"imager:gen", "imager:edit", "tts", "pdf", "render"}
 	prev := -1
 	for _, s := range stages {
 		at := firstIndex(order, s)
@@ -230,6 +270,9 @@ func TestPipeline_StageOrder(t *testing.T) {
 			t.Fatalf("stage %q at %d is not after the previous stage at %d (order: %v)", s, at, prev, order)
 		}
 		prev = at
+	}
+	if lastIndexOf(order, "film") <= firstIndex(order, "render") {
+		t.Fatalf("film persist did not happen after video render (order: %v)", order)
 	}
 
 	gen, edit := ph.imager.kinds()
@@ -433,6 +476,7 @@ func TestPipeline_RenderFailureAndFilmFailureAreTotal(t *testing.T) {
 		name string
 		fail func(*pipelineHarness)
 	}{
+		{"pdf render", func(ph *pipelineHarness) { ph.pdf.err = errors.New("fixture: pdf render failed") }},
 		{"render", func(ph *pipelineHarness) { ph.render.err = errors.New("fixture: ffmpeg failed") }},
 		{"film persist", func(ph *pipelineHarness) { ph.film.err = errors.New("fixture: blob store down") }},
 	} {
@@ -466,6 +510,124 @@ func TestPipeline_RenderFailureAndFilmFailureAreTotal(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestPipeline_NarrationTransientOutageProducesPDF pins T10f's outage path:
+// when MiniMax TTS fails with gmi.ErrTransient (e.g. 503 capacity outage),
+// narration is skipped, narration_unavailable {} is published, film rendering
+// is skipped, the PDF is still rendered and attached, and book_ready is emitted
+// with pdf_url (and empty video_url). The run completes with StatusDone (not failed).
+func TestPipeline_NarrationTransientOutageProducesPDF(t *testing.T) {
+	ph := newPipelineHarness(t)
+	ivID, bookID := ph.makeEndedInterview("Leo")
+	st := fullStory()
+	sub := ph.subscribe(bookID)
+	srv := httptest.NewServer(ph.mux())
+	defer srv.Close()
+
+	// Inject gmi.ErrTransient into TTS to simulate upstream 503 capacity exhaustion:
+	ph.tts.err = gmi.ErrTransient
+
+	code, res, _ := ph.postGenerate(srv, ivID)
+	if code != http.StatusAccepted {
+		t.Fatalf("POST generate status = %d, want 202", code)
+	}
+
+	// Eight page_approved events still arrive:
+	for range st.Pages {
+		ph.waitEvent(sub, "page_approved")
+	}
+
+	// narration_unavailable arrives with empty {}:
+	nu := ph.waitEvent(sub, "narration_unavailable")
+	if len(nu) != 0 {
+		t.Fatalf("narration_unavailable event data = %+v, want empty {}", nu)
+	}
+
+	// book_ready arrives with pdf_url and empty/absent video_url:
+	ready := ph.waitEvent(sub, "book_ready")
+	pdfURL, ok := ready["pdf_url"].(string)
+	if !ok || len(pdfURL) < len("/media/x") || pdfURL[:len("/media/")] != "/media/" {
+		t.Fatalf("book_ready pdf_url = %q, want /media/<id>", pdfURL)
+	}
+	if v, exists := ready["video_url"]; exists && v != "" {
+		t.Fatalf("book_ready video_url = %v, want empty/absent during narration outage", v)
+	}
+
+	// Job finishes successfully!
+	runRes := ph.waitJob(res.JobID)
+	if runRes.Status != job.StatusDone || runRes.Err != nil {
+		t.Fatalf("job result = %+v, want done with no error", runRes)
+	}
+
+	// Film renderer was never called:
+	if len(ph.render.inputs()) != 0 {
+		t.Fatalf("film renderer was called %d times, want 0 on narration outage", len(ph.render.inputs()))
+	}
+
+	// PDF renderer WAS called with the story:
+	pdfIns := ph.pdf.inputs()
+	if len(pdfIns) != 1 {
+		t.Fatalf("pdf renderer calls = %d, want 1", len(pdfIns))
+	}
+	if pdfIns[0].Title != st.Title || pdfIns[0].Byline != "Leo" {
+		t.Fatalf("pdf input title/byline = %q/%q, want %q/Leo", pdfIns[0].Title, pdfIns[0].Byline, st.Title)
+	}
+
+	// Exactly one application/pdf row attached to book, and NO video/mp4 row:
+	all, err := ph.db.BookMedia(t.Context(), bookID)
+	if err != nil {
+		t.Fatalf("book media: %v", err)
+	}
+	var pdfRows, filmRows []store.Media
+	for _, m := range all {
+		switch m.ContentType {
+		case "application/pdf":
+			pdfRows = append(pdfRows, m)
+		case "video/mp4":
+			filmRows = append(filmRows, m)
+		}
+	}
+	if len(pdfRows) != 1 {
+		t.Fatalf("pdf rows = %d, want exactly 1", len(pdfRows))
+	}
+	if len(filmRows) != 0 {
+		t.Fatalf("film rows = %d, want 0 when narration is unavailable", len(filmRows))
+	}
+	if pdfRows[0].ID != pdfURL[len("/media/"):] {
+		t.Fatalf("book_ready pdf id %q != attached pdf row %q", pdfURL, pdfRows[0].ID)
+	}
+
+	// Served PDF matches:
+	got := getMedia(t, srv, pdfRows[0].ID)
+	want := []byte("%PDF-1.4 " + st.Title + ":Leo")
+	if string(got) != string(want) {
+		t.Fatalf("served pdf bytes = %q, want %q", got, want)
+	}
+}
+
+// TestPipeline_NarrationNonTransientFailureFailsRun pins that a fatal non-transient
+// narration error still causes the run to fail and publish failed {}.
+func TestPipeline_NarrationNonTransientFailureFailsRun(t *testing.T) {
+	ph := newPipelineHarness(t)
+	ivID, bookID := ph.makeEndedInterview("")
+	ph.tts.err = errors.New("fatal non-transient error")
+	srv := httptest.NewServer(ph.mux())
+	defer srv.Close()
+	sub := ph.subscribe(bookID)
+
+	code, res, _ := ph.postGenerate(srv, ivID)
+	if code != http.StatusAccepted {
+		t.Fatalf("POST generate status = %d, want 202", code)
+	}
+	for range fullStory().Pages {
+		ph.waitEvent(sub, "page_approved")
+	}
+	ph.waitEvent(sub, "failed")
+	runRes := ph.waitJob(res.JobID)
+	if runRes.Status != job.StatusError {
+		t.Fatalf("job = %+v, want terminal error", runRes)
 	}
 }
 
@@ -552,6 +714,25 @@ func TestDoubleFireRefused(t *testing.T) {
 	}
 	if ready1["video_url"] == secondVideo {
 		t.Fatalf("both runs produced the same film URL %q", secondVideo)
+	}
+	// The second PDF superseded the first: exactly one book-attached
+	// application/pdf row, the second run's, and the two runs produced
+	// different pdf ids.
+	var pdfs []store.Media
+	for _, m := range all {
+		if m.ContentType == "application/pdf" {
+			pdfs = append(pdfs, m)
+		}
+	}
+	if len(pdfs) != 1 {
+		t.Fatalf("pdf rows after two runs = %d, want 1 (the old PDF is superseded)", len(pdfs))
+	}
+	secondPDF := ready2["pdf_url"].(string)
+	if pdfs[0].ID != secondPDF[len("/media/"):] {
+		t.Fatalf("surviving pdf %q is not the second run's %q", pdfs[0].ID, secondPDF)
+	}
+	if ready1["pdf_url"] == secondPDF {
+		t.Fatalf("both runs produced the same PDF URL %q", secondPDF)
 	}
 }
 

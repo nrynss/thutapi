@@ -23,6 +23,7 @@ func TestNewRefusesMissingConfig(t *testing.T) {
 		TTS:      ph.tts,
 		Broker:   ph.broker,
 		Jobs:     ph.runner,
+		PDF:      ph.pdf,
 		Video:    ph.render,
 		Film:     ph.film,
 	}
@@ -39,6 +40,7 @@ func TestNewRefusesMissingConfig(t *testing.T) {
 		{"TTS", func(c *Config) { c.TTS = nil }},
 		{"Broker", func(c *Config) { c.Broker = nil }},
 		{"Jobs", func(c *Config) { c.Jobs = nil }},
+		{"PDF", func(c *Config) { c.PDF = nil }},
 		{"Video", func(c *Config) { c.Video = nil }},
 		{"Film", func(c *Config) { c.Film = nil }},
 	}
@@ -86,9 +88,9 @@ func TestClassify(t *testing.T) {
 	}
 }
 
-// TestWirePayloadRawJSON pins the exact SSE data lines PLAN.md §T10c
-// names: the field spellings (n, image_url, video_url) and the bare {}
-// failure payload. A rename on the wire shape must fail here, loudly.
+// TestWirePayloadRawJSON pins the exact SSE data lines PLAN.md §T10c/§T10f
+// name: the field spellings (n, image_url, pdf_url, video_url) and the bare {}
+// failure and narration_unavailable payloads. A rename on the wire shape must fail here, loudly.
 func TestWirePayloadRawJSON(t *testing.T) {
 	b, err := json.Marshal(pageApprovedEvent{N: 3, ImageURL: "/media/abc"})
 	if err != nil {
@@ -98,16 +100,32 @@ func TestWirePayloadRawJSON(t *testing.T) {
 	if string(b) != want {
 		t.Fatalf("page_approved wire = %s, want %s", b, want)
 	}
-	b, err = json.Marshal(bookReadyEvent{VideoURL: "/media/abc"})
+
+	// Full book_ready with both PDF and Video:
+	b, err = json.Marshal(bookReadyEvent{PDFURL: "/media/pdf1", VideoURL: "/media/vid1"})
 	if err != nil {
 		t.Fatalf("marshal book_ready: %v", err)
 	}
-	want = `{"video_url":"/media/abc"}`
+	want = `{"pdf_url":"/media/pdf1","video_url":"/media/vid1"}`
 	if string(b) != want {
 		t.Fatalf("book_ready wire = %s, want %s", b, want)
 	}
+
+	// Outage book_ready with PDF only (video_url omitted):
+	b, err = json.Marshal(bookReadyEvent{PDFURL: "/media/pdf1"})
+	if err != nil {
+		t.Fatalf("marshal book_ready outage: %v", err)
+	}
+	want = `{"pdf_url":"/media/pdf1"}`
+	if string(b) != want {
+		t.Fatalf("book_ready outage wire = %s, want %s", b, want)
+	}
+
 	if failedData != "{}" {
 		t.Fatalf("failedData = %q, want {}", failedData)
+	}
+	if narrationUnavailableData != "{}" {
+		t.Fatalf("narrationUnavailableData = %q, want {}", narrationUnavailableData)
 	}
 }
 

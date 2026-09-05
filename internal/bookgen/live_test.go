@@ -38,6 +38,7 @@ import (
 	"time"
 
 	"thutapi/internal/audio"
+	"thutapi/internal/bookpdf"
 	"thutapi/internal/bookvideo"
 	"thutapi/internal/gmi"
 	"thutapi/internal/gmi/media"
@@ -662,6 +663,7 @@ func TestLiveBookGeneration(t *testing.T) {
 		TTS:      tTTS,
 		Broker:   broker,
 		Jobs:     runner,
+		PDF:      bookpdf.NewRenderer(),
 		Video:    tVideo,
 		Film:     tFilm,
 		Log:      slog.Default(),

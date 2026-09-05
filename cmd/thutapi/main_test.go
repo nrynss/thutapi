@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"thutapi/internal/bookgen"
+	"thutapi/internal/bookpdf"
 	"thutapi/internal/bookvideo"
 	"thutapi/internal/gmi/media"
 	"thutapi/internal/gmi/text"
@@ -74,6 +75,7 @@ func newTestServer(t *testing.T) *server {
 		TTS:      failTTS{},
 		Broker:   broker,
 		Jobs:     job.New(broker),
+		PDF:      bookpdf.NewRenderer(),
 		Video:    failRenderer{},
 		Film:     failFilmStore{},
 		Log:      log,

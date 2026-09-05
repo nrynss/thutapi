@@ -1,14 +1,18 @@
 package bookgen
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 
 	"thutapi/internal/audio"
+	"thutapi/internal/bookpdf"
 	"thutapi/internal/bookvideo"
+	"thutapi/internal/gmi"
 	"thutapi/internal/illustrate"
 	"thutapi/internal/store"
 	"thutapi/internal/story"
@@ -16,31 +20,31 @@ import (
 )
 
 // runBook executes one book's generation pipeline, in the PLAN.md
-// §T10c stage order: structure → rows → illustrate (judge + persist)
-// → narrate → film → ready. It is the body of the generate job and
-// returns the persisted film's media id on success — the value
-// book_ready's video_url is built from — and an error on ANY failure.
-// A failed run is total: there is no partial book to serve and nothing
-// here retries; the caller (generateJob) publishes failed {} and the
-// job runner lands the terminal error state.
-func (h *Handler) runBook(ctx context.Context, bookID, ivID string) (videoID string, err error) {
+// §T10c/§T10f stage order: structure → rows → illustrate (judge + persist)
+// → narrate → PDF → film → ready. It is the body of the generate job and
+// returns the persisted PDF and film media ids on success — the values
+// book_ready's pdf_url and video_url are built from — and an error on
+// any fatal failure. When narration fails with a transient error (e.g. 503 /
+// gmi.ErrTransient), narration is skipped, narration_unavailable is published,
+// film rendering is skipped, but the PDF is still rendered and the run succeeds.
+func (h *Handler) runBook(ctx context.Context, bookID, ivID string) (pdfID, videoID string, err error) {
 	// The run outlives the POST that started it, so everything is read
 	// fresh: the interview row carries the transcript to structure and
 	// the book row carries the byline question zero wrote.
 	iv, err := h.cfg.DB.Interview(ctx, ivID)
 	if err != nil {
-		return "", fmt.Errorf("bookgen: run %s: %w", bookID, err)
+		return "", "", fmt.Errorf("bookgen: run %s: %w", bookID, err)
 	}
 	book, err := h.cfg.DB.Book(ctx, bookID)
 	if err != nil {
-		return "", fmt.Errorf("bookgen: run %s: %w", bookID, err)
+		return "", "", fmt.Errorf("bookgen: run %s: %w", bookID, err)
 	}
 
 	// Stage 1 — structure, then the store rows the persist stages'
 	// place calls anchor on.
 	st, err := h.structure(ctx, book, iv)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	// Stage 2 — illustrate with T7's judge-and-persist loop. Pages are
@@ -54,32 +58,49 @@ func (h *Handler) runBook(ctx context.Context, bookID, ivID string) (videoID str
 		Persist:  writer,
 		Progress: bridge.progress,
 	}, st); err != nil {
-		return "", fmt.Errorf("bookgen: illustrate: %w", err)
+		return "", "", fmt.Errorf("bookgen: illustrate: %w", err)
 	}
 	if err := bridge.err(); err != nil {
 		// A page was approved and persisted but its row could not be
 		// read back for the event: an internal inconsistency, loud —
 		// the race must never silently lose a page.
-		return "", err
+		return "", "", err
 	}
 
 	// Stage 3 — narrate: one persisted clip per page, in page order.
+	// If narration fails with a transient error (e.g. 503 / gmi.ErrTransient),
+	// narration is skipped, narration_unavailable is published, and film
+	// is skipped; the PDF is still rendered and the run succeeds.
 	clips, err := audio.NarrateBook(ctx, audio.Config{
 		TTS:   h.cfg.TTS,
 		DB:    h.cfg.DB,
 		Blobs: h.cfg.Blobs,
 	}, bookID, st.Pages)
 	if err != nil {
-		return "", fmt.Errorf("bookgen: narrate: %w", err)
+		if errors.Is(err, gmi.ErrTransient) && ctx.Err() == nil {
+			h.log.Warn("bookgen: narration unavailable, skipping narration and film", "book", bookID, "err", err)
+			h.cfg.Broker.Publish(Topic(bookID), stream.Event{Name: "narration_unavailable", Data: narrationUnavailableData})
+			clips = nil
+		} else {
+			return "", "", fmt.Errorf("bookgen: narrate: %w", err)
+		}
 	}
 
-	// Stage 4 — the film: persisted pages + narration in, one MP4
-	// out, persisted, attached to the book, and ready to serve.
-	videoID, err = h.renderFilm(ctx, bookID, st, clips)
+	// Stage 4 — PDF: always rendered and attached to the book.
+	pdfID, err = h.renderPDF(ctx, bookID, st)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return videoID, nil
+
+	// Stage 5 — Film: rendered only when narration clips exist.
+	if clips != nil {
+		videoID, err = h.renderFilm(ctx, bookID, st, clips)
+		if err != nil {
+			return "", "", err
+		}
+	}
+
+	return pdfID, videoID, nil
 }
 
 // structure is stage 1: it structures the interview transcript, then
@@ -222,9 +243,10 @@ func (b *approvalBridge) progress(p illustrate.Progress) {
 // err returns the first bridge failure, if any.
 func (b *approvalBridge) err() error { return b.first }
 
-// renderFilm is stage 4: it reads the persisted illustrations and
-// narration clips, renders the film through the video renderer, and
-// persists the MP4 — blob first, then a store row attached to the book
+// renderFilm is stage 5 (PDF stage 4 always ran first): it reads the
+// persisted illustrations and narration clips, renders the film through
+// the video renderer, and persists the MP4 — blob first, then a store
+// row attached to the book
 // (kind empty: the store's kinds name a blob's role in its book and a
 // film has no page or cast anchor, so it is book media with no role —
 // BookMedia lists it, the §T11 retention sweep never touches it, and
@@ -323,6 +345,71 @@ func (h *Handler) supersedeFilms(ctx context.Context, bookID, keepID string) {
 		}
 		if err := h.cfg.Film.Delete(ctx, m.ID); err != nil {
 			h.log.Warn("bookgen: superseded film not removed", "book", bookID, "media", m.ID, "err", err)
+		}
+	}
+}
+
+// renderPDF is stage 4: it reads the persisted illustrations from disk,
+// renders the PDF through the PDF renderer, persists the blob, attaches
+// it to the book via SetMediaPlace, and supersedes any prior PDFs for this book.
+func (h *Handler) renderPDF(ctx context.Context, bookID string, st story.Story) (string, error) {
+	inputs := make([]bookpdf.PageInput, len(st.Pages))
+	for i, p := range st.Pages {
+		ill, err := h.cfg.DB.PageMedia(ctx, bookID, p.N, store.MediaIllustration)
+		if err != nil {
+			return "", fmt.Errorf("bookgen: render pdf: page %d illustration: %w", p.N, err)
+		}
+		img, err := os.ReadFile(filepath.Join(h.cfg.MediaDir, ill.ID))
+		if err != nil {
+			return "", fmt.Errorf("bookgen: render pdf: read page %d illustration blob: %w", p.N, err)
+		}
+		inputs[i] = bookpdf.PageInput{
+			N:          p.N,
+			Text:       p.Text,
+			ImageBytes: img,
+		}
+	}
+
+	book, err := h.cfg.DB.Book(ctx, bookID)
+	if err != nil {
+		return "", fmt.Errorf("bookgen: render pdf: %w", err)
+	}
+
+	pdfBytes, err := h.cfg.PDF.Render(ctx, bookpdf.Input{
+		Title:  book.Title,
+		Byline: book.Byline,
+		Pages:  inputs,
+	})
+	if err != nil {
+		return "", fmt.Errorf("bookgen: render pdf: %w", err)
+	}
+
+	pdfID, err := h.cfg.Film.Persist(ctx, bytes.NewReader(pdfBytes), pdfContentType)
+	if err != nil {
+		return "", fmt.Errorf("bookgen: persist pdf: %w", err)
+	}
+
+	if err := h.cfg.DB.SetMediaPlace(ctx, pdfID, store.MediaPlace{BookID: bookID}); err != nil {
+		return "", fmt.Errorf("bookgen: attach pdf: %w", err)
+	}
+
+	h.supersedePDFs(ctx, bookID, pdfID)
+	return pdfID, nil
+}
+
+// supersedePDFs removes a book's older PDFs once the new one is placed.
+func (h *Handler) supersedePDFs(ctx context.Context, bookID, keepID string) {
+	rows, err := h.cfg.DB.BookMedia(ctx, bookID)
+	if err != nil {
+		h.log.Warn("bookgen: read book media to supersede old pdfs", "book", bookID, "err", err)
+		return
+	}
+	for _, m := range rows {
+		if m.ID == keepID || m.ContentType != pdfContentType {
+			continue
+		}
+		if err := h.cfg.Film.Delete(ctx, m.ID); err != nil {
+			h.log.Warn("bookgen: superseded pdf not removed", "book", bookID, "media", m.ID, "err", err)
 		}
 	}
 }

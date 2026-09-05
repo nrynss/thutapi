@@ -24,6 +24,7 @@ import (
 
 	"thutapi/internal/audio"
 	"thutapi/internal/bookgen"
+	"thutapi/internal/bookpdf"
 	"thutapi/internal/bookvideo"
 	"thutapi/internal/gmi/media"
 	"thutapi/internal/gmi/text"
@@ -306,6 +307,7 @@ func run(log *slog.Logger, args []string, sigs <-chan os.Signal) error {
 		TTS:      mediaCli,
 		Broker:   broker,
 		Jobs:     runner,
+		PDF:      bookpdf.NewRenderer(),
 		Video:    bookgen.NewFFmpegRenderer(bookvideo.Config{}),
 		Film:     blobs,
 		Log:      log,

@@ -2147,6 +2147,12 @@ structure → illustrate+judge+persist → narrate → PDF → film
   words are now on the page, a captioned film is made either way — silent, or
   over §T12's bed. So the outage costs the voices, not the video, and
   `book_ready` carries both a `pdf_url` and a `video_url`.
+  ***(Activation: with §T10g's implementation. §T10g is spec-only as of
+  T10f's close — no captions code exists in bookvideo, which still requires
+  narration per page — so T10f lands with the bullet below: narration 503
+  skips the film and the run succeeds PDF-only with `video_url` empty. The
+  both-URLs contract becomes live when T10g's captioned/silent film lands,
+  under T10g's own contract rows into bookgen.)***
 * `book_ready` gains `pdf_url`; `video_url` is empty when there is no film.
   §T9 and §T10b both read "a film may be absent, a PDF never is".
 * `application/pdf` joins `mediastore.supportedTypes` as **T10f's line**,
