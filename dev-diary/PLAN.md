@@ -1385,6 +1385,98 @@ whose questions are supposed to be spoken to a child who may not read well.
 
 ---
 
+## The look — palette, type, motion
+
+*Written 2026-09-05 on the operator's ruling: **mint green**. Until now the
+plan said "warm palette" and named two typefaces, which is not a design system.
+T9a shipped placeholder tokens with the comment "T9 owns the real palette" —
+this section is that palette, and every value below was checked, not chosen by
+eye.*
+
+### Palette
+
+Every colour is a token. Nothing anywhere hardcodes a hex — T9a already proved
+this workable (its round 1 moved 36 SVG fills behind `var()`).
+
+| Token | Value | Role |
+| --- | --- | --- |
+| `--bg` | `#eef8f2` | Page ground. Pale mint |
+| `--surface` | `#d8efe3` | Cards, the race track, chip rests |
+| `--ink` | `#17332b` | All primary text. Deep green-black, not pure black |
+| `--muted` | `#4f6d64` | Secondary text, captions |
+| `--mint` | `#7fd4b0` | **Decorative fill only.** Tints, the lit markers |
+| `--accent` | `#187158` | Buttons, links, anything accent-coloured **carrying text** |
+| `--rule` | `#55907a` | Borders and the race's marker rules |
+| `--warm` | `#e8a54a` | The single warm note — highlights, the odd sun |
+| `--film` | `#12241e` | The video's ground (§T10 cards) |
+
+**Verified contrast** — a child-facing product does not get to guess:
+
+| Pair | Ratio | Gate |
+| --- | --- | --- |
+| `ink` on `bg` | **12.52:1** | body text, AA |
+| `ink` on `surface` | **11.25:1** | text on cards, AA |
+| `muted` on `bg` | **5.22:1** | secondary, AA |
+| white on `accent` | **5.93:1** | button labels, AA |
+| `accent` on `bg` | **5.46:1** | links and accent text, AA |
+| `rule` on `surface` | **3.07:1** | non-text UI, AA |
+| `ink` on `warm` | **6.42:1** | warm buttons take ink, never white |
+| `bg` on `film` | **14.92:1** | title card |
+| `mint` on `bg` | 1.62:1 | **decorative only — must never carry text** |
+
+**The two rules that follow from the table**, because this is exactly where it
+goes wrong: **`--mint` never carries text and never sits under white**, and
+**`--warm` takes `--ink`, never white.** Anything with a label on it uses
+`--accent`.
+
+**A defect this replaces.** `static/race/race.html:161` and `index.html:161`
+ship `background:var(--lit);color:#fff` — **2.94:1, failing AA**. It is on the
+demo button, which ships nowhere, but it is the pattern the next person copies.
+It came from the prototype, which is to say from me.
+
+**The film derives from the same tokens** (§T10): ground `--film`, title
+`--bg`, byline `--mint` (9.21:1 on `--film`). Before this section the cards
+used `#1b1614`/`#e0b48c` while the app used cream and terracotta — **the film
+and the app already disagreed.** One palette, both surfaces.
+
+### Re-theming T9a
+
+T9a is closed, and this is the swap it was built for: **the six UI tokens
+only** — `--cream` → `--bg`, `--track` → `--surface`, `--ink`, `--line` →
+`--rule`, `--lit` → `--mint` for the marker tint and `--accent` for the button.
+
+**Leave the animal tokens alone.** A fox is orange and a duck is yellow;
+turning the cast mint would be a re-theme of the wrong thing. They are
+decorative fills on `--surface` and need no contrast gate. One exception: the
+demo button's white label goes to `--accent` per the defect above.
+
+### Type
+
+**Fredoka** for headings and chips, **Baloo 2** for body. Both SIL OFL, so
+bundling is unrestricted.
+
+* **Self-hosted `woff2` under `static/vendor/`, subset to Latin.** No CDN
+  (§T0's rule and a judge's offline `docker run`), and **nothing is vendored
+  today** — `static/` contains only `race/`. This is a real T9 deliverable, not
+  a stylesheet line.
+* **Always a real fallback stack**: `"Fredoka", system-ui, sans-serif`. A
+  missing font file must degrade, not blank the page.
+* Scale, rounded up for young eyes: body **18px**, chips **18px**, headings
+  **28/22px**, captions **15px**. Line height 1.4; 1.25 on headings.
+
+### Space, shape, motion
+
+* **Touch targets ≥ 60px**, and never two adjacent targets under 12px apart.
+* Spacing steps: **4 / 8 / 12 / 20 / 32**. Nothing between.
+* Radii: **14px** on buttons and chips, **20px** on cards and the race, full
+  round on avatars. Rounded everything — it is a children's book.
+* **Animate `transform` and `opacity` only.** Never a layout property; T9a's
+  round 1 caught exactly that (`.markers::before` transitioning `width`).
+* **`prefers-reduced-motion` holds everywhere**, and information must survive
+  it — under reduced motion the race stops and the markers still show progress.
+
+---
+
 ## T9 — Frontend shell and the interview UI
 
 **Owns:** `static/**` (including `static/vendor/`), `internal/web/**`
@@ -1515,8 +1607,9 @@ link works without JS.
 * **~60px targets**, generously spaced. Fine motor control is poor.
 * **No naked spinners.** The six-minute wait is the race (§T9a, done); the
   interview's per-turn wait is one race animal trotting in place.
-* **Chunky rounded type** (Fredoka, Baloo 2), warm palette. The race reads
-  every colour from `var()` tokens, so the palette lands there for free.
+* **Chunky rounded type and the mint palette — §The look**, which carries the
+  tokens, the verified contrast table, the type scale and the spacing steps.
+  Fonts are **not vendored yet**; that is a T9 deliverable, not a CSS line.
 * **No failure text.** `error` and `failed` carry a class token, never prose —
   render warmth, never the token. Two doors on failure, never one.
 * **Adult corner.** Screen 4 only; it is not a settings area.
