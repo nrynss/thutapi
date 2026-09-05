@@ -1,6 +1,7 @@
 import { h, render } from "/static/vendor/preact.module.js";
 import htm from "/static/vendor/htm.module.js";
 import { useEffect, useRef, useState } from "/static/vendor/hooks.module.js";
+import { readBookState, subscribeBook } from "/static/book/catchup.js";
 
 const html = htm.bind(h);
 
@@ -173,6 +174,7 @@ function Interview({ id }) {
   const seenTurns = useRef(new Set());
   const approvedPages = useRef(new Set());
   const generationStarted = useRef(false);
+  const bookID = useRef("");
   const [missing, setMissing] = useState(false);
 
   function listen(url, unlock = false) {
@@ -249,6 +251,112 @@ function applyRecoveredQuestion(q) {
     });
   }
 
+  function attachBookStream(eventsURL, currentBookID) {
+    bookStream.current && bookStream.current.close();
+    const subscription = subscribeBook(eventsURL, {
+      reconnected: epoch => {
+        synchronizeBookState(subscription, currentBookID, false, epoch);
+      },
+      pageApproved: pageEvent => {
+        const page = pageEvent.n;
+        if (!Number.isInteger(page) || page < 1 || page > 8 || approvedPages.current.has(page)) return;
+        approvedPages.current.add(page);
+        setDone(approvedPages.current.size);
+        setBookState("drawing");
+      },
+      narrationUnavailable: () => setBookState("quiet"),
+      bookReady: ready => {
+        window.location.assign(`/book/${currentBookID || ready.book_id || ""}`);
+      },
+      failed: () => {
+        setBookState("failed");
+      }
+    });
+    bookStream.current = subscription;
+    // EventSource reconnects itself after a transient network error. Keep it
+    // open until the terminal event so a reload can receive live progress.
+    return subscription;
+  }
+
+  const stateReadTrackers = new WeakMap();
+  async function synchronizeBookState(subscription, currentBookID, startIfAbsent, requestedEpoch = 0) {
+    if (subscription.isTerminal()) return;
+    let tracker = stateReadTrackers.get(subscription);
+    if (!tracker) {
+      tracker = { running: false, requestedEpoch: 0 };
+      stateReadTrackers.set(subscription, tracker);
+    }
+    tracker.requestedEpoch = Math.max(tracker.requestedEpoch, requestedEpoch);
+    if (tracker.running) return;
+    tracker.running = true;
+    try {
+      for (;;) {
+        const result = await readBookState(subscription, () => json(`/book/${currentBookID}/state`));
+        if (result.terminal || subscription.isTerminal()) return;
+        const readEpoch = result.epoch;
+        if (result.error) {
+          if (tracker.requestedEpoch > readEpoch || subscription.connectionEpoch() > readEpoch) continue;
+          setBookState("checking");
+        } else {
+          // A newer connection owns the authoritative from-now-on stream. Do
+          // not let a snapshot from the prior connection overwrite it.
+          if (tracker.requestedEpoch > readEpoch || subscription.connectionEpoch() > readEpoch) continue;
+          if (applyBookState(result.state, subscription)) return;
+          if (startIfAbsent) {
+            subscription.close();
+            await generate();
+            return;
+          }
+        }
+        if (tracker.requestedEpoch <= readEpoch && subscription.connectionEpoch() <= readEpoch) return;
+      }
+    } finally {
+      tracker.running = false;
+    }
+  }
+
+  function applyBookState(state, subscription) {
+    if (subscription.isTerminal()) return true;
+    const pages = Array.isArray(state.pages) ? state.pages : [];
+    for (const page of pages) {
+      if (Number.isInteger(page.n) && page.n >= 1 && page.n <= 8) approvedPages.current.add(page.n);
+    }
+    setDone(approvedPages.current.size);
+    if (state.status === "ready") {
+      subscription.close();
+      window.location.assign(`/book/${bookID.current}`);
+      return true;
+    }
+    if (state.status === "failed") {
+      subscription.close();
+      setBookState("failed");
+      return true;
+    }
+    if (state.status === "running") {
+      setBookState("drawing");
+      return true;
+    }
+    if (state.status === "unknown") {
+      // The latest run exists but its job result is unreadable. Keep the
+      // authoritative stream alive and wait for a terminal event; posting a
+      // new run could spend money while the existing run is still active.
+      setBookState("checking");
+      return true;
+    }
+    return false;
+  }
+
+  async function recoverGeneration(currentBookID) {
+    bookID.current = currentBookID;
+    setBookState("drawing");
+    setDone(0);
+    approvedPages.current = new Set();
+    const subscription = attachBookStream(`/interviews/${id}/generate/events`, currentBookID);
+    // C4 is from-now-on: wait until the server has accepted the subscription,
+    // then read state. Reconnects repeat this synchronization in the adapter.
+    await synchronizeBookState(subscription, currentBookID, true);
+  }
+
   useEffect(() => {
     if (id === "new") return undefined;
     openInterview(`/interviews/${id}/events`);
@@ -271,6 +379,10 @@ function applyRecoveredQuestion(q) {
         // opens its separate book stream.
         stream.current?.close();
         setEnded(true);
+        if (state.book_id) {
+          generationStarted.current = true;
+          recoverGeneration(state.book_id);
+        }
       }
       if (state.error) {
         const isMissing = state.error === "not_found";
@@ -314,19 +426,16 @@ function applyRecoveredQuestion(q) {
     approvedPages.current = new Set();
     try {
       const start = await json(`/interviews/${id}/generate`, { method: "POST" });
-      bookStream.current && bookStream.current.close();
-      const source = new EventSource(start.events_url);
-      bookStream.current = source;
-      source.addEventListener("page_approved", event => {
-        const page = JSON.parse(event.data).n;
-        if (!Number.isInteger(page) || page < 1 || page > 8 || approvedPages.current.has(page)) return;
-        approvedPages.current.add(page);
-        setDone(approvedPages.current.size);
-      });
-      source.addEventListener("narration_unavailable", () => setBookState("quiet"));
-      source.addEventListener("book_ready", event => { const ready = JSON.parse(event.data); source.close(); window.location.assign(`/book/${start.book_id || ready.book_id || ""}`); });
-      source.addEventListener("failed", () => { source.close(); setBookState("failed"); });
-    } catch (_) {
+      bookID.current = start.book_id || bookID.current;
+      const subscription = attachBookStream(start.events_url, bookID.current);
+      await synchronizeBookState(subscription, bookID.current, false);
+    } catch (error) {
+      // A run can begin between the catch-up snapshot and this POST. Busy is
+      // therefore a live run to recover, never a failed generation.
+      if (error.status === 409 && error.kind === "busy" && bookID.current) {
+        await recoverGeneration(bookID.current);
+        return;
+      }
       setBookState("failed");
     }
   }
@@ -339,7 +448,7 @@ function applyRecoveredQuestion(q) {
     generate();
   }, [ended]);
 
-  if (bookState) return html`<section class="card wait"><p class="eyebrow">Your book is on its way</p><h1>${bookState === "failed" ? "The animals need a little rest." : "The animals are drawing your story."}</h1><${Race} done=${done} sitting=${bookState === "failed"} />${bookState === "quiet" ? html`<p class="warm">Your book will be beautifully captioned and quiet today.</p>` : null}${bookState === "failed" ? html`<div class="doors"><button class="primary" onClick=${generate}>Try again</button><a class="secondary" href="/">Look at other books</a></div>` : null}</section>`;
+  if (bookState) return html`<section class="card wait"><p class="eyebrow">Your book is on its way</p><h1>${bookState === "failed" ? "The animals need a little rest." : bookState === "checking" ? "We’re checking on your book." : "The animals are drawing your story."}</h1><${Race} done=${done} sitting=${bookState === "failed"} />${bookState === "checking" ? html`<p class="warm">We’re still listening for the next page.</p>` : null}${bookState === "quiet" ? html`<p class="warm">Your book will be beautifully captioned and quiet today.</p>` : null}${bookState === "failed" ? html`<div class="doors"><button class="primary" onClick=${generate}>Try again</button><a class="secondary" href="/">Look at other books</a></div>` : null}</section>`;
   if (missing) return html`<section class="card"><p class="eyebrow">A tiny detour</p><h1>That story wandered away.</h1><p class="warm" role="status">Start a new story and we’ll make a fresh little path together.</p><div class="doors"><a class="primary" href="/">Start a new story</a><a class="secondary" href="/">Look at other books</a></div></section>`;
   return html`<section class="interview"><p class="eyebrow">Your story</p><div class="question"><h1>${question ? question.text : "I’m thinking of a good question…"}</h1>${audioURL ? html`<button class="speaker" onClick=${() => listen(audioURL, true)}>${needsTap ? "Tap to listen" : "Listen again"}</button>` : null}</div>${waiting ? html`<p class="warm">🐇 A little animal is thinking…</p>` : html`<div class="chips">${(question && question.chips || []).map(chip => html`<button onClick=${() => send(chip)}>${chip}</button>`)}</div>`}${notice ? html`<p class="warm" role="status">${notice}</p>` : null}<form class="answer" onSubmit=${event => { event.preventDefault(); send(answer); }}><input value=${answer} onInput=${e => setAnswer(e.currentTarget.value)} onFocus=${e => e.currentTarget.scrollIntoView({ block: "center" })} placeholder="Or write your own idea" autocomplete="off" /><button class="primary" disabled=${waiting}>Send</button></form></section>`;
 }

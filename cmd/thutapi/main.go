@@ -141,19 +141,23 @@ type server struct {
 	media      *mediastore.Store
 	interviews *interview.Handler
 	generate   *bookgen.Handler
+	book       *web.BookHandler
+	download   *web.DownloadHandler
 }
 
 // newServer wires the routes. media, interviews and generate must be
 // non-nil: they are live handlers, not optional dependencies.
-func newServer(log *slog.Logger, media *mediastore.Store, interviews *interview.Handler, generate *bookgen.Handler) *server {
-	s := &server{mux: http.NewServeMux(), log: log, start: time.Now(), media: media, interviews: interviews, generate: generate}
+func newServer(log *slog.Logger, media *mediastore.Store, interviews *interview.Handler, generate *bookgen.Handler, db *store.DB) *server {
+	s := &server{mux: http.NewServeMux(), log: log, start: time.Now(), media: media, interviews: interviews, generate: generate, book: web.NewBookHandler(db, generate), download: web.NewDownloadHandler(db, media, generate)}
 	// /healthz is the one route T0 ships. Liveness only — no dependency
 	// checks, no probes. That distinction belongs to a later track.
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	// T9's human page and static-asset routes. API routes remain plural.
 	s.mux.HandleFunc("GET /{$}", web.Shelf)
 	s.mux.HandleFunc("GET /interview/{id}", web.Interview)
-	s.mux.HandleFunc("GET /book/{id}", web.Book)
+	s.mux.HandleFunc("GET /book/{id}", s.book.Book)
+	s.mux.HandleFunc("GET /book/{id}/state", s.book.State)
+	s.mux.HandleFunc("GET /book/{id}/download/{kind}", s.download.Download)
 	s.mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
 	// T3's one sanctioned route line (PLAN.md invariant 5): media
 	// blobs serve through the mediastore handler, which answers Range
@@ -322,7 +326,7 @@ func run(log *slog.Logger, args []string, sigs <-chan os.Signal) error {
 		return fmt.Errorf("build generation handler: %w", err)
 	}
 
-	srvHTTP := newHTTPServer(cfg, newServer(log, blobs, interviews, generate))
+	srvHTTP := newHTTPServer(cfg, newServer(log, blobs, interviews, generate, db))
 
 	errCh := make(chan error, 1)
 	go func() {

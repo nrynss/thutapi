@@ -240,6 +240,7 @@ func (b *approvalBridge) progress(p illustrate.Progress) {
 		b.first = fmt.Errorf("bookgen: marshal page_approved for page %d: %w", p.N, err)
 		return
 	}
+	b.h.recordApproval(b.bookID, ApprovedPage{N: p.N, ImageURL: "/media/" + m.ID})
 	b.h.cfg.Broker.Publish(Topic(b.bookID), stream.Event{Name: "page_approved", Data: string(payload)})
 }
 

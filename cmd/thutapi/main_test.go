@@ -83,7 +83,7 @@ func newTestServer(t *testing.T) *server {
 	if err != nil {
 		t.Fatalf("build generation handler: %v", err)
 	}
-	return newServer(log, media, interviews, generate)
+	return newServer(log, media, interviews, generate, db)
 }
 
 // echoChatter answers every Chat call with a one-question reply that
@@ -319,6 +319,24 @@ func TestInterviewRoutesServeThroughMux(t *testing.T) {
 	}
 	if started.ID == "" || started.BookID == "" || started.Topic != interview.Topic(started.ID) {
 		t.Fatalf("start body = %+v, want id, book_id and topic= interview:<id>", started)
+	}
+
+	// T10b's C4 route stays under the singular human book path while serving
+	// the machine-readable catch-up shape T9 reads after it subscribes.
+	req = httptest.NewRequest(http.MethodGet, "/book/"+started.BookID+"/state", nil)
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	if got, want := rr.Code, http.StatusOK; got != want {
+		t.Fatalf("GET book state: status = %d, want %d (body: %s)", got, want, rr.Body.String())
+	}
+	var bookState struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &bookState); err != nil {
+		t.Fatalf("decode book state: %v", err)
+	}
+	if bookState.Status != "not_started" {
+		t.Fatalf("book state = %+v, want not_started", bookState)
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/interviews/00000000000000000000000000000000/events", nil)

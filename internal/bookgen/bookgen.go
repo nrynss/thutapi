@@ -125,6 +125,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"sync"
 
 	"thutapi/internal/audio"
@@ -175,6 +176,41 @@ type pageApprovedEvent struct {
 type bookReadyEvent struct {
 	PDFURL   string `json:"pdf_url"`
 	VideoURL string `json:"video_url"`
+}
+
+// GenerationStatus is the process-local state of the latest run for a book.
+// It is the terminal-state half of T10b's catch-up response; the persistent
+// book artifacts themselves are read from store by the web handler.
+type GenerationStatus string
+
+const (
+	// GenerationNotStarted means this process has not started a run for the book.
+	GenerationNotStarted GenerationStatus = "not_started"
+	// GenerationRunning means the latest run is still executing.
+	GenerationRunning GenerationStatus = "running"
+	// GenerationReady means the latest run completed successfully.
+	GenerationReady GenerationStatus = "ready"
+	// GenerationFailed means the latest run ended with an error or cancellation.
+	GenerationFailed GenerationStatus = "failed"
+	// GenerationUnknown means a known run no longer has a readable job result.
+	GenerationUnknown GenerationStatus = "unknown"
+)
+
+// ApprovedPage is one illustration approved during the latest generation run.
+// Its URL is the same value emitted in that run's page_approved SSE event.
+type ApprovedPage struct {
+	N        int    `json:"n"`
+	ImageURL string `json:"image_url"`
+}
+
+// CatchUp is the volatile half of a book's C4 catch-up state. It is exact for
+// reloads handled by this process: Approved contains only pages the latest run
+// has emitted as page_approved, so a retry cannot inherit old progress from
+// replaced media rows. A process restart intentionally yields NotStarted; the
+// durable artifacts remain available through store.
+type CatchUp struct {
+	Status   GenerationStatus `json:"status"`
+	Approved []ApprovedPage   `json:"approved"`
 }
 
 // failedData is the failed event's payload: {} — no code, no prose
@@ -331,13 +367,16 @@ type Handler struct {
 	cfg Config
 	log *slog.Logger
 
-	// mu guards runs: bookID → the id of its current-or-last job. The
+	// mu guards runs and approvals. runs maps bookID to the id of its
+	// current-or-last job. The
 	// entry is never deleted — job.Result says whether that job is
 	// still running, which is the exactly-once read the double-fire
 	// refusal runs on. A terminal job's entry simply lets the next
-	// POST start a fresh run and overwrite it.
-	mu   sync.Mutex
-	runs map[string]string
+	// POST start a fresh run and overwrite it. approvals resets for each
+	// fresh run and records only pages that its progress bridge published.
+	mu        sync.Mutex
+	runs      map[string]string
+	approvals map[string]map[int]string
 }
 
 // New returns a Handler with the given dependencies. It returns an
@@ -355,9 +394,10 @@ func New(cfg Config) (*Handler, error) {
 		cfg.Log = slog.New(slog.DiscardHandler)
 	}
 	return &Handler{
-		cfg:  cfg,
-		log:  cfg.Log,
-		runs: make(map[string]string),
+		cfg:       cfg,
+		log:       cfg.Log,
+		runs:      make(map[string]string),
+		approvals: make(map[string]map[int]string),
 	}, nil
 }
 
@@ -423,12 +463,62 @@ func (h *Handler) startRun(ctx context.Context, id string) (jobID, bookID string
 			return "", "", fmt.Errorf("bookgen: generate %s: %w", id, ErrBusy)
 		}
 	}
+	// Reset before Start: the job may publish its first page before Start
+	// returns its id, and a retry must never claim the prior run's pages.
+	previousApprovals := h.approvals[bookID]
+	h.approvals[bookID] = make(map[int]string)
 	jobID, err = h.cfg.Jobs.Start(ctx, h.generateJob(bookID, id))
 	if err != nil {
+		h.approvals[bookID] = previousApprovals
 		return "", "", fmt.Errorf("bookgen: generate %s: %w", id, err)
 	}
 	h.runs[bookID] = jobID
 	return jobID, bookID, nil
+}
+
+// CatchUp returns the current process's exact generation state for bookID.
+// It is safe to call concurrently with the progress bridge and never invents
+// terminal state when the job registry cannot read a remembered run.
+func (h *Handler) CatchUp(bookID string) CatchUp {
+	h.mu.Lock()
+	jobID, known := h.runs[bookID]
+	approved := h.approvals[bookID]
+	pages := make([]ApprovedPage, 0, len(approved))
+	for n, imageURL := range approved {
+		pages = append(pages, ApprovedPage{N: n, ImageURL: imageURL})
+	}
+	h.mu.Unlock()
+
+	slices.SortFunc(pages, func(a, b ApprovedPage) int { return a.N - b.N })
+	if !known {
+		return CatchUp{Status: GenerationNotStarted, Approved: pages}
+	}
+	result, err := h.cfg.Jobs.Result(jobID)
+	if err != nil {
+		return CatchUp{Status: GenerationUnknown, Approved: pages}
+	}
+	switch result.Status {
+	case job.StatusRunning:
+		return CatchUp{Status: GenerationRunning, Approved: pages}
+	case job.StatusDone:
+		return CatchUp{Status: GenerationReady, Approved: pages}
+	case job.StatusError, job.StatusCancelled:
+		return CatchUp{Status: GenerationFailed, Approved: pages}
+	default:
+		return CatchUp{Status: GenerationUnknown, Approved: pages}
+	}
+}
+
+// recordApproval records a page_approved event for C4 before it is published.
+// The page is already persisted and its wire URL is final, so a subscriber
+// that races the publish can safely deduplicate it against this catch-up read.
+func (h *Handler) recordApproval(bookID string, approved ApprovedPage) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.approvals[bookID] == nil {
+		h.approvals[bookID] = make(map[int]string)
+	}
+	h.approvals[bookID][approved.N] = approved.ImageURL
 }
 
 // ended reports whether the interview's persisted transcript carries a

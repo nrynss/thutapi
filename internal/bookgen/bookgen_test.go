@@ -1,6 +1,7 @@
 package bookgen
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -173,5 +174,50 @@ func TestEnded(t *testing.T) {
 func TestEventsPath(t *testing.T) {
 	if got, want := eventsPath("iv1"), "/interviews/iv1/generate/events"; got != want {
 		t.Fatalf("eventsPath(iv1) = %q, want %q", got, want)
+	}
+}
+
+type resultReader struct {
+	result job.Result
+	err    error
+}
+
+func (r resultReader) Start(context.Context, job.Func) (string, error) { return "", nil }
+
+func (r resultReader) Result(string) (job.Result, error) { return r.result, r.err }
+
+func TestCatchUpReportsRunStatusAndApprovedPages(t *testing.T) {
+	cases := []struct {
+		name   string
+		result job.Result
+		err    error
+		want   GenerationStatus
+	}{
+		{"running", job.Result{Status: job.StatusRunning}, nil, GenerationRunning},
+		{"done", job.Result{Status: job.StatusDone}, nil, GenerationReady},
+		{"error", job.Result{Status: job.StatusError}, nil, GenerationFailed},
+		{"cancelled", job.Result{Status: job.StatusCancelled}, nil, GenerationFailed},
+		{"missing result", job.Result{}, job.ErrUnknownJob, GenerationUnknown},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &Handler{
+				cfg:       Config{Jobs: resultReader{result: tc.result, err: tc.err}},
+				runs:      map[string]string{"book": "job"},
+				approvals: map[string]map[int]string{"book": {2: "/media/two", 1: "/media/one"}},
+			}
+			got := h.CatchUp("book")
+			if got.Status != tc.want {
+				t.Fatalf("status = %q, want %q", got.Status, tc.want)
+			}
+			if len(got.Approved) != 2 || got.Approved[0].N != 1 || got.Approved[1].N != 2 {
+				t.Fatalf("approved = %+v, want sorted pages 1 and 2", got.Approved)
+			}
+		})
+	}
+
+	h := &Handler{cfg: Config{Jobs: resultReader{}}, runs: map[string]string{}, approvals: map[string]map[int]string{}}
+	if got := h.CatchUp("new-book"); got.Status != GenerationNotStarted || len(got.Approved) != 0 {
+		t.Fatalf("new book catch-up = %+v, want empty not_started", got)
 	}
 }

@@ -48,10 +48,12 @@ class FakeEventSource {
     this.url = url;
     this.listeners = new Map();
     eventSources.push(this);
+    if (!activeState.manualEventSourceOpen) queueMicrotask(() => this.dispatch("open"));
     if (activeState.openingEvent) queueMicrotask(() => this.dispatch("question", activeState.openingEvent));
   }
   addEventListener(name, fn) { this.listeners.set(name, fn); }
   dispatch(name, data) { this.listeners.get(name)?.({ data: JSON.stringify(data) }); }
+  drop(name, data) { (this.dropped ||= []).push({ name, data }); }
   close() { this.closed = true; }
 }
 
@@ -71,7 +73,10 @@ function configure(state) {
     calls.push({ url, init });
     const id = activeState.id || "demo";
     if (url === `/interviews/${id}` && activeState.catchup) return activeState.catchup;
-    if (activeState.responses?.[url]) return activeState.responses[url];
+    if (activeState.responses?.[url]) {
+      const configured = activeState.responses[url];
+      return typeof configured === "function" ? configured() : configured;
+    }
     if (url === `/interviews/${id}/events`) return response({});
     if (url === `/interviews/${id}`) return response(activeState);
     if (url === `/interviews/${id}/generate`) return response({ events_url: `/interviews/${id}/generate/events`, book_id: "book" }, 202);
@@ -185,6 +190,146 @@ async function testEndedCatchupClosesInterviewStream() {
   check(eventSources[0].closed === true, "catch-up-ended interview EventSource remained open");
 }
 
+async function testEndedReloadCatchesUpRunningGeneration() {
+  results.textContent = "running generation reload…";
+  await configure({
+    id: "reload",
+    status: "ended",
+    book_id: "book",
+    turns: [{ role: "closing", text: "Goodbye" }],
+    responses: {
+      "/book/book/state": response({ status: "running", pages: [{ n: 3, image_url: "/media/page-3" }] }),
+      "/interviews/reload/generate": response({ error: "busy" }, 409)
+    }
+  });
+  await waitFor(() => eventSources.length >= 2 && calls.some(call => call.url === "/book/book/state"), "reload did not subscribe then read C4 state");
+  check(!calls.some(call => call.url === "/interviews/reload/generate"), "reload repeated generate despite a running C4 state");
+  check(eventSources.at(-1).url === "/interviews/reload/generate/events", "reload subscribed to the wrong book stream");
+  check(document.querySelector("iframe.race-frame")?.title === "1 of 8 pages finished", "C4 page approval did not restore one real marker");
+  check(!document.querySelector(".doors .primary"), "running reload showed the failed-generation door");
+}
+
+async function testC4WaitsForOpenAndKeepsBoundaryEvent() {
+  results.textContent = "C4 open barrier…";
+  let resolveState;
+  const state = new Promise(resolve => { resolveState = resolve; });
+  await configure({
+    id: "barrier",
+    status: "ended",
+    book_id: "book",
+    manualEventSourceOpen: true,
+    turns: [{ role: "closing", text: "Goodbye" }],
+    responses: { "/book/book/state": state }
+  });
+  await waitFor(() => eventSources.length >= 2, "reload did not create the book EventSource");
+  const source = eventSources.at(-1);
+  check(!calls.some(call => call.url === "/book/book/state"), "C4 read started before the book stream opened");
+  source.dispatch("page_approved", { n: 4, image_url: "/media/page-4" });
+  source.dispatch("open");
+  await waitFor(() => calls.some(call => call.url === "/book/book/state"), "C4 read did not start after open");
+  resolveState(response({ status: "running", pages: [{ n: 1 }, { n: 2 }, { n: 3 }] }));
+  await waitFor(() => document.querySelector("iframe.race-frame")?.title === "4 of 8 pages finished", "C4 snapshot overwrote a boundary stream event");
+  check(!source.closed, "running C4 stream closed after the synchronized snapshot");
+}
+
+async function testC4StateFailureKeepsLiveStream() {
+  results.textContent = "C4 state recovery…";
+  await configure({
+    id: "state-error",
+    status: "ended",
+    book_id: "book",
+    turns: [{ role: "closing", text: "Goodbye" }],
+    responses: { "/book/book/state": response({ error: "internal" }, 500) }
+  });
+  await waitFor(() => eventSources.length >= 2 && calls.some(call => call.url === "/book/book/state"), "C4 state failure did not reach the synchronized read");
+  const source = eventSources.at(-1);
+  await waitFor(() => document.querySelector("h1")?.textContent.includes("checking on your book"), "C4 read failure did not render the recoverable state");
+  check(!source.closed, "C4 read failure closed a live book stream");
+  check(!document.querySelector(".doors .primary"), "C4 read failure showed the failed-generation door");
+  source.dispatch("book_ready", { book_id: "book" });
+  await settle();
+  check(source.closed, "book_ready was ignored after a failed C4 read");
+}
+
+async function testC4UnknownStateIsRecoverable() {
+  results.textContent = "C4 unknown state recovery…";
+  await configure({
+    id: "unknown-state",
+    status: "ended",
+    book_id: "book",
+    turns: [{ role: "closing", text: "Goodbye" }],
+    responses: { "/book/book/state": response({ status: "unknown", pages: [{ n: 2 }] }) }
+  });
+  await waitFor(() => eventSources.length >= 2 && calls.some(call => call.url === "/book/book/state"), "unknown C4 state did not reach the synchronized read");
+  const source = eventSources.at(-1);
+  await waitFor(() => document.querySelector("h1")?.textContent.includes("checking on your book"), "unknown C4 state did not render the recoverable state");
+  check(document.querySelector("iframe.race-frame")?.title === "1 of 8 pages finished", "unknown C4 state lost its known approved page");
+  check(!source.closed, "unknown C4 state closed the authoritative book stream");
+  check(!calls.some(call => call.url === "/interviews/unknown-state/generate"), "unknown C4 state retried generation");
+  check(!document.querySelector(".doors .primary"), "unknown C4 state showed the failed-generation door");
+  source.dispatch("book_ready", { book_id: "book" });
+  await settle();
+  check(source.closed, "book_ready was ignored after an unknown C4 state");
+}
+
+async function testC4ReconnectRepeatsSnapshot() {
+  results.textContent = "C4 reconnect snapshot…";
+  let reads = 0;
+  await configure({
+    id: "reconnect",
+    status: "ended",
+    book_id: "book",
+    turns: [{ role: "closing", text: "Goodbye" }],
+    responses: {
+      "/book/book/state": () => response(reads++ === 0 ? { status: "running", pages: [] } : { status: "ready", pages: [] })
+    }
+  });
+  await waitFor(() => eventSources.length >= 2 && calls.some(call => call.url === "/book/book/state"), "initial C4 snapshot did not complete");
+  const source = eventSources.at(-1);
+  check(!source.closed, "running initial C4 stream closed");
+  source.dispatch("open");
+  await waitFor(() => calls.filter(call => call.url === "/book/book/state").length === 2, "reconnect did not repeat the C4 snapshot");
+  await waitFor(() => location.pathname === "/book/book", "reconnect snapshot did not recover terminal book state");
+}
+
+async function testC4ReconnectQueuesSnapshotDuringInflightRead() {
+  results.textContent = "C4 reconnect during snapshot…";
+  let reads = 0;
+  let resolveInitial;
+  const initial = new Promise(resolve => { resolveInitial = resolve; });
+  await configure({
+    id: "reconnect-inflight",
+    status: "ended",
+    book_id: "book",
+    turns: [{ role: "closing", text: "Goodbye" }],
+    responses: {
+      "/book/book/state": () => reads++ === 0 ? initial : response({ status: "ready", pages: [] })
+    }
+  });
+  await waitFor(() => calls.filter(call => call.url === "/book/book/state").length === 1, "initial C4 snapshot did not start");
+  const source = eventSources.at(-1);
+  source.dispatch("error");
+  source.drop("book_ready", { book_id: "book" });
+  source.dispatch("open");
+  resolveInitial(response({ status: "running", pages: [] }));
+  await waitFor(() => calls.filter(call => call.url === "/book/book/state").length === 2, "reconnect during the first snapshot did not queue a second read");
+  check(source.dropped?.some(event => event.name === "book_ready"), "book_ready gap was not established during disconnect");
+  await waitFor(() => location.pathname === "/book/book", "post-reconnect snapshot did not recover terminal book state");
+}
+
+async function testFreshGenerationSynchronizesAfterOpen() {
+  results.textContent = "fresh generation snapshot…";
+  await configure({
+    id: "fresh",
+    status: "ended",
+    turns: [{ role: "closing", text: "Goodbye" }],
+    responses: { "/book/book/state": response({ status: "running", pages: [{ n: 5 }] }) }
+  });
+  await waitFor(() => calls.some(call => call.url === "/interviews/fresh/generate"), "fresh generation did not POST");
+  await waitFor(() => calls.some(call => call.url === "/book/book/state"), "fresh generation did not synchronize C4 state");
+  check(document.querySelector("iframe.race-frame")?.title === "1 of 8 pages finished", "fresh generation snapshot lost its approved page");
+}
+
 async function testShelfGestureAndGeneration() {
   results.textContent = "shelf and generation…";
   await configure({ route: "shelf" });
@@ -218,6 +363,13 @@ async function run() {
     await testLiveQuestionWinsCatchup();
     await testMissingCatchupRecovery();
     await testEndedCatchupClosesInterviewStream();
+    await testEndedReloadCatchesUpRunningGeneration();
+    await testC4WaitsForOpenAndKeepsBoundaryEvent();
+    await testC4StateFailureKeepsLiveStream();
+    await testC4UnknownStateIsRecoverable();
+    await testC4ReconnectRepeatsSnapshot();
+    await testC4ReconnectQueuesSnapshotDuringInflightRead();
+    await testFreshGenerationSynchronizesAfterOpen();
     await testShelfGestureAndGeneration();
     results.innerHTML = "<h1>PASS</h1><pre>opening and terminal catch-up recovery\ncatch-up ordering, chips, and current-turn audio\nshelf unlock, no-sample route, distinct approval progress, and iframe bridge</pre>";
   } catch (error) {

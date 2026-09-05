@@ -1,3 +1,37 @@
 {{define "book"}}<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Your book — Thutapi</title><link rel="stylesheet" href="/static/app.css"></head>
-<body><main data-book-id="{{.BookID}}"><p class="eyebrow">Thutapi</p><h1>Your picture book is waiting here.</h1><p>The reader is being added now. Please return to this link soon.</p><a class="primary" href="/">Back to the shelf</a></main></body></html>{{end}}
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{{.Book.Title}} — Thutapi</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/book/book.css">
+</head>
+<body class="book-body">
+  <main class="book-main" data-book-id="{{.Book.ID}}" data-book-state="{{.Book.Status}}" data-book-state-url="/book/{{.Book.ID}}/state">
+    <header class="book-heading">
+      <p class="eyebrow">Thutapi picture book</p>
+      <h1>{{.Book.Title}}</h1>
+      {{if .Book.Byline}}<p class="book-byline">A book by {{.Book.Byline}}</p>{{end}}
+      <p class="warm">This is the shareable link for your story.</p>
+    </header>
+
+    {{if .Book.VideoURL}}<section class="book-film" aria-label="Your finished story film">
+      <video controls playsinline preload="metadata" src="{{.Book.VideoURL}}">Your browser can’t play this story film.</video>
+      <a class="secondary" href="/book/{{.Book.ID}}/download/video">Download the film</a>
+    </section>{{end}}
+
+    <section class="book-actions" aria-label="Book downloads">
+      {{if .Book.PDFURL}}<a class="primary" href="/book/{{.Book.ID}}/download/pdf">Download the book (PDF)</a>{{else}}<p class="warm">Your printable book will appear here when the pages are ready.</p>{{end}}
+      <a class="secondary" href="/book/{{.Book.ID}}">Share this book</a>
+    </section>
+
+    <section class="book-pages" aria-label="Illustrated pages">
+      {{range .Book.Pages}}<article class="book-page" data-page="{{.N}}">
+        <img src="{{.ImageURL}}" alt="Illustration for page {{.N}}">
+        <p>{{.Text}}</p>
+      </article>{{else}}<p class="warm">The illustrators are making the first page now.</p>{{end}}
+    </section>
+  </main>
+</body>
+</html>{{end}}
