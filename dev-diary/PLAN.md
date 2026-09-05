@@ -219,9 +219,9 @@ routes anyway; not worth doing speculatively before then.**
 | **T10b** | Not started. Book template under `internal/web/**`, `static/book/**`, and route lines in `newServer`. **Also owns T10c's contract row C4** — the HTTP book-state catch-up read (§T10, *What the player owes*). |
 | **T10e** | **Not started. Assigned 2026-09-05.** T10c closed at round-1 APPROVE with every stage pinned against **fakes** — no live run of the joined pipeline has ever happened, and it is the integration track, where fakes prove least. Every other pipeline track got a live half (T1b, T2b, T5b, T6b, T8b); this one is owed. One book, ~$0.35, ~6 min: transcript → structure → illustrate+judge+persist → narrate → film → persisted → served, with the SSE events observed in order. Opens the moment T10d lands. |
 | **T10d** | **Not started. Assigned 2026-09-05** as T10c's contract row C2 — `mediastore.supportedTypes` has no `video/mp4`, so the film cannot be persisted and no production run can finish. One map entry, and the last thing between the repo and its first true end-to-end run. See §T10d. |
-| **T11** | Not started. |
-| **T12** | Not started. **Ships** — no longer optional (operator, 2026-09-05). |
-| **T13** | Not started. **Ships** — no longer optional (operator, 2026-09-05); in-browser recording is non-negotiable. The consent decision below is still open and is the only thing that could stop it. |
+| **T11** | Not started. Gate targets exactly one route — `POST /interviews/{id}/generate`, the only one that spends money — and must **not** gate the shelf, the book page or `GET /media/{id}`. **Prewarm cannot run before T5c and T10d**, or the judges' landing books are generated twice. Item 4 now specs the unplaced-orphan sweep. |
+| **T12** | Not started. **Ships** — no longer optional (operator, 2026-09-05). **Schema settled 2026-09-05, and it moved the goalposts:** `minimax-music-3.0` requires **`lyrics`**, and a sung vocal under a narrated children's book is worse than silence. No duration parameter either (harmless — the verified mix loops). One free call must settle whether an instrumental-directing `prompt` yields a usable bed **before** any decode is written. Depends on **T10a**, not T10. |
+| **T13** | Not started. **Ships** — no longer optional (operator, 2026-09-05); in-browser recording is non-negotiable, and the consent decision is still open. **Schema settled 2026-09-05 and the cast mechanism as written does not work:** the clone model exposes only `source_audio`, `text`, `voice_id`, `prompt_audio`, `prompt_text` and the two flags — **no `pitch`, `timbre`, `intensity`, `sound_effects` or `emotion`.** Those are on `minimax-tts-speech-2.8-hd`. `voice_id` being a *required input* points at clone-once-then-synthesize-on-HD, a two-model flow rather than "one synchronous call". Verify before building — this is the §T6 H1 class again. |
 | **T14** | Not started. Never cut. |
 
 ---
@@ -2014,15 +2014,29 @@ that spends a gate token rather than something the pipeline does on its own.
 
 **Owns:** `internal/gate/**`, the retention sweep in `internal/mediastore/`, and the prewarm fixtures.
 
-**Depends on:** T10. **Done when:** the four items below are true.
+**Depends on:** T10b (prewarm needs a servable book), and **T10d + T5c** for
+anything it generates. **Done when:** the four items below are true.
 
-1. **Gate generation.** A public generate button is an open wallet at $0.01 an
-   image, and the campaign has an explicit anti-abuse clause. Passcode or
-   per-IP cap; a hackathon does not need more.
+1. **Gate generation — and gate exactly one route.** The route is
+   **`POST /interviews/{id}/generate`** (§T10c): it is the only one in the
+   product that spends money, ~$0.35 and six minutes a press. Passcode or
+   per-IP cap; a hackathon does not need more. **Do not gate the shelf, the
+   book page, or `GET /media/{id}`** — a judge must be able to open and share
+   a prewarmed book without a passcode, and a gated media route breaks the
+   `<video>` element and every shared link.
+   *Note the retry path:* §The flow's failure screen retries by re-POSTing this
+   same route, so a retry legitimately spends a token. That is the intent.
 2. **Prewarm two or three finished books** and make them the default landing
-   experience. **The free window closes 2026-09-06 and judging runs to
-   2026-09-11** — every generation a judge triggers after the 6th bills at
-   standard pricing, out of pocket.
+   experience (§The flow screen 1). **The free window closes 2026-09-06 —
+   tomorrow — and judging runs to 2026-09-11**, so every generation a judge
+   triggers after the 6th bills at standard pricing, out of pocket.
+   **Prewarm cannot run before T5c and T10d.** A book generated before T5c
+   carries `emotion:"neutral"` and its narration is refused afterwards; before
+   T10d the film cannot persist at all. Generating the judges' landing
+   experience twice is the avoidable version of this.
+   **Budget the disk:** a prewarmed book is ~10 images plus 8 clips plus a
+   film — the film alone was 2.7 MB on the proof cut — so three books is tens
+   of megabytes, not hundreds. Item 4's cap is about accumulation, not these.
 3. **`GMI_API_KEY` never in the repo.** The repo is public for the whole
    judging period. **Largely done at `e2d696c`** — the key lives in
    `/etc/thutapi/env` (root, 0600) on the box, is sourced by
@@ -2075,15 +2089,50 @@ that spends a gate token rather than something the pipeline does on its own.
 
 **Owns:** `internal/audio/music.go`.
 
-**Depends on:** T10. Confirmed free. One `minimax-music-3.0` call plus one
-looping `<audio>` at ~0.15 under the narration — perhaps half an hour.
+**Depends on:** **T10a** (the render it mixes into), not T10. Confirmed free.
+Puts a third MiniMax model on the form and strengthens the "sound" half of a
+track that is explicitly *picture and sound as a single output*.
 
-**Same request queue, so assume the same envelope as T8**: the result is a URL
-inside `outcome`, not bytes, and `payload` is echoed back beside it. Free, so
-capture the terminal record once before writing the decode rather than
-assuming — that single unchecked assumption is what T6 round-1 H1 cost. Puts a
-third MiniMax model on the form and strengthens the "sound" half of a track that
-is explicitly *picture and sound as a single output*.
+### `lyrics` is REQUIRED — settled 2026-09-05, and it changes the plan
+
+The same free model-details GET that settled T8b answers for music too:
+
+```console
+$ curl -H "Authorization: Bearer $GMI_API_KEY" \
+    https://console.gmicloud.ai/api/v1/ie/requestqueue/apikey/models/minimax-music-3.0
+```
+
+| Parameter | Required | Notes |
+| --- | --- | --- |
+| `lyrics` | **yes** | — |
+| `prompt` | no | the style description |
+| `sample_rate` | no | `16000, 24000, 32000, 44100` |
+| `bitrate` | no | `32000, 64000, 128000, 256000` |
+| `format` | no | `mp3, wav, pcm` |
+| `lyrics_optimizer` | no | — |
+
+**This model wants to write a song, and we want a bed.** Nothing in the plan
+anticipated a required `lyrics` field, and **a sung vocal under a narrated
+children's book is worse than silence** — two voices competing for the same
+ear. There is also **no duration parameter**, so length is not requestable.
+
+**Settle it with one free call before writing any decode**, exactly as §T6's
+H1 taught: try an instrumental-directing `prompt` with a minimal or
+placeholder `lyrics`, and listen to what comes back. If it sings, T12 is a
+different feature — or it is the first thing to drop, notwithstanding that
+nothing is cut, because a bed that fights the narration is a net negative.
+Record the terminal envelope in the same pass (same request queue, so the
+result is a URL inside `outcome` with `payload` echoed beside it — assume
+nothing).
+
+**Length is already solved.** §T12's verified mix uses `-stream_loop -1` with
+`amix=duration=first`, so whatever length the model returns, short or long,
+the bed covers the film exactly. The missing duration parameter costs nothing.
+
+**One open question for the mix:** the bed produces a **new** film. Decide
+whether it replaces the book's `video/mp4` media row or lands beside it —
+there is one film slot per book, and §T7's `ErrConflict` replace path is the
+precedent for how a re-render takes an occupied slot.
 
 **The mix, verified 2026-09-05** on the finished proof book (55.7 s) with a
 deliberately-too-short 30 s bed. It is a **separate final pass over the whole
@@ -2189,7 +2238,35 @@ Cap the recording (a countdown to ~8–15 s) in the UI *and* by size on the
 route. The model wants about eight seconds; an unbounded upload is an open
 disk.
 
-`minimax-audio-voice-clone-speech-2.8-turbo`, one synchronous call. Where a
+### The clone model has NO character knobs — settled 2026-09-05
+
+The free model-details GET settles this one too, and it is the most important
+thing on this track:
+
+```
+minimax-audio-voice-clone-speech-2.8-turbo
+  source_audio  (audio, REQUIRED)   text (string, REQUIRED)
+  voice_id      (string, REQUIRED)  prompt_audio / prompt_text (optional)
+  need_noise_reduction / need_volumn_normalization (optional)
+```
+
+**There is no `pitch`, no `timbre`, no `intensity`, no `sound_effects`, and no
+`emotion`.** Those live on `minimax-tts-speech-2.8-hd` (§T8b) — the
+library-voice model — and **not** on the clone.
+
+So the cast mechanism as written does not work in one call: a cloned voice and
+the character knobs are on two different models. **`voice_id` being a
+*required* input to the clone is the clue** — the shape is almost certainly
+*clone once to establish a voice, then synthesize with that `voice_id` on the
+HD model*, which does have the knobs. That would preserve the whole cast idea
+and make it a **two-model flow**, not "one synchronous call".
+
+**Verify that before building it.** It is one clone call plus one HD call with
+the resulting `voice_id`, and it decides whether the cast is a feature or a
+sentence in the README. This is the same unchecked-assumption class as §T6's
+H1 and §T8's emotion key — both of which were assumed, shipped, and wrong.
+
+`minimax-audio-voice-clone-speech-2.8-turbo`. Where a
 sample is supplied, one short recording can voice the whole cast — narrator
 plus dragon at `pitch: -8` with `spacious_echo`, robot with `robotic`, mouse at
 `+6`.
@@ -2200,6 +2277,11 @@ T13 landed, a page's clip is **assembled** from several synths (narrator line,
 then the dragon's line at `pitch: -8`, then narrator again) and handed over as
 one file. The renderer's `-shortest` timing model neither knows nor cares. It
 is the one place the sequencing pays off for free.
+
+The provider types `source_audio` as **`audio`** and marks it required, which
+is consistent with the URL-download reading below (the image models type their
+URL arrays the same way) — but it has never been observed on the wire. Confirm
+it with the same call that settles the two-model question.
 
 `source_audio` is a URL GMI downloads — it does not accept an upload — so the
 sample must be served over public HTTPS at a short-lived, unguessable path.
