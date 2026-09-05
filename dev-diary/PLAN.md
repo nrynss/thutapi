@@ -1520,6 +1520,7 @@ Screens 1–5 of §The flow. Screen 6 (the book) is T10b's.
 | 3 | Interview | Question zero, then chips; text never waits on audio |
 | 4 | Grown-up step | Record / upload / **skip**, all three equally weighted |
 | 5 | The wait | The race, driven by real `page_approved` counts — and `narration_unavailable` handled warmly, never as an error |
+| — | *(handoff)* | Screen 6 is T10b's, and it always offers **both** artifacts: the film and the PDF (§T10f, §T10g) |
 
 ### The two streams — the thing to get straight before writing code
 
@@ -1566,12 +1567,14 @@ triggered rather than automatic (decision 20).
 
 6. GET  {events_url}                                     ← book stream
    event: page_approved          {"n":3,"image_url":"/media/<id>"}
-   event: narration_unavailable  {}   MiniMax TTS is out (§T10f). A warm line,
-                                      not an error: the run still SUCCEEDS,
-                                      with a PDF and no film.
-   event: book_ready             {"pdf_url":"/media/<id>","video_url":"…"}
-                                      video_url is EMPTY when there is no film.
-                                      A pdf_url is always present.
+   event: narration_unavailable  {}   MiniMax TTS is out. A warm line, never an
+                                      error: the run SUCCEEDS. The book is
+                                      CAPTIONED and silent — or carried by
+                                      T12's music bed if that is up. §T10g.
+   event: book_ready             {"pdf_url":"/media/<id>","video_url":"/media/<id>"}
+                                      BOTH are always present. Since §T10g the
+                                      words are on the page, so a film is made
+                                      whether or not there are voices.
    event: failed                 {}
 ```
 
@@ -1616,6 +1619,11 @@ link works without JS.
 
 ### Child-facing rules
 
+* **The palette and type are settled — §The look.** Mint tokens with a verified
+  contrast table, and **Fredoka is already vendored** at
+  `static/vendor/fonts/`. T9 inherits both; it does not choose them. The one
+  piece left is a `woff2` build of the face for the web — the TTF works in
+  `@font-face` meanwhile.
 * **Tappable chips**, text box as the escape hatch. Typing is the friction
   point — and question zero is the one place it is unavoidable.
 * **~60px targets**, generously spaced. Fine motor control is poor.
@@ -1659,8 +1667,12 @@ link works without JS.
 * Edit a closed track's package without a declared contract row.
 * Fake progress, invent an events route, or poll instead of subscribing.
 * Ship a CDN link, a build step, or a second `Audio` element.
-* Treat a missing `video_url` as a failure. A book with a PDF and no film is a
-  **successful** book whose voices were out (§T10f) — the child still made one.
+* Treat `narration_unavailable` as a failure. It means the book is **captioned
+  and silent** (or carried by music) — a successful book whose voices were out.
+  Both `pdf_url` and `video_url` are still there.
+* Render a speaker control that cannot speak. If no `question_audio` arrives at
+  all, the interview is simply silent — **omit** the affordance rather than
+  showing an inert one.
 
 ---
 
@@ -2004,9 +2016,10 @@ Runs under `internal/job` (T3b) and publishes to the broker on the **book's**
 topic — not the interview's, which carries turns and ends at `ended`.
 
 ```
-event: page_approved  → {"n":3,"image_url":"/media/<id>"}
-event: book_ready     → {"video_url":"/media/<id>"}
-event: failed         → {}                       (no code, no prose — §T9)
+event: page_approved         → {"n":3,"image_url":"/media/<id>"}
+event: narration_unavailable → {}      (§T10f/§T10g — silent, not failed)
+event: book_ready            → {"pdf_url":"…","video_url":"…"}  both always
+event: failed                → {}      (no code, no prose — §T9)
 ```
 
 `page_approved` is what drives the race: **screen 5 counts them into
@@ -2109,9 +2122,12 @@ structure → illustrate+judge+persist → narrate → PDF → film
 
 * **The PDF stage never fails the run.** It needs only images and text, both of
   which exist by then.
-* **When narration 503s**, the run skips the film, emits
-  `narration_unavailable {}` on the book's topic, and still terminates
-  **successfully** with a PDF. It is not `failed` — the child has a book.
+* **When narration 503s**, the run emits `narration_unavailable {}` and still
+  terminates **successfully**. It is not `failed` — the child has a book.
+  **Superseded in part by §T10g:** the film is no longer skipped. Because the
+  words are now on the page, a captioned film is made either way — silent, or
+  over §T12's bed. So the outage costs the voices, not the video, and
+  `book_ready` carries both a `pdf_url` and a `video_url`.
 * `book_ready` gains `pdf_url`; `video_url` is empty when there is no film.
   §T9 and §T10b both read "a film may be absent, a PDF never is".
 * `application/pdf` joins `mediastore.supportedTypes` as **T10f's line**,
@@ -2249,8 +2265,20 @@ the demo needs to show. So:
 * **When narration exists**, `-shortest` against each page's clip governs, as
   today. Nothing changes.
 * **When narration does not exist**, the page holds for a duration **derived
-  from its own text** — roughly reading pace, `2.5 words/second`, with a **4 s
-  floor and a 10 s ceiling**. Same geometry, same `concat -c copy`.
+  from its own text**: `words / 2.0` seconds, with a **4 s floor and a 14 s
+  ceiling**. Same geometry, same `concat -c copy`.
+
+  **2.0 words/second is read-aloud-to-a-child pace (~120 wpm)**, not adult
+  reading pace — an earlier draft said 2.5, which is how an adult reads to
+  themselves and too fast for a child following the words. The ceiling is 14 s
+  rather than 10 s for the same reason: a 25-word page needs 12.5 s and would
+  have been truncated. **Eyeball it on a real book before trusting it** — this
+  is a starting point, not a measurement.
+
+  **This is also the dev path.** Because a book with no narration still
+  produces a complete captioned film, the whole pipeline stays exercisable
+  end to end while MiniMax TTS is down — no cached-clip fixture required, which
+  is what T10e had to improvise (`data/live/cache/audio/`).
 * **Three tiers, and all three produce a film:**
 
   | Narration | Music (§T12) | Result |
