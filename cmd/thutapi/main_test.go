@@ -17,13 +17,18 @@ import (
 	"testing"
 	"time"
 
+	"thutapi/internal/gmi/text"
+	"thutapi/internal/interview"
+	"thutapi/internal/job"
 	"thutapi/internal/mediastore"
 	"thutapi/internal/store"
+	"thutapi/internal/stream"
 )
 
 // newTestServer builds the server with a real store and media store
 // under a throwaway directory — /media/ is a live route, so the
-// handler behind it must exist.
+// handler behind it must exist. The interview handler (T4) gets a
+// canned-echo chatter so the interview routes answer without M3.
 func newTestServer(t *testing.T) *server {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -41,7 +46,29 @@ func newTestServer(t *testing.T) *server {
 	if err != nil {
 		t.Fatalf("open media store: %v", err)
 	}
-	return newServer(log, media)
+	broker := stream.New(stream.Config{})
+	interviews, err := interview.New(interview.Config{
+		Chat:   echoChatter{},
+		Store:  db,
+		Broker: broker,
+		Jobs:   job.New(broker),
+	})
+	if err != nil {
+		t.Fatalf("build interview handler: %v", err)
+	}
+	return newServer(log, media, interviews)
+}
+
+// echoChatter answers every Chat call with a one-question reply that
+// never fills a checklist slot and never ends: enough for route-wiring
+// assertions, never enough for an interview. The real interview
+// behaviour is tested in internal/interview.
+type echoChatter struct{}
+
+func (echoChatter) Chat(_ context.Context, _ text.ChatRequest) (*text.ChatResponse, error) {
+	return &text.ChatResponse{Choices: []text.Choice{{
+		Message: text.AssistantMessage{TextBody: "What happens next?\n[[filled:]]"},
+	}}}, nil
 }
 
 func TestHealthzReturnsOK(t *testing.T) {
@@ -199,6 +226,48 @@ func TestMediaRouteServesThroughMux(t *testing.T) {
 	srv.ServeHTTP(rr, req)
 	if got, want := rr.Code, http.StatusMethodNotAllowed; got != want {
 		t.Fatalf("POST media id: status = %d, want %d", got, want)
+	}
+}
+
+// TestInterviewRoutesServeThroughMux pins T4's route lines (PLAN.md
+// invariant 5): POST /interviews reaches the interview handler (201
+// with an id and a topic), GET /interviews/{id}/events on an unknown
+// interview is a 404 from the handler (not the mux), and a GET on the
+// start route is a 405 from the mux. The interview LOOP is tested in
+// internal/interview; here only the seam.
+func TestInterviewRoutesServeThroughMux(t *testing.T) {
+	srv := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/interviews", nil)
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	if got, want := rr.Code, http.StatusCreated; got != want {
+		t.Fatalf("POST /interviews: status = %d, want %d (body: %s)", got, want, rr.Body.String())
+	}
+	var started struct {
+		ID     string `json:"id"`
+		BookID string `json:"book_id"`
+		Topic  string `json:"topic"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &started); err != nil {
+		t.Fatalf("decode start body: %v", err)
+	}
+	if started.ID == "" || started.BookID == "" || started.Topic != interview.Topic(started.ID) {
+		t.Fatalf("start body = %+v, want id, book_id and topic= interview:<id>", started)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/interviews/00000000000000000000000000000000/events", nil)
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	if got, want := rr.Code, http.StatusNotFound; got != want {
+		t.Fatalf("GET events unknown id: status = %d, want %d", got, want)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/interviews", nil)
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	if got, want := rr.Code, http.StatusMethodNotAllowed; got != want {
+		t.Fatalf("GET /interviews: status = %d, want %d", got, want)
 	}
 }
 

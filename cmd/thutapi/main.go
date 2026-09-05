@@ -22,8 +22,12 @@ import (
 	"syscall"
 	"time"
 
+	"thutapi/internal/gmi/text"
+	"thutapi/internal/interview"
+	"thutapi/internal/job"
 	"thutapi/internal/mediastore"
 	"thutapi/internal/store"
+	"thutapi/internal/stream"
 )
 
 // version is stamped at link time via -X main.version=<v>. Default "dev"
@@ -122,19 +126,20 @@ func parseFlags(args []string) (config, error) {
 }
 
 // server is the application's HTTP root. It owns the routes and the
-// dependencies they need: GET /healthz (T0) and the media handler
-// (T3).
+// dependencies they need: GET /healthz (T0), the media handler (T3)
+// and the interview handler (T4).
 type server struct {
-	mux   *http.ServeMux
-	log   *slog.Logger
-	start time.Time
-	media *mediastore.Store
+	mux        *http.ServeMux
+	log        *slog.Logger
+	start      time.Time
+	media      *mediastore.Store
+	interviews *interview.Handler
 }
 
-// newServer wires the routes. media must be non-nil: it is the
-// /media/ handler, not an optional dependency.
-func newServer(log *slog.Logger, media *mediastore.Store) *server {
-	s := &server{mux: http.NewServeMux(), log: log, start: time.Now(), media: media}
+// newServer wires the routes. media and interviews must be non-nil:
+// they are live handlers, not optional dependencies.
+func newServer(log *slog.Logger, media *mediastore.Store, interviews *interview.Handler) *server {
+	s := &server{mux: http.NewServeMux(), log: log, start: time.Now(), media: media, interviews: interviews}
 	// /healthz is the one route T0 ships. Liveness only — no dependency
 	// checks, no probes. That distinction belongs to a later track.
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
@@ -142,6 +147,13 @@ func newServer(log *slog.Logger, media *mediastore.Store) *server {
 	// blobs serve through the mediastore handler, which answers Range
 	// requests so narration can be scrubbed (PLAN.md §T3).
 	s.mux.Handle("GET /media/{id}", s.media)
+	// T4's sanctioned route lines (PLAN.md invariant 5): the interview
+	// loop — start, catch-up transcript, SSE events, answers. The loop
+	// itself lives in internal/interview.
+	s.mux.HandleFunc("POST /interviews", s.interviews.Start)
+	s.mux.HandleFunc("GET /interviews/{id}", s.interviews.Transcript)
+	s.mux.HandleFunc("GET /interviews/{id}/events", s.interviews.Events)
+	s.mux.HandleFunc("POST /interviews/{id}/answers", s.interviews.Answer)
 	return s
 }
 
@@ -241,7 +253,23 @@ func run(log *slog.Logger, args []string, sigs <-chan os.Signal) error {
 		return fmt.Errorf("open media store: %w", err)
 	}
 
-	srvHTTP := newHTTPServer(cfg, newServer(log, media))
+	// T4: the interview loop streams each turn over SSE (PLAN.md
+	// invariant 6 — nothing blocks on M3), so main owns the broker and
+	// the job runner and hands them to both the interview handler and,
+	// later, every other long-work track.
+	broker := stream.New(stream.Config{})
+	interviews, err := interview.New(interview.Config{
+		Chat:   text.New(),
+		Store:  db,
+		Broker: broker,
+		Jobs:   job.New(broker),
+		Log:    log,
+	})
+	if err != nil {
+		return fmt.Errorf("build interview handler: %w", err)
+	}
+
+	srvHTTP := newHTTPServer(cfg, newServer(log, media, interviews))
 
 	errCh := make(chan error, 1)
 	go func() {
