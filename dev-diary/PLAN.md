@@ -2164,13 +2164,22 @@ The band goes **beside** the art, not over it — a picture book does not print
 its text on top of the illustration.
 
 ```
-1080 × 1620   (2:3, portrait)
+1080 × 1620   (2:3, portrait)   ground: --bg  #eef8f2
 ┌──────────────┐
-│ 1080 × 1350  │  the page illustration, full width, unchanged
-├──────────────┤
-│  270 px band │  the page's words, --film ground, --bg text
+│   ┌────────┐ │  the illustration, inset ~80px so the page
+│   │  art   │ │  ground reads as a mat around it
+│   └────────┘ │
+│  the words   │  --ink #17332b, centred, 12.52:1
 └──────────────┘
 ```
+
+**The page is light, not dark.** An earlier draft of this section put the
+words on `--film`; that was wrong. A picture book page is a light ground with
+dark text — it matches §T10f's PDF, and the two artifacts are the same book.
+`--film` stays what it is: the ground of the title and end cards only.
+
+**Mocked up 2026-09-05** against a real T6b render at 1080×1620 — the
+illustration inset, the caption below, and the page ground reading as a mat.
 
 **This supersedes §T10's "1080×1350 (4:5) … do not letterbox" bullet.** That
 line was right when narration carried the words. Full width is kept, so the
@@ -2195,6 +2204,11 @@ than assuming the change is free.
   rune count against the band width, break on spaces, never mid-word. A
   sentence that overflows three lines is **shrunk one step, then truncated with
   an ellipsis**; the words also live in the PDF (§T10f), which has room.
+* **`drawtext` does not centre lines either** — it left-aligns them inside the
+  block and centres the block. Per-line centring needs **`text_align=C`**,
+  which **is present in the shipping image's ffmpeg 7.1** (verified
+  2026-09-05, `-h filter=drawtext`). Use it; do not emit one `drawtext` per
+  line.
 * **Fredoka**, the same TTF §T10f embeds and §T9 vendors as `woff2`.
 * **Colours from §The look**: band `--film` `#12241e`, text `--bg` `#eef8f2` —
   14.92:1. Note `internal/bookvideo` currently hardcodes `0x1b1614`, which
@@ -2218,8 +2232,20 @@ the demo needs to show. So:
   today. Nothing changes.
 * **When narration does not exist**, the page holds for a duration **derived
   from its own text** — roughly reading pace, `2.5 words/second`, with a **4 s
-  floor and a 10 s ceiling**. Silent audio track, same geometry, same
-  `concat -c copy`.
+  floor and a 10 s ceiling**. Same geometry, same `concat -c copy`.
+* **Three tiers, and all three produce a film:**
+
+  | Narration | Music (§T12) | Result |
+  | --- | --- | --- |
+  | yes | yes | the full book — read aloud over a bed |
+  | **no** | yes | **captioned, with the bed carrying it** — no silence |
+  | **no** | no | captioned and silent. Still a readable book |
+
+  Music is mixed by §T12's verified 1.1 s post-pass, which neither knows nor
+  cares whether the audio under it is narration or `anullsrc`. A bed over a
+  silent captioned book is a markedly better artifact than silence, and
+  **MiniMax Music 3.0 is up while TTS is down** — so tier 2 is the one to
+  expect right now.
 * `book_ready` therefore carries a `video_url` **even during the outage**, and
   `narration_unavailable` means *"this book is silent"*, not *"there is no
   film"*.
