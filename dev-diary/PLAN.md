@@ -1163,16 +1163,34 @@ be built and reviewed before the shell exists. It is screen 5's waiting state
 and, trotting in place, the interview's per-turn thinking indicator (§The
 flow).
 
-**It takes one number and renders.** No backend, no SSE, no store, no model
-call: `pagesApproved` in, animation out. That is the whole interface, and it is
-why this can be built at any point in the schedule — including while T7 is in
-review.
+**The interface is one number: `--done` on `.race`.** No backend, no SSE, no
+store, no model call — and, decisively, **no DOM construction**. Markup and
+CSS only: positions, per-lane jitter and the lit markers all derive from that
+one custom property.
+
+That constraint is what actually makes the track independent, and it is not
+cosmetic:
+
+* **Preact is not available yet.** `static/vendor/` is T9's `Owns` and T9 has
+  not started, so a component written against Preact cannot be built now.
+* **Hand-rolled DOM is forbidden** — AGENTS.md:149 rules out vanilla JS by
+  name, *"same silent DOM-sync class of bug"*. So "just write it in plain JS
+  for now" is not the escape hatch it looks like.
+* CSS-from-one-number dodges both. When T9 exists the Preact component is one
+  line — ``style=${`--done:${n}`}`` — and nothing inside the race changes.
+* It also arrives **server-renderable with JS switched off**, which is
+  AGENTS.md's *"a cold link works without JS"* for free.
+
+Every colour is a `var()` so T9's palette drops in without touching this
+track.
 
 **Start from `dev-diary/prototypes/race.html`**, committed 2026-09-05. It is a
-standalone page that already runs: eight markers, five animals, jittered
-strides, the pack advancing on a button. The mechanism is settled — roughly
-sixty lines of CSS and JS, no sprite sheet, no animation library, no build step
-(§T0's *no Node in the build* holds).
+standalone page that already runs at 900 px and 390 px: eight markers, five
+animals, per-lane jitter, the pack positioned from `--done` alone. The
+mechanism is settled — static markup plus one stylesheet, no sprite sheet, no
+animation library, no build step (§T0's *no Node in the build* holds). The one
+`<script>` in it is a demo button and is labelled as scaffolding that ships
+nowhere.
 
 **The work that is actually left is the sprites.** In the prototype the animals
 are ellipses and rounded rects; they read as animals, but the silhouettes are
@@ -1189,7 +1207,7 @@ glance, in the warm palette, is the deliverable — the motion is done.
 * **Five lanes is a guess, not a pin.** Enough for a race, few enough to read
   on a 390 px screen. Change it if it looks thin.
 * Keep it in one file with its SVGs inline. It has no dependencies and should
-  not acquire any.
+  not acquire any — that is the whole point of the track.
 
 ---
 

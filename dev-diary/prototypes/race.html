@@ -1,120 +1,137 @@
 <!doctype html>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Thutapi — the waiting race</title>
+<title>Thutapi — the waiting race (T9a prototype)</title>
+<!--
+  T9a, screen 5 of PLAN.md §The flow.
+
+  THE INTERFACE IS ONE NUMBER: --done, on .race. Nothing else.
+  Everything below is static markup plus CSS. There is no DOM
+  construction anywhere, which is what makes this independent of T9:
+  it needs no Preact (not vendored yet, and static/vendor/ is T9's),
+  and it does not hand-roll DOM, which AGENTS.md:149 forbids.
+
+  Server-rendered it already works with JS switched off, per
+  AGENTS.md's "a cold link works without JS". When T9 exists, the
+  Preact component is one line: style=${`--done:${n}`}.
+
+  The <script> at the bottom is DEMO SCAFFOLDING for the button.
+  It ships nowhere.
+-->
 <style>
   :root{
-    --cream:#fdf3e7; --ink:#3b2a21; --warm:#e0b48c; --track:#f6e6d3;
-    --line:#d8c3ab; --done:#c9885a;
+    /* T9 owns the real palette; these are placeholders and every one
+       of them is a var, so T9's tokens drop straight in. */
+    --cream:#fdf3e7; --ink:#3b2a21; --track:#f6e6d3;
+    --line:#d8c3ab; --lit:#c9885a;
+    --pages:8;              /* §Decisions row 8: one constant, here */
+    --runner-w:64px;
   }
   *{box-sizing:border-box}
-  body{margin:0;background:var(--cream);color:var(--ink);
-       font:16px/1.4 "Fredoka",system-ui,sans-serif;padding:20px}
-  h1{font-size:22px;margin:0 0 4px}
-  p.sub{margin:0 0 20px;color:#7a6355;font-size:15px}
+  body{margin:0;background:var(--cream);color:var(--ink);padding:20px;
+       font:16px/1.4 "Fredoka",system-ui,sans-serif}
+  h1{font-size:22px;margin:0 0 4px} p{margin:0 0 18px;color:#7a6355;font-size:15px}
 
-  .race{position:relative;background:var(--track);border-radius:20px;
-        padding:14px 0 10px;overflow:hidden}
-  /* 8 page markers = the only progress indicator. No percentage. */
+  .race{--done:0;                     /* ← the entire interface */
+        position:relative;container-type:inline-size;
+        background:var(--track);border-radius:20px;padding:14px 0 10px;
+        overflow:hidden}
+
+  /* Markers: eight cells, the first --done of them lit. Pure CSS from
+     the same number — no per-element class toggling. */
   .markers{position:absolute;inset:0;display:grid;
-           grid-template-columns:repeat(8,1fr);pointer-events:none}
+           grid-template-columns:repeat(var(--pages),1fr)}
   .markers i{border-right:2px dashed var(--line)}
   .markers i:last-child{border-right:0}
-  .markers i.lit{background:rgba(201,136,90,.13)}
+  .markers::before{content:"";position:absolute;inset:0;
+    width:calc(var(--done) / var(--pages) * 100%);
+    background:rgba(201,136,90,.16);transition:width 1.2s ease}
 
   .lane{position:relative;height:52px}
-  .runner{position:absolute;top:6px;left:0;width:64px;height:44px;
-          transition:transform 1.4s cubic-bezier(.34,1.2,.64,1)}
-  .bob{animation:bob .34s ease-in-out infinite alternate;transform-origin:50% 90%}
+  /* transform only — never a layout property, on a screen that holds
+     for six minutes on a phone. cqw resolves against .race. */
+  .runner{position:absolute;top:6px;left:0;width:var(--runner-w);height:44px;
+    transform:translateX(calc(
+      var(--done) / var(--pages) * (100cqw - var(--runner-w)) + var(--jit,0px)));
+    transition:transform 1.4s cubic-bezier(.34,1.2,.64,1)}
+  /* static per-lane offset + a slow wobble: the jostle, no JS */
+  .lane:nth-child(2) .runner{--jit:6px;  --stride:.30s}
+  .lane:nth-child(3) .runner{--jit:-16px;--stride:.38s}
+  .lane:nth-child(4) .runner{--jit:14px; --stride:.28s}
+  .lane:nth-child(5) .runner{--jit:-8px; --stride:.44s}
+  .lane:nth-child(6) .runner{--jit:2px;  --stride:.34s}
+
+  .bob{animation:bob var(--stride,.34s) ease-in-out infinite alternate;
+       transform-origin:50% 90%}
   @keyframes bob{from{transform:translateY(0) rotate(-1.2deg)}
                  to{transform:translateY(-4px) rotate(1.2deg)}}
-  .leg{transform-origin:50% 12%;animation:stride .34s linear infinite}
-  .leg.b{animation-delay:-.17s}
+  .leg{transform-origin:50% 12%;animation:stride var(--stride,.34s) linear infinite}
+  .leg.b{animation-delay:calc(var(--stride,.34s) / -2)}
   @keyframes stride{0%{transform:rotate(26deg)}50%{transform:rotate(-26deg)}
                     100%{transform:rotate(26deg)}}
   .tail{transform-origin:0% 50%;animation:wag .5s ease-in-out infinite alternate}
   @keyframes wag{from{transform:rotate(-12deg)}to{transform:rotate(14deg)}}
 
-  .caption{margin-top:14px;font-size:15px;color:#7a6355;text-align:center}
-  button{margin-top:16px;font:inherit;padding:12px 20px;border:0;border-radius:14px;
-         background:var(--done);color:#fff;min-height:48px;touch-action:manipulation}
-
+  /* The progress information must survive the motion being switched off. */
   @media (prefers-reduced-motion:reduce){
     .bob,.leg,.tail{animation:none}
-    .runner{transition:none}
+    .runner,.markers::before{transition:none}
   }
+  button{margin-top:16px;font:inherit;padding:12px 20px;border:0;border-radius:14px;
+         background:var(--lit);color:#fff;min-height:48px;touch-action:manipulation}
 </style>
+
 <h1>Your book is being drawn…</h1>
-<p class="sub">Eight pages. The animals move up one marker each time a page is finished.</p>
+<p>Eight pages. The animals move up one marker each time a page is finished.</p>
 
-<div class="race" id="race">
-  <div class="markers" id="markers"></div>
+<div class="race" id="race" style="--done:3">
+  <div class="markers"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+
+  <div class="lane"><div class="runner"><svg viewBox="0 0 64 44" width="64" height="44" aria-hidden="true"><g class="bob">
+    <rect class="leg" x="18" y="26" width="6" height="15" rx="3" fill="#c9885a"/>
+    <rect class="leg b" x="34" y="26" width="6" height="15" rx="3" fill="#c9885a"/>
+    <path class="tail" d="M12 22 q-9 -4 -11 4" stroke="#c9885a" stroke-width="4" stroke-linecap="round" fill="none"/>
+    <ellipse cx="27" cy="24" rx="18" ry="11" fill="#c9885a"/>
+    <ellipse cx="46" cy="8" rx="3.5" ry="9" fill="#c9885a"/><ellipse cx="53" cy="9" rx="3.5" ry="8" fill="#c9885a"/>
+    <circle cx="49" cy="19" r="9" fill="#c9885a"/><circle cx="53" cy="17" r="1.7" fill="#2b1d16"/>
+  </g></svg></div></div>
+
+  <div class="lane"><div class="runner"><svg viewBox="0 0 64 44" width="64" height="44" aria-hidden="true"><g class="bob">
+    <rect class="leg" x="18" y="26" width="6" height="13" rx="3" fill="#7f9a6b"/>
+    <rect class="leg b" x="34" y="26" width="6" height="13" rx="3" fill="#7f9a6b"/>
+    <ellipse cx="27" cy="22" rx="19" ry="13" fill="#5f7a4d"/>
+    <ellipse cx="27" cy="20" rx="14" ry="8" fill="#7f9a6b"/>
+    <circle cx="50" cy="22" r="8" fill="#7f9a6b"/><circle cx="54" cy="20" r="1.7" fill="#2b1d16"/>
+  </g></svg></div></div>
+
+  <div class="lane"><div class="runner"><svg viewBox="0 0 64 44" width="64" height="44" aria-hidden="true"><g class="bob">
+    <rect class="leg" x="18" y="26" width="6" height="15" rx="3" fill="#d2703a"/>
+    <rect class="leg b" x="34" y="26" width="6" height="15" rx="3" fill="#d2703a"/>
+    <path class="tail" d="M12 22 q-12 -2 -13 7" stroke="#d2703a" stroke-width="7" stroke-linecap="round" fill="none"/>
+    <ellipse cx="27" cy="24" rx="18" ry="10" fill="#d2703a"/>
+    <path d="M43 12 L46 2 L51 11 Z" fill="#d2703a"/><path d="M52 11 L57 2 L59 12 Z" fill="#d2703a"/>
+    <circle cx="50" cy="19" r="9" fill="#d2703a"/><circle cx="54" cy="17" r="1.7" fill="#2b1d16"/>
+  </g></svg></div></div>
+
+  <div class="lane"><div class="runner"><svg viewBox="0 0 64 44" width="64" height="44" aria-hidden="true"><g class="bob">
+    <rect class="leg" x="22" y="28" width="5" height="12" rx="2.5" fill="#e08a2e"/>
+    <rect class="leg b" x="32" y="28" width="5" height="12" rx="2.5" fill="#e08a2e"/>
+    <ellipse cx="27" cy="24" rx="17" ry="11" fill="#e8b93f"/>
+    <circle cx="47" cy="16" r="8" fill="#e8b93f"/>
+    <path d="M55 16 l8 3 l-8 3 z" fill="#e08a2e"/><circle cx="50" cy="14" r="1.7" fill="#2b1d16"/>
+  </g></svg></div></div>
+
+  <div class="lane"><div class="runner"><svg viewBox="0 0 64 44" width="64" height="44" aria-hidden="true"><g class="bob">
+    <rect class="leg" x="18" y="26" width="6" height="15" rx="3" fill="#8a7d8f"/>
+    <rect class="leg b" x="34" y="26" width="6" height="15" rx="3" fill="#8a7d8f"/>
+    <path class="tail" d="M12 22 q-10 -10 -2 -14" stroke="#8a7d8f" stroke-width="4" stroke-linecap="round" fill="none"/>
+    <ellipse cx="27" cy="24" rx="18" ry="10" fill="#8a7d8f"/>
+    <path d="M43 12 L45 3 L50 11 Z" fill="#8a7d8f"/><path d="M51 11 L56 3 L58 12 Z" fill="#8a7d8f"/>
+    <circle cx="49" cy="19" r="9" fill="#8a7d8f"/><circle cx="53" cy="17" r="1.7" fill="#2b1d16"/>
+  </g></svg></div></div>
 </div>
-<div class="caption" id="cap">no pages yet</div>
-<button onclick="pageDone()">▶ pretend a page finished</button>
 
-<script>
-const ANIMALS = [
-  {n:'rabbit',   body:'#c9885a', ear:'tall'},
-  {n:'tortoise', body:'#7f9a6b', ear:'none'},
-  {n:'fox',      body:'#d2703a', ear:'point'},
-  {n:'duck',     body:'#e8b93f', ear:'none'},
-  {n:'cat',      body:'#8a7d8f', ear:'point'},
-];
-// One SVG per animal. Everything is ellipses and rounded rects: the "running"
-// is two leg pairs rotating out of phase plus a body bob. No sprite sheet.
-function svg(a){
-  const ear = a.ear==='tall'
-    ? `<ellipse cx="46" cy="8" rx="3.5" ry="9" fill="${a.body}"/>
-       <ellipse cx="53" cy="9" rx="3.5" ry="8" fill="${a.body}"/>`
-    : a.ear==='point'
-    ? `<path d="M43 12 L46 2 L51 11 Z" fill="${a.body}"/>
-       <path d="M52 11 L57 2 L59 12 Z" fill="${a.body}"/>` : '';
-  return `<svg viewBox="0 0 64 44" width="64" height="44" aria-hidden="true">
-    <g class="bob">
-      <rect class="leg"   x="18" y="26" width="6" height="15" rx="3" fill="${a.body}"/>
-      <rect class="leg b" x="34" y="26" width="6" height="15" rx="3" fill="${a.body}"/>
-      <path class="tail" d="M12 22 q-9 -4 -11 4" stroke="${a.body}" stroke-width="4"
-            stroke-linecap="round" fill="none"/>
-      <ellipse cx="27" cy="24" rx="18" ry="11" fill="${a.body}"/>
-      ${ear}
-      <circle cx="49" cy="19" r="9" fill="${a.body}"/>
-      <circle cx="53" cy="17" r="1.7" fill="#2b1d16"/>
-      <circle cx="57.5" cy="20" r="1.6" fill="#2b1d16" opacity=".75"/>
-    </g></svg>`;
-}
-const PAGES = 8;
-const race = document.getElementById('race');
-const markers = document.getElementById('markers');
-for (let i=0;i<PAGES;i++) markers.appendChild(document.createElement('i'));
-
-const runners = ANIMALS.map(a=>{
-  const lane = document.createElement('div'); lane.className='lane';
-  const r = document.createElement('div'); r.className='runner';
-  r.innerHTML = svg(a); lane.appendChild(r); race.appendChild(lane);
-  // per-animal stride jitter, so nobody runs in lockstep
-  lane.querySelectorAll('.leg,.bob,.tail').forEach(el=>{
-    el.style.animationDuration = (0.28 + Math.random()*0.22).toFixed(2)+'s';
-  });
-  return r;
-});
-
-let done = 0;
-function place(){
-  const w = race.clientWidth - 72;
-  runners.forEach(r=>{
-    // pack advances with real progress; the jostle is cosmetic
-    const jitter = (Math.random()-0.5) * (w/PAGES) * 0.75;
-    const x = Math.max(0, Math.min(w, (done/PAGES)*w + jitter));
-    r.style.transform = `translateX(${x}px)`;
-  });
-  [...markers.children].forEach((m,i)=>m.classList.toggle('lit', i<done));
-  document.getElementById('cap').textContent =
-    done===0 ? 'no pages yet' :
-    done>=PAGES ? 'all eight pages — your book is ready' :
-    `${done} of ${PAGES} pages drawn`;
-}
-function pageDone(){ if(done<PAGES) done++; place(); }
-addEventListener('resize', place);
-place();
-setInterval(()=>{ if(done>0 && done<PAGES) place(); }, 2200); // idle jostle
-</script>
+<button onclick="const r=race.style,n=+(getComputedStyle(race).getPropertyValue('--done'))||0;r.setProperty('--done',Math.min(8,n+1))">
+  ▶ pretend a page finished
+</button>
+<!-- ^ demo scaffolding only. In the product the number comes from the
+     server-rendered attribute, updated by one Preact component. -->
