@@ -78,7 +78,7 @@ surprise us.
 | 6 | verdict → **disk** | approved page → `mediastore` blob + `store` row | **live** | T6b item 3 (`6664be3`) — sheets and pages persisted by T7's `BookWriter` and fetched back through the real `GET /media/{id}` as 200 `image/jpeg`, byte-identical; `BookMedia` returns exactly 4 placed rows |
 | 7 | **Speech 2.8** → narration | per-page text + emotion → one MP3 per page | **live** (transport + shape), track not built | T2b — real round-trip, result at `outcome.audio_url`, publicly fetchable, verified a real 128 kbps MP3. **T8 owes T10 one persisted clip per page, in page order** |
 | 8 | pages + clips → **MP4** | ffmpeg segments + `concat -c copy` → one downloadable film | **verified, including inside the shipping image** | t10-video-record.md — the eight real T6b renders muxed to a playable 49.2 s file in 13.3 s; full chain re-run under the containerised ffmpeg 7.1 as uid 65532. Narration was **stand-in**, and serving/on-device playback are **not** covered — see that record's §What is NOT verified |
-| 9 | MP4 → **the child** | book page, `<video controls playsinline>`, download, shareable URL | **not yet — and blocked** | T10b, and **T10d first**: `mediastore.supportedTypes` carries no `video/mp4`, so the film has nowhere to land and no production run has ever finished |
+| 9 | MP4 → **the child** | book page, `<video controls playsinline>`, download, shareable URL | **not yet** | T10b owns the page/catch-up route; **T10d is DONE**: `mediastore.supportedTypes` carries `video/mp4`, film persistence unlocked |
 
 Hops 1–6 are proven against production. Hop 8 is proven against real inputs
 offline. **Hops 7 and 9 are the remaining risk**, and they are exactly T8 and
@@ -107,15 +107,15 @@ size as the yardstick:
 | ~~**T6b‑3**~~ | — | — | **DONE** `6664be3` | render → persist → serve, live PASS |
 | ~~**T8**~~ | `internal/audio/**` | — | **DONE** `8b7066b` | Round-3 APPROVE 0/0/0/0. Wire-contract-2 amendment in round 4 |
 | ~~**T8b**~~ | `t8b-live-record.md` | — | **DONE** | Settled by a GET; never needed the pool |
-| **T5c** | `internal/story/story.go` + 3 test sites, 2 doc-only contract rows | T8b | **S** | One constant. The risk is ordering, not size — see below |
+| ~~**T5c**~~ | `internal/story/story.go` + 3 test sites, 2 doc-only contract rows | T8b | **DONE** | Closed at round-2 APPROVE 0/0/0/0. Aligned emotions with provider enum |
 | **T8c** | the TTS hook in `internal/interview` + the `question_audio` event | T8 | **S** | Nobody publishes it today; §T9 screen 3 is silent without it |
 | **T9** | `static/**`, `internal/web/**`, route lines | T4, T9a, T10c — and **T8c** for audio | **L** | The only track whose verification is a **real phone**, not a test. Largest remaining surface |
 | ~~**T9a**~~ | `static/race/**` | — | **DONE** | Closed at round-2 APPROVE 0/0/0/0 |
-| **T10a** | `internal/bookvideo/**`, ffmpeg lines in `Dockerfile` | — | **S–M** | Nothing: recipe proven, fixtures on disk (t10-video-record.md). `exec.Command` hygiene, `t.Skip` when ffmpeg is absent |
-| **T10b** | book template in `internal/web/**`, `static/book/**`, route lines | T9, T10a, T10c, **T10d** | **S–M** | Now also owns **C4, the catch-up read** — without it a reload at minute four restarts the race at zero |
-| **T10d** | `supportedTypes` in `internal/mediastore/` + its test | — | **S** | One map entry. It is the last thing between the repo and its first end-to-end run |
+| ~~**T10a**~~ | `internal/bookvideo/**`, ffmpeg lines in `Dockerfile` | — | **DONE** | Closed at round-2 APPROVE 0/0/0/0. Video pipeline and static ffmpeg |
+| **T10b** | book template in `internal/web/**`, `static/book/**`, route lines | T9, T10a, T10c, T10d | **S–M** | Now also owns **C4, the catch-up read** — without it a reload at minute four restarts the race at zero |
+| ~~**T10d**~~ | `supportedTypes` in `internal/mediastore/` + its test | — | **DONE** | Closed at round 1: **APPROVE 0/0/0/0, zero residue**. Added `video/mp4` with Range support |
 | **T10e** | nothing in `internal/` (operator run) + `t10e-live-record.md` | T10d | **S** | **The live half T10c never had.** It closed at round-1 APPROVE with its whole ordering pinned by fakes — on the one track where fakes prove least |
-| **T10c** | `internal/bookgen/**` + route lines | T5, T6, T7, T8, T10a | **M** | Nothing joins the stages today. Exactly-once triggering at ~$0.35 a run, and the events screen 5 lives on |
+| ~~**T10c**~~ | `internal/bookgen/**` + route lines | T5, T6, T7, T8, T10a | **DONE** | Closed at round-1 APPROVE 0/0/0/0 |
 | **T11** gate | `internal/gate/**` + route wrap | — | **S** | Middleware against no one else's code |
 | **T11** sweep | retention sweep in `internal/mediastore/` | — (T3 closed) | **S** | Disk cap arithmetic |
 | **T11** prewarm | fixtures | T10b | **M** | Needs real finished books: money, clock, free window |
@@ -163,7 +163,7 @@ event**, not a field.
 
 #### The critical path
 
-**~~T7~~ → ~~T8~~ → ~~T10c~~ → T10d → T10e → T9 → T10b → T11 → T14**, with ~~T10a~~,
+**~~T7~~ → ~~T8~~ → ~~T10c~~ → ~~T10d~~ → T10e → T9 → T10b → T11 → T14**, with ~~T10a~~,
 ~~T9a~~, ~~T8b~~ and ~~T5c~~ done.
 
 **T10d jumps the queue.** It is one map entry, it depends on nothing, and until
@@ -218,7 +218,7 @@ routes anyway; not worth doing speculatively before then.**
 | **T10a** | **DONE** 2026-09-05. Closed after round-1 remediation and **round-2 APPROVE 0/0/0/0, zero residue** (t10a-round1.md, t10a-remediation-round1.md, t10a-round2.md). Implemented video pipeline in `internal/bookvideo` (`types.go`, `command.go`, `video.go`, `bookvideo_test.go`): title card (blurred page 1 with title + byline via `textfile=`), page segments (`-shortest`, scale/pad/setsar 1080x1350 4:5 portrait, libx264/aac), end card (flat `0x1b1614` with domain attribution), and concat demuxer (`-c copy +faststart` with MP4 metadata tags). Bounded concurrency via `errgroup.SetLimit`. Added static ffmpeg 7.1 pinned by immutable sha256 digest to `Dockerfile`. Coverage 89.1%. |
 | **T10b** | Not started. Book template under `internal/web/**`, `static/book/**`, and route lines in `newServer`. **Also owns T10c's contract row C4** — the HTTP book-state catch-up read (§T10, *What the player owes*). |
 | **T10e** | **Not started. Assigned 2026-09-05.** T10c closed at round-1 APPROVE with every stage pinned against **fakes** — no live run of the joined pipeline has ever happened, and it is the integration track, where fakes prove least. Every other pipeline track got a live half (T1b, T2b, T5b, T6b, T8b); this one is owed. One book, ~$0.35, ~6 min: transcript → structure → illustrate+judge+persist → narrate → film → persisted → served, with the SSE events observed in order. Opens the moment T10d lands. |
-| **T10d** | **Not started. Assigned 2026-09-05** as T10c's contract row C2 — `mediastore.supportedTypes` has no `video/mp4`, so the film cannot be persisted and no production run can finish. One map entry, and the last thing between the repo and its first true end-to-end run. See §T10d. |
+| **T10d** | **DONE** 2026-09-05. Closed at round 1: **APPROVE 0/0/0/0, zero residue** (t10d-round1.md). Resolves T10c's contract row C2: added `"video/mp4": true` to closed `mediastore.supportedTypes`, updated package doc and set doc comment, replaced `"video/mp4"` in unsupported test cases with `"video/webm"`, and pinned persistence, serving, and Range requests (206 Partial Content, sub-slice and suffix) via `TestPersistAndServeVideoMP4_RangeRequest`. Coverage: mediastore 95.6%. |
 | **T11** | Not started. Gate targets exactly one route — `POST /interviews/{id}/generate`, the only one that spends money — and must **not** gate the shelf, the book page or `GET /media/{id}`. **Prewarm cannot run before T5c and T10d**, or the judges' landing books are generated twice. Item 4 now specs the unplaced-orphan sweep. |
 | **T12** | Not started. **Ships** — no longer optional (operator, 2026-09-05). **Schema settled 2026-09-05, and it moved the goalposts:** `minimax-music-3.0` requires **`lyrics`**, and a sung vocal under a narrated children's book is worse than silence. No duration parameter either (harmless — the verified mix loops). One free call must settle whether an instrumental-directing `prompt` yields a usable bed **before** any decode is written. Depends on **T10a**, not T10. |
 | **T13** | Not started. **Ships** — no longer optional (operator, 2026-09-05); in-browser recording is non-negotiable, and the consent decision is still open. **Schema settled 2026-09-05 and the cast mechanism as written does not work:** the clone model exposes only `source_audio`, `text`, `voice_id`, `prompt_audio`, `prompt_text` and the two flags — **no `pitch`, `timbre`, `intensity`, `sound_effects` or `emotion`.** Those are on `minimax-tts-speech-2.8-hd`. `voice_id` being a *required input* points at clone-once-then-synthesize-on-HD, a two-model flow rather than "one synchronous call". Verify before building — this is the §T6 H1 class again. |

@@ -91,7 +91,7 @@ func TestPersistRejectsUnsupportedContentTypes(t *testing.T) {
 		{"empty", ""},
 		{"whitespace only", "   "},
 		{"html", "text/html"},
-		{"video", "video/mp4"},
+		{"unsupported video", "video/webm"},
 		{"invented", "audio/x-jealous-elephant"},
 	}
 	for _, c := range cases {
@@ -233,6 +233,95 @@ func TestServeHTTPRangeRequests(t *testing.T) {
 					len(got), len(c.wantSlice))
 			}
 		})
+	}
+}
+
+// TestPersistAndServeVideoMP4_RangeRequest pins T10d's contract: an MP4
+// video blob persists, and GET /media/{id} serves it back with Content-Type
+// video/mp4, immutable caching headers, ETag, and functional Range requests
+// (both sub-slice and suffix range) required for <video> seeking and scrubbing.
+func TestPersistAndServeVideoMP4_RangeRequest(t *testing.T) {
+	s := openTestStore(t)
+	data := blob(8192)
+	id, err := s.Persist(t.Context(), bytes.NewReader(data), "video/mp4")
+	if err != nil {
+		t.Fatalf("persist video/mp4: %v", err)
+	}
+
+	// 1. Full GET returns 200 OK, Content-Type video/mp4, immutable cache-control,
+	// quoted ETag, and the full body.
+	{
+		req := httptest.NewRequest(http.MethodGet, "/media/"+id, nil)
+		req.SetPathValue("id", id)
+		rr := httptest.NewRecorder()
+		s.ServeHTTP(rr, req)
+
+		if got, want := rr.Code, http.StatusOK; got != want {
+			t.Fatalf("full GET status = %d, want %d (body: %s)", got, want, rr.Body.String())
+		}
+		if got := rr.Header().Get("Content-Type"); got != "video/mp4" {
+			t.Fatalf("content-type = %q, want video/mp4", got)
+		}
+		if got := rr.Header().Get("Cache-Control"); !strings.Contains(got, "immutable") {
+			t.Fatalf("cache-control = %q, want immutable media caching", got)
+		}
+		if got := rr.Header().Get("ETag"); got != `"`+id+`"` {
+			t.Fatalf("etag = %q, want quoted id", got)
+		}
+		if got := rr.Body.Bytes(); !bytes.Equal(got, data) {
+			t.Fatalf("body len = %d (crc %d), want %d (crc %d)",
+				len(got), crc32.ChecksumIEEE(got), len(data), crc32.ChecksumIEEE(data))
+		}
+	}
+
+	// 2. Sub-slice Range request: Range: bytes=1024-2047 returns HTTP 206 Partial Content,
+	// Content-Type video/mp4, Content-Range bytes 1024-2047/8192, and exact slice data[1024:2048].
+	{
+		req := httptest.NewRequest(http.MethodGet, "/media/"+id, nil)
+		req.Header.Set("Range", "bytes=1024-2047")
+		req.SetPathValue("id", id)
+		rr := httptest.NewRecorder()
+		s.ServeHTTP(rr, req)
+
+		if got, want := rr.Code, http.StatusPartialContent; got != want {
+			t.Fatalf("range status = %d, want %d", got, want)
+		}
+		if got := rr.Header().Get("Content-Type"); got != "video/mp4" {
+			t.Fatalf("range content-type = %q, want video/mp4", got)
+		}
+		if got, want := rr.Header().Get("Content-Range"), "bytes 1024-2047/8192"; got != want {
+			t.Fatalf("content-range = %q, want %q", got, want)
+		}
+		wantSlice := data[1024:2048]
+		if got := rr.Body.Bytes(); !bytes.Equal(got, wantSlice) {
+			t.Fatalf("range body len = %d, want %d bytes (crc %d vs %d)",
+				len(got), len(wantSlice), crc32.ChecksumIEEE(got), crc32.ChecksumIEEE(wantSlice))
+		}
+	}
+
+	// 3. Suffix Range request: Range: bytes=-512 returns HTTP 206 Partial Content,
+	// Content-Type video/mp4, Content-Range bytes 7680-8191/8192, and exact slice data[7680:8192].
+	{
+		req := httptest.NewRequest(http.MethodGet, "/media/"+id, nil)
+		req.Header.Set("Range", "bytes=-512")
+		req.SetPathValue("id", id)
+		rr := httptest.NewRecorder()
+		s.ServeHTTP(rr, req)
+
+		if got, want := rr.Code, http.StatusPartialContent; got != want {
+			t.Fatalf("suffix range status = %d, want %d", got, want)
+		}
+		if got := rr.Header().Get("Content-Type"); got != "video/mp4" {
+			t.Fatalf("suffix range content-type = %q, want video/mp4", got)
+		}
+		if got, want := rr.Header().Get("Content-Range"), "bytes 7680-8191/8192"; got != want {
+			t.Fatalf("content-range = %q, want %q", got, want)
+		}
+		wantSlice := data[7680:8192]
+		if got := rr.Body.Bytes(); !bytes.Equal(got, wantSlice) {
+			t.Fatalf("suffix range body len = %d, want %d bytes (crc %d vs %d)",
+				len(got), len(wantSlice), crc32.ChecksumIEEE(got), crc32.ChecksumIEEE(wantSlice))
+		}
 	}
 }
 
