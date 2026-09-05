@@ -165,8 +165,14 @@ event**, not a field.
 
 #### The critical path
 
-**~~T7~~ → ~~T8~~ → ~~T10c~~ → ~~T10d~~ → ~~T10e~~ → T10f → T10g → T9 → T10b → T11 → T14**, with ~~T10a~~,
+**~~T7~~ → ~~T8~~ → ~~T10c~~ → ~~T10d~~ → ~~T10e~~ → ~~T10f~~ → (T10g ∥ T9) → T10b → T11 → T14**, with ~~T10a~~,
 ~~T9a~~, ~~T8b~~ and ~~T5c~~ done.
+
+**T10g and T9 run in parallel** (verified 2026-09-06): zero shared files —
+T10g is `internal/bookvideo` only and adds no routes, T9 is `static/**`,
+`internal/web/**` and its route lines. T9 never consumes T10g's output either,
+because the film surfaces on screen 6, which is T10b's. Neither branch touches
+§Status; the orchestrator writes both rows at land time.
 
 **T10d jumps the queue.** It is one map entry, it depends on nothing, and until
 it lands every stage of the pipeline is proven except the one that finishes —
