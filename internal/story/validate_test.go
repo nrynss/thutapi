@@ -62,7 +62,7 @@ func validStory() Story {
 				Text:       "Mira spread her umbrella over them both.",
 				Prompt:     "Mira and Puff under one red umbrella in the rain",
 				Characters: []string{"Mira", "Puff"},
-				Emotion:    "neutral",
+				Emotion:    "calm",
 				Lines:      []Line{{Character: "Mira", Text: "Then we will look together."}},
 			},
 			{
@@ -289,5 +289,46 @@ func TestValidateCastUniquenessCaseFolded(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), `names character "mira", who is not in the cast`) {
 		t.Errorf("error %q should name the exact-match miss", err)
+	}
+}
+
+// TestEmotionsSubsetOfProviderEnum asserts that every emotion in story.Emotions
+// is an accepted member of GMI's minimax-tts-speech-2.8-hd parameter schema enum,
+// pinned verbatim against:
+//
+//	GET https://console.gmicloud.ai/api/v1/ie/requestqueue/apikey/models/minimax-tts-speech-2.8-hd
+//
+// as settled in dev-diary/adversarial-review/t8b-live-record.md.
+//
+// An out-of-set value passed to GMI is silently ignored by the TTS model
+// (rendering emotion-less narration with every gate green). The provider
+// enum includes "auto", which is intentionally omitted from story.Emotions so
+// M3 is forced to pick an explicit per-page emotion instead of falling back to default.
+func TestEmotionsSubsetOfProviderEnum(t *testing.T) {
+	// Verbatim parameter constraint for "emotion" from GMI model-details:
+	// "auto, calm, happy, sad, angry, fearful, disgusted, surprised"
+	// (t8b-live-record.md §What the provider says)
+	providerEnum := map[string]bool{
+		"auto":      true,
+		"calm":      true,
+		"happy":     true,
+		"sad":       true,
+		"angry":     true,
+		"fearful":   true,
+		"disgusted": true,
+		"surprised": true,
+	}
+
+	if len(Emotions) == 0 {
+		t.Fatal("story.Emotions is empty")
+	}
+
+	for _, e := range Emotions {
+		if e == "auto" {
+			t.Errorf("story.Emotions must not contain %q: provider-default is intentionally omitted to keep per-page emotion intentional (PLAN.md §T5c)", e)
+		}
+		if !providerEnum[e] {
+			t.Errorf("story.Emotions contains %q, which is not in GMI's minimax-tts-speech-2.8-hd enum %v (citation: console.gmicloud.ai/api/v1/ie/requestqueue/apikey/models/minimax-tts-speech-2.8-hd, t8b-live-record.md)", e, providerEnum)
+		}
 	}
 }

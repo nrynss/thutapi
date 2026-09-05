@@ -84,7 +84,7 @@ func TestStructureThinkingOnRawWire(t *testing.T) {
 	// A fragment of the system prompt that survives JSON encoding
 	// verbatim (no newlines, no quotes): the interpolated emotion
 	// vocabulary must reach the wire.
-	if !bytes.Contains(bodies[0], []byte("exactly one of happy, sad, angry, fearful, disgusted, surprised, neutral")) {
+	if !bytes.Contains(bodies[0], []byte("exactly one of happy, sad, angry, fearful, disgusted, surprised, calm")) {
 		t.Errorf("initial wire = %s\nwant the emotion vocabulary from the system prompt present", bodies[0])
 	}
 	if !bytes.Contains(bodies[1], []byte("not a valid story")) {

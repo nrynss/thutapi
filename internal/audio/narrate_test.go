@@ -129,9 +129,9 @@ func TestNarrateBook_ValidationFailsBeforeAnyCall(t *testing.T) {
 	// sees the fix, not a mystery.
 	fake := &fakeTTS{}
 	pages := append([]story.Page(nil), good...)
-	pages[0].Emotion = "calm"
+	pages[0].Emotion = "neutral"
 	_, err := NarrateBook(t.Context(), h.cfg(fake), h.bookID, pages)
-	if !errors.Is(err, ErrInvalidPage) || !strings.Contains(err.Error(), "calm") || !strings.Contains(err.Error(), "happy") {
+	if !errors.Is(err, ErrInvalidPage) || !strings.Contains(err.Error(), "neutral") || !strings.Contains(err.Error(), "happy") {
 		t.Fatalf("err = %v, want ErrInvalidPage naming the word and the vocabulary", err)
 	}
 }

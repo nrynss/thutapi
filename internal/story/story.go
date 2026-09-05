@@ -59,15 +59,17 @@ type Line struct {
 	Text      string `json:"text"`
 }
 
-// Emotions is the documented set a page's Emotion may carry: the
-// emotion vocabulary of MiniMax Speech 2.8, because T8 passes the
-// value straight into minimax-tts-speech-2.8-hd, where an out-of-set
+// Emotions is the documented set a page's Emotion may carry: GMI's
+// emotion vocabulary for minimax-tts-speech-2.8-hd, because T8 passes
+// the value straight into the request payload, where an out-of-set
 // word is silently ignored. project.md names no set of its own, so
-// this is the provider's, corroborated across the Speech 2.8 provider
-// docs on 2026-09-05 (happy, sad, angry, fearful, disgusted,
-// surprised, neutral). The system prompt teaches it and Validate
-// enforces it from this one slice, so the two cannot drift.
-var Emotions = []string{"happy", "sad", "angry", "fearful", "disgusted", "surprised", "neutral"}
+// this is the provider's enum cited from GMI's model-details schema
+// (console.gmicloud.ai/api/v1/ie/requestqueue/apikey/models/minimax-tts-speech-2.8-hd,
+// t8b-live-record.md) on 2026-09-05 (happy, sad, angry, fearful,
+// disgusted, surprised, calm). auto is provider-default and deliberately
+// omitted to keep per-page emotion intentional. The system prompt teaches
+// it and Validate enforces it from this one slice, so the two cannot drift.
+var Emotions = []string{"happy", "sad", "angry", "fearful", "disgusted", "surprised", "calm"}
 
 // PageCount is the number of pages a valid book carries: the system
 // prompt teaches it and Validate enforces it from this one constant,

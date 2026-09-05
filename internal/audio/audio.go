@@ -32,31 +32,27 @@
 //
 // A page's narration carries its per-page Emotion (story.Page), the
 // value M3 authored in Phase B (project.md §4: "Per-page emotion
-// comes from M3's JSON"). T5 chose the vocabulary from the provider's
-// own: story.Emotions is "the emotion vocabulary of MiniMax Speech
-// 2.8, because T8 passes the value straight into
-// minimax-tts-speech-2.8-hd, where an out-of-set word is silently
-// ignored" (internal/story/story.go). This package therefore passes
-// the page's emotion to the TTS call as the request payload's emotion
-// field (empty for questions, which carry none — their payload stays
-// byte-identical to the live-verified request shape in
-// t2b-t5b-live-record.md), and refuses an out-of-set emotion loudly
-// before any call: the provider would otherwise swallow it silently.
+// comes from M3's JSON"). T5c aligned the vocabulary with GMI's
+// own enum for minimax-tts-speech-2.8-hd (t8b-live-record.md):
+// story.Emotions contains the provider's accepted values (happy, sad,
+// angry, fearful, disgusted, surprised, calm; auto omitted),
+// because T8 passes the value straight into minimax-tts-speech-2.8-hd,
+// where an out-of-set word is silently ignored (internal/story/story.go).
+// This package therefore passes the page's emotion to the TTS call as
+// the request payload's emotion field (empty for questions, which
+// carry none — their payload stays byte-identical to the live-verified
+// request shape in t2b-t5b-live-record.md), and refuses an out-of-set
+// emotion loudly before any call: the provider would otherwise
+// swallow it silently.
 //
-// The emotion key itself is asserted-but-unverified live as of
-// 2026-09-05: its top-level placement on the minimax-tts-speech-2.8-hd
-// payload and this in-set vocabulary are pinned on the wire but have
-// never been confirmed against the upstream — the TTS pool answered
-// the settlement call with HTTP 503 "Upstream capacity temporarily
-// exhausted" on 2026-09-05, so no live echo of an emotion-carrying
-// call exists. If upstream ignores or rejects the key, narration
-// renders emotion-less with every check green (the silent-ignore
-// class; t8-round2.md H1). The committed settlement probe is
-// TestLiveSynthesizeSpeech_EmotionKeyEchoed (internal/gmi/media/
-// live_test.go, //go:build live); these notes flip when it passes
-// against a recovered upstream (t8-remediation-round2.md). The
-// empty-emotion path is unaffected: it stays byte-identical to the
-// live-verified question shape (t2b-t5b-live-record.md).
+// The emotion key placement is CONFIRMED against GMI's provider schema
+// as of 2026-09-05 (t8b-live-record.md): its top-level placement on the
+// minimax-tts-speech-2.8-hd payload and the accepted enum (auto, calm,
+// happy, sad, angry, fearful, disgusted, surprised) match GMI's
+// model-details endpoint. T5c corrected Thutapi's vocabulary (story.Emotions)
+// to use calm instead of neutral. The empty-emotion path is unaffected:
+// it stays byte-identical to the live-verified question shape
+// (t2b-t5b-live-record.md).
 //
 // The cast-voice fields (story.Voice.Pitch, SoundEffects) do NOT
 // reach the TTS call here. project.md §4's mechanism for them —
@@ -175,8 +171,8 @@ var (
 	// number below 1, the same page number twice in one run (two
 	// clips would race for one MediaNarration slot), or an emotion
 	// outside story.Emotions — an out-of-set word is silently
-	// ignored by Speech 2.8 (story.go), so it is refused loudly
-	// here, before any call is made.
+	// ignored by GMI's minimax-tts-speech-2.8-hd (t8b-live-record.md,
+	// story.go), so it is refused loudly here, before any call is made.
 	ErrInvalidPage = errors.New("audio: invalid page")
 
 	// ErrNoText reports an empty text to speak — a blank question or

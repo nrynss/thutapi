@@ -297,20 +297,15 @@ func (c *Client) EditImage(ctx context.Context, prompt, model string, refImages 
 // the payload's emotion key only when non-empty: questions carry none,
 // and an empty emotion keeps the payload byte-identical to the
 // live-verified question shape (t8-round1.md contract row C1).
-// The emotion payload key is asserted-but-unverified live as of
-// 2026-09-05: its top-level placement and the in-set vocabulary
-// (story.Emotions) are pinned on the wire (contract row C1) but have
-// never been confirmed against the minimax-tts-speech-2.8-hd queue
-// adapter — the TTS pool answered every settlement call with HTTP 503
-// "Upstream capacity temporarily exhausted" that evening, so no live
-// echo of an emotion-carrying call exists yet. If upstream ignores or
-// rejects the key, narration renders emotion-less with every check
-// green (the silent-ignore class; t8-round2.md H1). The committed
-// settlement probe is TestLiveSynthesizeSpeech_EmotionKeyEchoed
-// (live_test.go, //go:build live); flip this note when it passes
-// against a recovered upstream (t8-remediation-round2.md). The
-// empty-emotion path is unaffected: byte-identical to the
-// live-verified question shape (t2b-t5b-live-record.md).
+// The emotion payload key placement is CONFIRMED against GMI's provider
+// schema as of 2026-09-05 (t8b-live-record.md): its top-level placement
+// beside voice_id and its accepted enum (calm, happy, sad, angry,
+// fearful, disgusted, surprised, auto) match GMI's model-details
+// endpoint (console.gmicloud.ai/api/v1/ie/requestqueue/apikey/models/minimax-tts-speech-2.8-hd).
+// T5c corrected the vocabulary (story.Emotions) to match this enum (calm
+// in place of neutral; auto deliberately omitted). The empty-emotion path
+// is unaffected: byte-identical to the live-verified question shape
+// (t2b-t5b-live-record.md).
 //
 // The two audio flags pin the GMI API quirk in project.md §4:
 //
