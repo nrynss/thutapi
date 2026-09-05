@@ -76,11 +76,12 @@ func TestPagePrompt(t *testing.T) {
 	if !strings.HasSuffix(got, StyleSuffix) {
 		t.Errorf("page prompt does not end in StyleSuffix (lock 3):\n%s", got)
 	}
-	// The page lists Bramble first, so Bramble's sheet is the base and
-	// the prompt must say so — the model is told what the attached
-	// image is.
-	if !strings.Contains(got, "The attached reference image is Bramble.") {
-		t.Errorf("page prompt does not name its reference sheet (lock 2):\n%s", got)
+	// The page lists Bramble first, then Mira: payload.image carries
+	// BOTH sheets — multi-reference (t6b-live-record.md item 1b) — and
+	// the prompt must name every attached sheet so the model holds
+	// each character identical to their own reference.
+	if !strings.Contains(got, "The attached reference images are Bramble and Mira.") {
+		t.Errorf("page prompt does not name both reference sheets (lock 2):\n%s", got)
 	}
 }
 

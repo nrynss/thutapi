@@ -58,7 +58,7 @@ func TestLiveUnknownModel404s(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	_, err := c.GenerateImage(ctx, "a cat", "definitely-not-a-real-model-2512")
+	_, err := c.GenerateImage(ctx, "a cat", "definitely-not-a-real-model-2512", ImageOptions{})
 	if err == nil {
 		t.Fatal("unknown model unexpectedly succeeded")
 	}

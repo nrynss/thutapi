@@ -72,7 +72,7 @@ required, and the first things cut.
 | **T4** | DONE. Round 1 (t4-round1.md): REMEDIATE 0C/1H/3M/3L — the stall rule ended interviews after two substantive one-word answers ("Mira" → "red"), end-marker-only replies left ended interviews reopenable, opening-turn failures were invisible to clients, error payloads carried freeform prose instead of machine classes, plus streak-rollback, enforced-end persistence, and doc-comment gaps. Remediation round 1 fixed all seven (end fires only on no-progress/repetition with a per-turn chip-signal directive to the model; closing turn persisted unconditionally on every end path; turn-failure marker surfaced through the catch-up route; sentinel-derived error tokens on the wire). **Round 2: APPROVE 0/0/0/0, zero residue** (t4-round2.md). E2e: start → turns → self-ended (checklist, stall, MaxTurns paths) against a scripted fake, SSE-observable, transcript persisted and ordered; thinking OFF pinned on raw wire. Coverage: interview 93.4%. |
 | **T5** | DONE. Round 1 (t5-round1.md): REMEDIATE 0C/0H/3M/2L — transport-error pin had an empty assertion body (swallow mutant went green), the Done when's live half had no owner, the prompt taught "exactly 8 pages" while the validator enforced no count, a prose-embedded decoy JSON object could be taken as the book (full-story decoy silently in one call), and cast uniqueness was case-sensitive (Mira+mira split the T6 lock). Remediation round 1 fixed all five (real transport pins incl. six-sentinel probe; T5b operator row + amended Done-when; `PageCount = 8` taught by prompt and enforced by validator, cut-to-6 changes exactly that rule; extractStory scans all candidates for first decode-AND-validate with first-candidate fallback errors; EqualFold uniqueness with exact references). **Round 2: APPROVE 0/0/0/0, zero residue** (t5-round2.md). Coverage: story 100%. Live half owned by **T5b**. |
 | **T5b** | **DONE** 2026-09-05. Closes the live half of T5's original `Done when`: two independent live M3 calls with `thinking` ON over a realistic 14-turn transcript, both schema-valid, both 8 pages, all emotions in the taught vocabulary, every page character present in the cast (14s and 37s). Corrective-system-message acceptance **confirmed** — MiniMax obeyed a `system`-role message placed after an assistant turn, which is the mechanism `story.Structure`'s corrective retry depends on. **Two findings handed to T6** (not T5 defects — the validator does what it was specified to do): live casts contain non-visual members (`Narrator`, `visual:"no visual"` / `"an unseen storyteller with no appearance"` — two phrasings, so no literal match works) which would each burn a ~$0.01 reference sheet on nothing; and one entity can occupy two cast slots (`Grumpy River` + `Happy River`, the latter's visual opening "the same wide blue river"), which the image lock would render as two unrelated rivers — the exact drift T6 exists to prevent. Also: M3's page prompts already carry their own style language, which competes with T6's constant style suffix. Probes committed as `//go:build live` tests. Zero cost. See t2b-t5b-live-record.md. |
-| **T6** | **REMEDIATE — round 1 (0C/3H/3M/2L), and the model beneath it has changed.** T6b item 1 (live, 2026-09-05, ~$0.25) established that **`Flux2-Klein` and `Z-Image` never generate** — they accept and sit at `status:"queued"` forever, so T6's `DefaultModel` was dead on arrival. **`seedream-5.0-lite` works**, is synchronous, takes references as an **array of URLs** rather than inline base64, and returns results at `outcome.media_urls[].url` (array of objects, with a thumbnail URL beside it). **H1 is confirmed Critical** — the queue does echo `payload` — and the fix is now unambiguous: read `outcome.media_urls[].url` by name, never walk the body. Pinned production settings: `size:"1792x2240"` (4:5, not the `2K` preset — it infers shape from prose and a book needs identical pages), `output_format:"jpeg"` (342 KB vs 4.4 MB PNG), `watermark:false`. ~$0.39 a book. Forces a **contract change to `media.EditImage`**, whose `refImage []byte` signature cannot express an array of URLs — T2 is closed, so that needs its own owner and round. See t6b-live-record.md. |
+| **T6** | **DONE** 2026-09-05. Round-1 review (0C/3H/3M/2L) remediated and re-reviewed: **round 2 APPROVE 0/0/0/0, zero residue** (t6-round1.md → t6-remediation-round1.md → t6-round2.md). T6b item 1 (live, ~$0.25) had already established the model change beneath the round: **`Flux2-Klein` and `Z-Image` never generate** (accept, sit at `queued` forever) — they moved onto the forbidden table; **`seedream-5.0-lite`** is `DefaultModel`, synchronous, references as an **array of URLs**, results at `outcome.media_urls[].url` (array of objects beside `thumbnail_image_url`). H1 (payload echo beats the result) was confirmed Critical and fixed by keying the decode on `outcome.media_urls` by name; the echoing fixture now lives in the suite and page bytes are asserted ≠ sheet bytes. Round-1 remediation also landed the sanctioned `media.EditImage`/`GenerateImage` contract change (`ImageOptions`, `refImages []string` URL array, clean cutover) and fixed H2 (variant fusion only same-entity), H3 (absence words drawable), M1 (normalised forbidden-id guard incl. dead models and video stems), M2 (zero-Book pinned on render paths, M-k red), M3 (deferred unsupported candidates), L1, L2 (redirect scheme allow-list per hop + cap). Full M-a..M-k table re-run 11/11 red by the round-2 reviewer, tree byte-identical. Pinned production settings: `size:"1792x2240"` (not the `2K` preset), `output_format:"jpeg"`, `max_images:1`, `watermark:false`. The live half of the Done when (eight pages, constant cast; render → persist → serve) is T6b items 2–3, which open now that T6 has closed. |
 | **T6b** | **Item 1 DONE** 2026-09-05 (~$0.25, 7 calls). Settled the model question, the response shape and H1's severity — see t6b-live-record.md. Items 2–3 (eight pages with a constant cast; render → persist → serve end to end) still wait on T6 closing. **Untested and worth one experiment before remediation hardens per-page i2i:** `sequential_image_generation:"auto"` with `max_images` up to 15, which the vendor offers *for consistency* and which may answer T6's whole problem differently; and multi-reference (up to 14 images), relevant to pages with two or three cast members where today only one reference is passed. |
 | **T7** | Not started. Capability **verified live** 2026-09-04 — see T7. |
 | **T8** | Not started. |
@@ -642,7 +642,7 @@ cast. The corrective-system-message acceptance holds.
 Neither is a T5 defect: the schema and validator do what they were specified to
 do. Both are T6's to absorb.
 
-## T6 — Illustration  *(REMEDIATE — round 1 found 0C/3H/3M/2L, see t6-round1.md; live verification in T6b)*
+## T6 — Illustration  *(DONE — closed 2026-09-05 after round-2 APPROVE 0/0/0/0, zero residue; t6-round1.md → t6-remediation-round1.md → t6-round2.md; live verification in T6b items 2–3)*
 
 **Owns:** `internal/illustrate/**`.
 
@@ -696,20 +696,23 @@ error:
 * **`output_format: "jpeg"`** — 342 KB against 4.4 MB for the same-size PNG.
   Decisive because T7 inlines the reference sheet as base64 to M3.
 
-**Contract change this forces.** `media.EditImage(ctx, refImage []byte, …)`
-inlines base64 into `payload.image` as a *string*. Seedream needs an *array of
-URLs*, which that signature cannot express. T2 is closed, so this needs an
-owner and a round — it is not a fix to make in passing.
+**Contract change (landed in round-1 remediation, APPROVE'd round 2).**
+`media.EditImage` now takes `refImages []string` — an array of reference
+URLs — plus named `ImageOptions`; seedream needs URLs, not the inline base64
+the old signature carried. T2 was closed, so the change ran as a sanctioned
+contract row of T6's own remediation round rather than a fix in passing.
 
 `Qwen-Image-2512` is not a hypothetical: it shipped as the default for both
 `GenerateImage` and `EditImage` in T2 and survived two review rounds
 (t2-round3.md, H1/M2). Grep for it before closing any track that renders.
 
-**Provider behind a one-line switch.** Start on **Flux2-Klein** or **Z-Image**
-($0.01). If characters drift, switch to `gemini-2.5-flash-image` ($0.0387) — the
-spread across the whole catalog is about 23 cents a book, so choose on
-consistency and never on price. **Do not use `Qwen-Image-2512`:** it is
-text-to-image only and cannot take the reference.
+**Provider behind a one-line switch.** `DefaultModel` is `seedream-5.0-lite`,
+the one image model measured generating on the live queue (T6b item 1;
+t6b-live-record.md). If characters drift, switch to `gemini-2.5-flash-image` —
+the spread across the whole catalog is about 23 cents a book, so choose on
+consistency and never on price. `Flux2-Klein` and `Z-Image` sit on the
+forbidden table above, and `Qwen-Image-2512` with them: t2i only, it cannot
+take the reference.
 
 Fan out with `errgroup`, bounded to ~4 concurrent.
 

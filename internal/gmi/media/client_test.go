@@ -15,17 +15,10 @@ import (
 	"thutapi/internal/gmi"
 )
 
-// fakePNG is a minimal valid PNG: the 8-byte signature followed by
-// enough of an IHDR chunk that http.DetectContentType classifies it as
-// image/png. We never decode it; the test only checks the wire shape.
-var fakePNG = []byte{
-	0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, // signature
-	0x00, 0x00, 0x00, 0x0d, // IHDR length = 13
-	'I', 'H', 'D', 'R',
-	0x00, 0x00, 0x00, 0x01, // width = 1
-	0x00, 0x00, 0x00, 0x01, // height = 1
-	0x08, 0x06, 0x00, 0x00, 0x00, // bit depth 8, color type 6, etc.
-}
+// pngRefURL is a reference-image URL of the shape seedream's
+// payload.image carries: an http(s) URL string. The wire tests assert
+// the array carries it verbatim, not what it points at.
+const pngRefURL = "https://storage.googleapis.com/example-bucket/sheet-0.png?X-Goog-Signature=fake"
 
 // fakeResponse is what a successful request-queue call returns. The
 // shape is generic on purpose — different models wrap the result
@@ -34,14 +27,19 @@ const fakeResponse = `{"request_id":"req-abc","status":"completed","result":{"b6
 
 // captured is the request shape the test fakes inspect. Each test sets
 // up an httptest server that decodes the inbound envelope once into
-// this struct so the assertions stay readable.
+// this struct so the assertions stay readable. Payload stays a decoded
+// JSON map rather than the client's own payload type, so the
+// assertions read the wire and not the implementation.
 type captured struct {
 	method      string
 	path        string
 	auth        string
 	contentType string
 	accept      string
-	envelope    envelope
+	envelope    struct {
+		Model   string         `json:"model"`
+		Payload map[string]any `json:"payload"`
+	}
 }
 
 // fakeServer returns an httptest server plus a pointer to the captured
@@ -83,7 +81,7 @@ func TestGenerateImage(t *testing.T) {
 	t.Setenv("GMI_MEDIA_BASE_URL", srv.URL)
 
 	c := New()
-	raw, err := c.GenerateImage(context.Background(), "a small girl in a red coat", "Z-Image-Turbo")
+	raw, err := c.GenerateImage(context.Background(), "a small girl in a red coat", "seedream-5.0-lite", ImageOptions{})
 	if err != nil {
 		t.Fatalf("GenerateImage: %v", err)
 	}
@@ -106,18 +104,40 @@ func TestGenerateImage(t *testing.T) {
 	if got.accept != "application/json" {
 		t.Errorf("Accept = %q, want application/json on the image endpoints", got.accept)
 	}
-	if got.envelope.Model != "Z-Image-Turbo" {
-		t.Errorf("envelope.model = %q, want Z-Image-Turbo", got.envelope.Model)
+	if got.envelope.Model != "seedream-5.0-lite" {
+		t.Errorf("envelope.model = %q, want seedream-5.0-lite", got.envelope.Model)
 	}
 	if got.envelope.Payload["prompt"] != "a small girl in a red coat" {
 		t.Errorf("envelope.payload[prompt] = %v, want the literal prompt", got.envelope.Payload["prompt"])
 	}
+	// The pinned production payload, on the wire even at its defaults:
+	// 4:5 portrait at explicit pixels (never the shape-inferring "2K"
+	// preset), jpeg, one image, no watermark — and no `image` key at
+	// all, because text-to-image carries no reference
+	// (t6b-live-record.md §5).
+	if got.envelope.Payload["size"] != DefaultImageSize {
+		t.Errorf("envelope.payload[size] = %v, want %q", got.envelope.Payload["size"], DefaultImageSize)
+	}
+	if got.envelope.Payload["output_format"] != DefaultImageFormat {
+		t.Errorf("envelope.payload[output_format] = %v, want %q", got.envelope.Payload["output_format"], DefaultImageFormat)
+	}
+	if got.envelope.Payload["max_images"] != float64(DefaultMaxImages) {
+		t.Errorf("envelope.payload[max_images] = %v, want %d", got.envelope.Payload["max_images"], DefaultMaxImages)
+	}
+	if got.envelope.Payload["watermark"] != false {
+		t.Errorf("envelope.payload[watermark] = %v, want false", got.envelope.Payload["watermark"])
+	}
+	if _, ok := got.envelope.Payload["image"]; ok {
+		t.Errorf("envelope.payload[image] = %v, want no image key on a text-to-image call", got.envelope.Payload["image"])
+	}
 }
 
-// TestEditImage asserts the i2i wire shape: the reference image is
-// inlined as a data: URI in the payload (project.md §2b "Useful
-// asymmetry"), the prompt is carried, and the model id is the one the
-// caller chose.
+// TestEditImage asserts the i2i wire shape: payload.image is an ARRAY
+// OF URL STRINGS carried verbatim — seedream takes references as URLs,
+// not inline base64, and the pinned practice is to chain GMI's own
+// public output URLs (t6b-live-record.md §4, project.md §2b) — with
+// the prompt, the model id and the pinned production payload fields
+// alongside.
 func TestEditImage(t *testing.T) {
 	srv, got := fakeServer(t, fakeResponse, http.StatusOK)
 	defer srv.Close()
@@ -126,7 +146,8 @@ func TestEditImage(t *testing.T) {
 	t.Setenv("GMI_MEDIA_BASE_URL", srv.URL)
 
 	c := New()
-	raw, err := c.EditImage(context.Background(), fakePNG, "same girl, now beside a dragon", "Flux2-Klein")
+	raw, err := c.EditImage(context.Background(), "same girl, now beside a dragon", "seedream-5.0-lite",
+		[]string{pngRefURL}, ImageOptions{})
 	if err != nil {
 		t.Fatalf("EditImage: %v", err)
 	}
@@ -134,8 +155,8 @@ func TestEditImage(t *testing.T) {
 		t.Errorf("response = %q, want it to contain request_id", raw)
 	}
 
-	if got.envelope.Model != "Flux2-Klein" {
-		t.Errorf("envelope.model = %q, want Flux2-Klein", got.envelope.Model)
+	if got.envelope.Model != "seedream-5.0-lite" {
+		t.Errorf("envelope.model = %q, want seedream-5.0-lite", got.envelope.Model)
 	}
 	if got.accept != "application/json" {
 		t.Errorf("Accept = %q, want application/json on the image endpoints", got.accept)
@@ -143,14 +164,26 @@ func TestEditImage(t *testing.T) {
 	if got.envelope.Payload["prompt"] != "same girl, now beside a dragon" {
 		t.Errorf("envelope.payload[prompt] = %v, want the literal prompt", got.envelope.Payload["prompt"])
 	}
-	// Pin: the reference image goes in as inline base64, not as a URL.
-	// http.DetectContentType classifies the fake PNG as image/png.
-	dataURI, _ := got.envelope.Payload["image"].(string)
-	if !strings.HasPrefix(dataURI, "data:image/png;base64,") {
-		t.Errorf("envelope.payload[image] = %q, want a data:image/png;base64,... URI", dataURI)
+	// Pin: the references go in as an array of URL strings, verbatim,
+	// not as a data: URI and not as one bare string.
+	imgs, _ := got.envelope.Payload["image"].([]any)
+	if len(imgs) != 1 {
+		t.Fatalf("envelope.payload[image] = %v, want a one-element array of URL strings", got.envelope.Payload["image"])
 	}
-	if dataURI == "" || len(dataURI) < len("data:image/png;base64,")+8 {
-		t.Errorf("envelope.payload[image] = %q, want a non-trivial base64 payload", dataURI)
+	if imgs[0] != pngRefURL {
+		t.Errorf("envelope.payload[image][0] = %v, want %q carried verbatim", imgs[0], pngRefURL)
+	}
+	if got.envelope.Payload["size"] != DefaultImageSize {
+		t.Errorf("envelope.payload[size] = %v, want %q", got.envelope.Payload["size"], DefaultImageSize)
+	}
+	if got.envelope.Payload["output_format"] != DefaultImageFormat {
+		t.Errorf("envelope.payload[output_format] = %v, want %q", got.envelope.Payload["output_format"], DefaultImageFormat)
+	}
+	if got.envelope.Payload["max_images"] != float64(DefaultMaxImages) {
+		t.Errorf("envelope.payload[max_images] = %v, want %d", got.envelope.Payload["max_images"], DefaultMaxImages)
+	}
+	if got.envelope.Payload["watermark"] != false {
+		t.Errorf("envelope.payload[watermark] = %v, want false", got.envelope.Payload["watermark"])
 	}
 }
 
@@ -253,7 +286,7 @@ func TestUnauthorized(t *testing.T) {
 	t.Setenv("GMI_MEDIA_BASE_URL", srv.URL)
 
 	c := New()
-	_, err := c.GenerateImage(context.Background(), "x", "")
+	_, err := c.GenerateImage(context.Background(), "x", "", ImageOptions{})
 	if !errors.Is(err, gmi.ErrUnauthorized) {
 		t.Errorf("err = %v, want errors.Is(.., gmi.ErrUnauthorized)", err)
 	}
@@ -272,7 +305,7 @@ func TestBadRequest_400(t *testing.T) {
 	t.Setenv("GMI_MEDIA_BASE_URL", srv.URL)
 
 	c := New()
-	_, err := c.GenerateImage(context.Background(), "x", "")
+	_, err := c.GenerateImage(context.Background(), "x", "", ImageOptions{})
 	if err == nil {
 		t.Fatal("GenerateImage returned nil error on 400")
 	}
@@ -291,7 +324,7 @@ func TestMissingAPIKey(t *testing.T) {
 	t.Setenv("GMI_MEDIA_BASE_URL", "http://unused.invalid")
 
 	c := New()
-	_, err := c.GenerateImage(context.Background(), "x", "")
+	_, err := c.GenerateImage(context.Background(), "x", "", ImageOptions{})
 	if !errors.Is(err, gmi.ErrUnauthorized) {
 		t.Errorf("err = %v, want errors.Is(.., gmi.ErrUnauthorized)", err)
 	}
@@ -304,13 +337,13 @@ func TestEmptyInputs(t *testing.T) {
 	t.Setenv("GMI_MEDIA_BASE_URL", "http://unused.invalid")
 
 	c := New()
-	if _, err := c.GenerateImage(context.Background(), "", ""); err == nil {
+	if _, err := c.GenerateImage(context.Background(), "", "", ImageOptions{}); err == nil {
 		t.Error("GenerateImage accepted empty prompt")
 	}
-	if _, err := c.EditImage(context.Background(), nil, "x", ""); err == nil {
-		t.Error("EditImage accepted nil refImage")
+	if _, err := c.EditImage(context.Background(), "x", "seedream-5.0-lite", nil, ImageOptions{}); err == nil {
+		t.Error("EditImage accepted no reference image URLs")
 	}
-	if _, err := c.EditImage(context.Background(), fakePNG, "", ""); err == nil {
+	if _, err := c.EditImage(context.Background(), "", "seedream-5.0-lite", []string{pngRefURL}, ImageOptions{}); err == nil {
 		t.Error("EditImage accepted empty prompt")
 	}
 	if _, err := c.SynthesizeSpeech(context.Background(), "", "v", ""); err == nil {
@@ -345,11 +378,11 @@ func TestGenerateImage_DefaultModelPinnedInRawJSON(t *testing.T) {
 	t.Setenv("GMI_MEDIA_BASE_URL", srv.URL)
 
 	c := New()
-	if _, err := c.GenerateImage(context.Background(), "a small girl in a red coat", ""); err != nil {
+	if _, err := c.GenerateImage(context.Background(), "a small girl in a red coat", "", ImageOptions{}); err != nil {
 		t.Fatalf("GenerateImage: %v", err)
 	}
 
-	const want = `"model":"Flux2-Klein"`
+	const want = `"model":"seedream-5.0-lite"`
 	if !strings.Contains(string(raw), want) {
 		t.Errorf("raw body missing %q — the default model is the decision under test\nbody: %s", want, raw)
 	}
@@ -406,7 +439,7 @@ func TestEditImage_EmptyModelRejected(t *testing.T) {
 	t.Setenv("GMI_MEDIA_BASE_URL", srv.URL)
 
 	c := New()
-	_, err := c.EditImage(context.Background(), fakePNG, "same girl, now beside a dragon", "")
+	_, err := c.EditImage(context.Background(), "same girl, now beside a dragon", "", []string{pngRefURL}, ImageOptions{})
 	if !errors.Is(err, gmi.ErrBadRequest) {
 		t.Errorf("err = %v, want errors.Is(.., gmi.ErrBadRequest)", err)
 	}
@@ -430,7 +463,7 @@ func TestRetry_5xxHitTwice(t *testing.T) {
 	t.Setenv("GMI_MEDIA_BASE_URL", srv.URL)
 
 	c := New()
-	_, err := c.GenerateImage(context.Background(), "x", "Z-Image")
+	_, err := c.GenerateImage(context.Background(), "x", "Z-Image", ImageOptions{})
 	if !errors.Is(err, gmi.ErrTransient) {
 		t.Errorf("err = %v, want errors.Is(.., gmi.ErrTransient)", err)
 	}
@@ -459,7 +492,7 @@ func TestRetry_FailedStatusThenSuccess(t *testing.T) {
 	t.Setenv("GMI_MEDIA_BASE_URL", srv.URL)
 
 	c := New()
-	raw, err := c.GenerateImage(context.Background(), "x", "Z-Image")
+	raw, err := c.GenerateImage(context.Background(), "x", "Z-Image", ImageOptions{})
 	if err != nil {
 		t.Fatalf("GenerateImage: %v", err)
 	}
@@ -488,7 +521,7 @@ func TestRetry_FailedStatusBudgetSpent(t *testing.T) {
 	t.Setenv("GMI_MEDIA_BASE_URL", srv.URL)
 
 	c := New()
-	raw, err := c.GenerateImage(context.Background(), "x", "Z-Image")
+	raw, err := c.GenerateImage(context.Background(), "x", "Z-Image", ImageOptions{})
 	if !errors.Is(err, gmi.ErrTransient) {
 		t.Errorf("err = %v, want errors.Is(.., gmi.ErrTransient)", err)
 	}
@@ -518,7 +551,7 @@ func TestPayloadTooLarge_413(t *testing.T) {
 	t.Setenv("GMI_MEDIA_BASE_URL", srv.URL)
 
 	c := New()
-	raw, err := c.GenerateImage(context.Background(), "x", "Z-Image")
+	raw, err := c.GenerateImage(context.Background(), "x", "Z-Image", ImageOptions{})
 	if err == nil {
 		t.Fatal("GenerateImage returned nil error on 413")
 	}
@@ -553,7 +586,7 @@ func TestPaymentRequired_402(t *testing.T) {
 	t.Setenv("GMI_MEDIA_BASE_URL", srv.URL)
 
 	c := New()
-	_, err := c.GenerateImage(context.Background(), "x", "Z-Image")
+	_, err := c.GenerateImage(context.Background(), "x", "Z-Image", ImageOptions{})
 	if !errors.Is(err, gmi.ErrPaymentRequired) {
 		t.Errorf("err = %v, want errors.Is(.., gmi.ErrPaymentRequired)", err)
 	}
@@ -601,7 +634,7 @@ func TestClassifyStatus_Table(t *testing.T) {
 			t.Setenv("GMI_API_KEY", "k")
 			t.Setenv("GMI_MEDIA_BASE_URL", srv.URL)
 
-			_, err := New().GenerateImage(context.Background(), "x", "Z-Image")
+			_, err := New().GenerateImage(context.Background(), "x", "Z-Image", ImageOptions{})
 			if err == nil {
 				t.Fatal("GenerateImage returned nil error")
 			}
@@ -638,7 +671,7 @@ func TestNoRetryWhenContextDead(t *testing.T) {
 	defer cancel()
 
 	c := New()
-	_, err := c.GenerateImage(ctx, "x", "Z-Image")
+	_, err := c.GenerateImage(ctx, "x", "Z-Image", ImageOptions{})
 	if !errors.Is(err, gmi.ErrTransient) {
 		t.Errorf("err = %v, want errors.Is(.., gmi.ErrTransient)", err)
 	}
@@ -672,7 +705,7 @@ func TestDefaultDeadlineApplied(t *testing.T) {
 
 	rec := &deadlineRecorder{}
 	c := &Client{baseURL: "http://unused.invalid", httpClient: &http.Client{Transport: rec}}
-	if _, err := c.GenerateImage(context.Background(), "x", "Z-Image"); err != nil {
+	if _, err := c.GenerateImage(context.Background(), "x", "Z-Image", ImageOptions{}); err != nil {
 		t.Fatalf("GenerateImage: %v", err)
 	}
 	if !rec.hasOne {
@@ -692,7 +725,7 @@ func TestCallerDeadlineRespected(t *testing.T) {
 	c := &Client{baseURL: "http://unused.invalid", httpClient: &http.Client{Transport: rec}}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, err := c.GenerateImage(ctx, "x", "Z-Image"); err != nil {
+	if _, err := c.GenerateImage(ctx, "x", "Z-Image", ImageOptions{}); err != nil {
 		t.Fatalf("GenerateImage: %v", err)
 	}
 	if !rec.hasOne {

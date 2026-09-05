@@ -2,10 +2,12 @@ package illustrate
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"thutapi/internal/gmi"
+	"thutapi/internal/gmi/media"
 	"thutapi/internal/story"
 )
 
@@ -72,16 +75,86 @@ func pngBytes(tag string) []byte {
 	return b
 }
 
-// queueEnvelope wraps image bytes the way the GMI request queue
-// answers: a JSON record with the picture inside it, not raw bytes.
-// Confirmed live on 2026-09-05 — a completed TTS request came back as
-// {"request_id":...,"status":"success","outcome":{"audio_url":...}}.
-func queueEnvelope(img []byte) []byte {
+// fixtureMedia serves the bytes behind every fixture media URL. A
+// queue record's answer is a URL now (t6b-live-record.md §3), and the
+// renderer takes the bytes on receipt — decodeImage dereferences the
+// URL for real — so the fakes' responses must name a URL that
+// actually answers. One server serves the whole package's fixtures;
+// every tag gets its own path, so tests share it safely.
+var fixtureMedia = newMediaFixture()
+
+func TestMain(m *testing.M) {
+	defer fixtureMedia.Close()
+	os.Exit(m.Run())
+}
+
+type mediaFixture struct {
+	mu     sync.Mutex
+	srv    *httptest.Server
+	bodies map[string][]byte // path → the bytes served there
+	seq    int               // unique suffix for anonymous tags
+}
+
+func newMediaFixture() *mediaFixture {
+	f := &mediaFixture{bodies: map[string][]byte{}}
+	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		b, ok := f.bodies[r.URL.Path]
+		f.mu.Unlock()
+		if !ok {
+			// An unregistered path — the thumbnail tripwire among
+			// them — is a 404, so a decode that ever consults it
+			// fails loudly instead of quietly rendering it.
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(b)
+	}))
+	return f
+}
+
+// url registers a path serving pngBytes(tag) and returns its URL.
+// Safe to call from fan-out goroutines: the fakes build responses
+// under errgroup.
+func (f *mediaFixture) url(tag string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	path := "/" + tag
+	if _, ok := f.bodies[path]; !ok {
+		f.bodies[path] = pngBytes(tag)
+	}
+	return f.srv.URL + path
+}
+
+// serve registers the given bytes at a fresh path and returns its
+// URL, for tests that need several URLs with distinct content.
+func (f *mediaFixture) serve(tag string, b []byte) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.seq++
+	path := fmt.Sprintf("/%s-%d", tag, f.seq)
+	f.bodies[path] = b
+	return f.srv.URL + path
+}
+
+func (f *mediaFixture) Close() { f.srv.Close() }
+
+// queueEnvelope wraps a media URL the way the GMI request queue
+// answers (t6b-live-record.md §3): a JSON record whose payload is the
+// request echoed back — `{}` on the live i2i record — and whose
+// outcome carries media_urls, a LIST OF OBJECTS {"id","url"}, beside
+// thumbnail_image_url. The thumbnail names an unregistered path: if a
+// decode ever consults it, the fetch 404s and the test fails loudly,
+// which is the fixture-level tripwire for round 1 H1.
+func queueEnvelope(mediaURL string) []byte {
 	body, err := json.Marshal(map[string]any{
 		"request_id": "req-fixture",
 		"status":     "success",
+		"payload":    map[string]any{},
 		"outcome": map[string]any{
-			"image": "data:image/png;base64," + base64.StdEncoding.EncodeToString(img),
+			"media_urls":          []map[string]string{{"id": "0", "url": mediaURL}},
+			"thumbnail_image_url": mediaURL + "/thumbnail",
 		},
 	})
 	if err != nil {
@@ -95,7 +168,7 @@ type imagerCall struct {
 	kind   string // "generate" or "edit"
 	prompt string
 	model  string
-	ref    []byte
+	refs   []string // the reference sheet URLs an edit call carried
 }
 
 // fakeImager is illustrate's Imager, scripted. It exists because
@@ -110,8 +183,8 @@ type fakeImager struct {
 	// reference sheet completes before any page begins".
 	order []string
 
-	generate func(ctx context.Context, prompt, model string) ([]byte, error)
-	edit     func(ctx context.Context, ref []byte, prompt, model string) ([]byte, error)
+	generate func(ctx context.Context, prompt, model string, opts media.ImageOptions) ([]byte, error)
+	edit     func(ctx context.Context, prompt, model string, refImages []string, opts media.ImageOptions) ([]byte, error)
 }
 
 func (f *fakeImager) record(c imagerCall, mark string) {
@@ -127,22 +200,22 @@ func (f *fakeImager) mark(s string) {
 	f.order = append(f.order, s)
 }
 
-func (f *fakeImager) GenerateImage(ctx context.Context, prompt, model string) ([]byte, error) {
+func (f *fakeImager) GenerateImage(ctx context.Context, prompt, model string, opts media.ImageOptions) ([]byte, error) {
 	f.record(imagerCall{kind: "generate", prompt: prompt, model: model}, "gen:start")
 	defer f.mark("gen:end")
 	if f.generate != nil {
-		return f.generate(ctx, prompt, model)
+		return f.generate(ctx, prompt, model, opts)
 	}
-	return queueEnvelope(pngBytes("ref:" + prompt)), nil
+	return queueEnvelope(fixtureMedia.serve("sheet", pngBytes("sheet:"+prompt))), nil
 }
 
-func (f *fakeImager) EditImage(ctx context.Context, refImage []byte, prompt, model string) ([]byte, error) {
-	f.record(imagerCall{kind: "edit", prompt: prompt, model: model, ref: refImage}, "edit:start")
+func (f *fakeImager) EditImage(ctx context.Context, prompt, model string, refImages []string, opts media.ImageOptions) ([]byte, error) {
+	f.record(imagerCall{kind: "edit", prompt: prompt, model: model, refs: refImages}, "edit:start")
 	defer f.mark("edit:end")
 	if f.edit != nil {
-		return f.edit(ctx, refImage, prompt, model)
+		return f.edit(ctx, prompt, model, refImages, opts)
 	}
-	return queueEnvelope(pngBytes("page:" + prompt)), nil
+	return queueEnvelope(fixtureMedia.serve("page", pngBytes("page:"+prompt))), nil
 }
 
 // snapshot returns copies of the recorded calls and order, so a test
@@ -237,25 +310,45 @@ func TestIllustrate_ReferencesFinishBeforeAnyPageStarts(t *testing.T) {
 	}
 }
 
-// TestIllustrate_PagesUseTheirOwnReferenceSheetBytes is lock 2's
-// content half: the bytes attached to a page must be the bytes of
-// that page's reference sheet, not some other character's.
-func TestIllustrate_PagesUseTheirOwnReferenceSheetBytes(t *testing.T) {
+// TestIllustrate_PagesChainTheirOwnReferenceSheetURLs is lock 2's
+// content half: the reference URLs attached to a page must be the
+// URLs of that page's own sheets — every character the page names,
+// in named order, nobody else's — because those URLs are what
+// payload.image carries and what the model locks each character to
+// (t6b-live-record.md item 1b: multi-reference keeps every entity).
+func TestIllustrate_PagesChainTheirOwnReferenceSheetURLs(t *testing.T) {
+	miraURL := fixtureMedia.serve("sheet-mira", pngBytes("MIRA-SHEET"))
+	brambleURL := fixtureMedia.serve("sheet-bramble", pngBytes("BRAMBLE-SHEET"))
 	fake := &fakeImager{
-		generate: func(ctx context.Context, prompt, model string) ([]byte, error) {
-			// Each sheet gets distinguishable bytes, keyed on the
+		generate: func(ctx context.Context, prompt, model string, opts media.ImageOptions) ([]byte, error) {
+			// Each sheet gets a distinguishable URL, keyed on the
 			// character its prompt names.
 			switch {
 			case strings.Contains(prompt, "Mira"):
-				return queueEnvelope(pngBytes("MIRA-SHEET")), nil
+				return queueEnvelope(miraURL), nil
 			case strings.Contains(prompt, "Bramble"):
-				return queueEnvelope(pngBytes("BRAMBLE-SHEET")), nil
+				return queueEnvelope(brambleURL), nil
 			}
 			return nil, fmt.Errorf("unexpected reference prompt %q", prompt)
 		},
 	}
-	if _, err := Illustrate(context.Background(), Config{Imager: fake}, twoCastStory()); err != nil {
+	book, err := Illustrate(context.Background(), Config{Imager: fake}, twoCastStory())
+	if err != nil {
 		t.Fatalf("Illustrate: %v", err)
+	}
+	// The sheets the book carries are the bytes behind those URLs:
+	// dereferenced on receipt, with the URL kept for chaining.
+	for _, ref := range book.References {
+		if ref.URL == "" {
+			t.Errorf("reference %q carries no URL — there is nothing to chain into its page renders", ref.Name)
+		}
+		want := pngBytes("MIRA-SHEET")
+		if ref.Name == "Bramble" {
+			want = pngBytes("BRAMBLE-SHEET")
+		}
+		if string(ref.Image) != string(want) {
+			t.Errorf("reference %q image = %.20q, want the bytes served at its URL", ref.Name, ref.Image)
+		}
 	}
 	calls, _ := fake.snapshot()
 	var edits []imagerCall
@@ -267,17 +360,17 @@ func TestIllustrate_PagesUseTheirOwnReferenceSheetBytes(t *testing.T) {
 	if len(edits) != 2 {
 		t.Fatalf("edit calls = %d, want 2", len(edits))
 	}
-	want := map[string][]byte{
-		"Mira opens the garden gate.":             pngBytes("MIRA-SHEET"),
-		"Bramble digs a hole while Mira watches.": pngBytes("BRAMBLE-SHEET"),
+	want := map[string][]string{
+		"Mira opens the garden gate.":             {miraURL},
+		"Bramble digs a hole while Mira watches.": {brambleURL, miraURL}, // named order: Bramble first
 	}
 	for _, e := range edits {
 		matched := false
-		for lead, sheet := range want {
+		for lead, urls := range want {
 			if strings.HasPrefix(e.prompt, lead) {
 				matched = true
-				if string(e.ref) != string(sheet) {
-					t.Errorf("page %q was rendered against %q, want %q", lead, e.ref, sheet)
+				if strings.Join(e.refs, " ") != strings.Join(urls, " ") {
+					t.Errorf("page %q was rendered against %v, want %v", lead, e.refs, urls)
 				}
 			}
 		}
@@ -344,14 +437,23 @@ func TestIllustrate_DefaultModelReachesBothCallKinds(t *testing.T) {
 // one-line test for a one-line defect that survived two review rounds
 // and would have removed the whole of lock 2.
 func TestDefaultModelIsNotForbidden(t *testing.T) {
-	if DefaultModel != "Flux2-Klein" {
-		t.Errorf("DefaultModel = %q, want Flux2-Klein (project.md §3 \"Start on\")", DefaultModel)
+	if DefaultModel != "seedream-5.0-lite" {
+		t.Errorf("DefaultModel = %q, want seedream-5.0-lite (t6b-live-record.md: the one model measured generating)", DefaultModel)
 	}
 	if IsForbiddenModel(DefaultModel) {
 		t.Errorf("DefaultModel %q is on the forbidden list", DefaultModel)
 	}
 }
 
+// TestIsForbiddenModel pins the guard over the NORMALISED id
+// (t6-round1.md M1): a vendor or registry prefix, a trailing
+// separator and a tag suffix name the same upstream model and are
+// the same refusal, and so is any video-model spelling — PLAN.md
+// §T6's forbidden table reads "H3 / any video model", so the stems
+// cover the family, not one literal id. The dead ids T6b measured
+// (Flux2-Klein, Z-Image — they accept and never generate) are refused
+// under decorated spellings too. The sanctioned ids (DefaultModel,
+// gemini-2.5-flash-image) stay admissible.
 func TestIsForbiddenModel(t *testing.T) {
 	tests := []struct {
 		model string
@@ -360,9 +462,19 @@ func TestIsForbiddenModel(t *testing.T) {
 		{"Qwen-Image-2512", true},
 		{"qwen-image-2512", true},   // a case variant is the same upstream model
 		{" Qwen-Image-2512 ", true}, // and so is a padded one
+		{"Qwen/Qwen-Image-2512", true},
+		{"MiniMaxAI/Qwen-Image-2512", true},
+		{"Qwen-Image-2512/", true},
+		{"qwen-image-2512:latest", true},
 		{"H3", true},
-		{"Flux2-Klein", false},
-		{"Z-Image", false},
+		{"H3-2", true},
+		{"MiniMax-Hailuo-02", true},
+		{"minimax-video-01", true},                  // the "video" stem: PLAN.md §T6's "any video model"
+		{"MiniMaxAI/minimax-video-01:latest", true}, // decorated video ids refuse too
+		{"Flux2-Klein", true},                       // T6b: accepts, never generates (t6b-live-record.md §1)
+		{"registry/Flux2-Klein", true},              // a decorated dead id is the same dead id
+		{"Z-Image", true},                           // T6b: same
+		{"z-image:latest", true},
 		{"gemini-2.5-flash-image", false},
 		{"", false}, // empty is not forbidden; it is defaulted before this check
 	}
@@ -380,7 +492,7 @@ func TestIsForbiddenModel(t *testing.T) {
 // callable id, so an image-to-image call against it succeeds and
 // silently drops the reference. The only place to stop it is here.
 func TestIllustrate_ForbiddenModelRefusedBeforeAnyCall(t *testing.T) {
-	for _, model := range []string{"Qwen-Image-2512", "qwen-image-2512", "H3"} {
+	for _, model := range []string{"Qwen-Image-2512", "qwen-image-2512", "MiniMaxAI/Qwen-Image-2512", "H3", "H3-2", "Flux2-Klein", "Z-Image"} {
 		t.Run(model, func(t *testing.T) {
 			fake := &fakeImager{}
 			_, err := Illustrate(context.Background(), Config{Imager: fake, Model: model}, twoCastStory())
@@ -410,7 +522,7 @@ func TestIllustrate_DefaultLimitBoundsTheFanOut(t *testing.T) {
 	gate := make(chan struct{})
 	var once sync.Once
 	fake := &fakeImager{
-		edit: func(ctx context.Context, ref []byte, prompt, model string) ([]byte, error) {
+		edit: func(ctx context.Context, prompt, model string, refImages []string, opts media.ImageOptions) ([]byte, error) {
 			n := inFlight.Add(1)
 			defer inFlight.Add(-1)
 			for {
@@ -427,7 +539,7 @@ func TestIllustrate_DefaultLimitBoundsTheFanOut(t *testing.T) {
 			case <-time.After(10 * time.Second):
 				return nil, errors.New("timed out waiting for the fan-out to reach the limit")
 			}
-			return queueEnvelope(pngBytes("page:" + prompt)), nil
+			return queueEnvelope(fixtureMedia.serve("page", pngBytes("page:"+prompt))), nil
 		},
 	}
 	// Config.Limit deliberately left zero.
@@ -449,7 +561,7 @@ func TestIllustrate_ExplicitLimitIsHonoured(t *testing.T) {
 	}
 	var inFlight, peak atomic.Int32
 	fake := &fakeImager{
-		edit: func(ctx context.Context, ref []byte, prompt, model string) ([]byte, error) {
+		edit: func(ctx context.Context, prompt, model string, refImages []string, opts media.ImageOptions) ([]byte, error) {
 			n := inFlight.Add(1)
 			defer inFlight.Add(-1)
 			for {
@@ -459,7 +571,7 @@ func TestIllustrate_ExplicitLimitIsHonoured(t *testing.T) {
 				}
 			}
 			time.Sleep(2 * time.Millisecond)
-			return queueEnvelope(pngBytes("page:" + prompt)), nil
+			return queueEnvelope(fixtureMedia.serve("page", pngBytes("page:"+prompt))), nil
 		},
 	}
 	if _, err := Illustrate(context.Background(), Config{Imager: fake, Limit: 1}, s); err != nil {
@@ -670,7 +782,10 @@ func TestIllustrate_ErrorBranches(t *testing.T) {
 
 // TestIllustrate_GMISentinelsSurvive pins PLAN.md invariant 8 across
 // this package's boundary: an internal/gmi sentinel reaches the
-// caller matchable with errors.Is, never as a matched substring.
+// caller matchable with errors.Is, never as a matched substring —
+// and, per the zero-Book contract, an error never carries a partial
+// book with it (t6-round1.md M2: these render paths are exactly
+// where a caller is most likely to be handed a half-book).
 func TestIllustrate_GMISentinelsSurvive(t *testing.T) {
 	sentinels := []error{
 		gmi.ErrModelNotFound,
@@ -683,22 +798,24 @@ func TestIllustrate_GMISentinelsSurvive(t *testing.T) {
 	for _, want := range sentinels {
 		t.Run(want.Error(), func(t *testing.T) {
 			t.Run("from a reference sheet", func(t *testing.T) {
-				fake := &fakeImager{generate: func(ctx context.Context, prompt, model string) ([]byte, error) {
+				fake := &fakeImager{generate: func(ctx context.Context, prompt, model string, opts media.ImageOptions) ([]byte, error) {
 					return nil, fmt.Errorf("media: %w: upstream said so", want)
 				}}
-				_, err := Illustrate(context.Background(), Config{Imager: fake}, twoCastStory())
+				book, err := Illustrate(context.Background(), Config{Imager: fake}, twoCastStory())
 				if !errors.Is(err, want) {
 					t.Fatalf("err = %v, want %v", err, want)
 				}
+				assertZeroBook(t, book)
 			})
 			t.Run("from a page", func(t *testing.T) {
-				fake := &fakeImager{edit: func(ctx context.Context, ref []byte, prompt, model string) ([]byte, error) {
+				fake := &fakeImager{edit: func(ctx context.Context, prompt, model string, refImages []string, opts media.ImageOptions) ([]byte, error) {
 					return nil, fmt.Errorf("media: %w: upstream said so", want)
 				}}
-				_, err := Illustrate(context.Background(), Config{Imager: fake}, twoCastStory())
+				book, err := Illustrate(context.Background(), Config{Imager: fake}, twoCastStory())
 				if !errors.Is(err, want) {
 					t.Fatalf("err = %v, want %v", err, want)
 				}
+				assertZeroBook(t, book)
 			})
 		})
 	}
@@ -711,7 +828,7 @@ func TestIllustrate_GMISentinelsSurvive(t *testing.T) {
 func TestIllustrate_NoSecondRetryLayer(t *testing.T) {
 	var gens, edits atomic.Int32
 	fake := &fakeImager{
-		generate: func(ctx context.Context, prompt, model string) ([]byte, error) {
+		generate: func(ctx context.Context, prompt, model string, opts media.ImageOptions) ([]byte, error) {
 			gens.Add(1)
 			return nil, fmt.Errorf("boom: %w", gmi.ErrTransient)
 		},
@@ -725,7 +842,7 @@ func TestIllustrate_NoSecondRetryLayer(t *testing.T) {
 
 	gens.Store(0)
 	fake2 := &fakeImager{
-		edit: func(ctx context.Context, ref []byte, prompt, model string) ([]byte, error) {
+		edit: func(ctx context.Context, prompt, model string, refImages []string, opts media.ImageOptions) ([]byte, error) {
 			edits.Add(1)
 			return nil, fmt.Errorf("boom: %w", gmi.ErrTransient)
 		},
@@ -749,7 +866,7 @@ func TestIllustrate_FirstFailureCancelsTheRest(t *testing.T) {
 	}
 	var seen, sawCancel atomic.Int32
 	fake := &fakeImager{
-		edit: func(ctx context.Context, ref []byte, prompt, model string) ([]byte, error) {
+		edit: func(ctx context.Context, prompt, model string, refImages []string, opts media.ImageOptions) ([]byte, error) {
 			if ctx.Err() != nil {
 				// This is the assertion that matters: every render
 				// after the first failure is handed an already-dead
@@ -761,7 +878,7 @@ func TestIllustrate_FirstFailureCancelsTheRest(t *testing.T) {
 			if seen.Add(1) == 1 {
 				return nil, fmt.Errorf("boom: %w", gmi.ErrBadRequest)
 			}
-			return queueEnvelope(pngBytes("page")), nil
+			return queueEnvelope(fixtureMedia.serve("page", pngBytes("page"))), nil
 		},
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -782,7 +899,7 @@ func TestIllustrate_FirstFailureCancelsTheRest(t *testing.T) {
 // swallowed into a partial book.
 func TestIllustrate_ContextCancellationSurfaces(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	fake := &fakeImager{generate: func(ctx context.Context, prompt, model string) ([]byte, error) {
+	fake := &fakeImager{generate: func(ctx context.Context, prompt, model string, opts media.ImageOptions) ([]byte, error) {
 		cancel()
 		return nil, ctx.Err()
 	}}
@@ -856,6 +973,47 @@ func TestIllustrate_LiveHazardStoryEndToEnd(t *testing.T) {
 	}
 }
 
+// TestIllustrate_DrawableCharactersWithAbsenceWordsRender is H3's
+// whole-book pin: a ghost with no face, a faceless rag doll and a
+// snowman are the cast of a six-year-old's story, and under the old
+// substring match the word "no face" alone was enough for Illustrate
+// to return no book at all. Every page names only its hazard
+// character, so a single false skip fails the run.
+func TestIllustrate_DrawableCharactersWithAbsenceWordsRender(t *testing.T) {
+	s := story.Story{
+		Title: "Boo's Quiet Day",
+		Cast: []story.CastMember{
+			{Name: "Boo", Visual: "a shy little ghost with no face, just two floating eyes and a wobbly white sheet"},
+			{Name: "Dolly", Visual: "a faceless rag doll with button eyes sewn on crooked"},
+			{Name: "Snowy", Visual: "a snowman in a top hat who is never seen without his red scarf"},
+		},
+		Pages: []story.Page{
+			page(1, "Boo floats through the wall.", "Boo"),
+			page(2, "Dolly waves a crooked arm.", "Dolly"),
+			page(3, "Snowy sleds down the hill.", "Snowy"),
+		},
+	}
+	fake := &fakeImager{}
+	book, err := Illustrate(context.Background(), Config{Imager: fake}, s)
+	if err != nil {
+		t.Fatalf("Illustrate: %v", err)
+	}
+	if len(book.References) != 3 {
+		t.Fatalf("References = %v, want 3 — each of these characters is drawable in one line", refNames(book.References))
+	}
+	if len(book.Pages) != 3 {
+		t.Fatalf("Pages = %d, want 3", len(book.Pages))
+	}
+	for i, want := range []string{"Boo", "Dolly", "Snowy"} {
+		if book.Pages[i].Reference != want {
+			t.Errorf("page %d rendered against %q, want %q", book.Pages[i].N, book.Pages[i].Reference, want)
+		}
+	}
+	if len(book.Skipped) != 0 {
+		t.Errorf("Skipped = %+v, want none: absence words mid-description are not absence assertions", book.Skipped)
+	}
+}
+
 func refNames(refs []Reference) []string {
 	out := make([]string, 0, len(refs))
 	for _, r := range refs {
@@ -864,27 +1022,41 @@ func refNames(refs []Reference) []string {
 	return out
 }
 
+// assertZeroBook fails t unless book is the zero Book: Illustrate's
+// contract is that an error never carries a partial book
+// (t6-round1.md M2 — unpinned on the render paths, where a mutant
+// returning the sheets beside the error survived the whole suite).
+func assertZeroBook(t *testing.T, book Book) {
+	t.Helper()
+	if book.References != nil || book.Pages != nil || book.Skipped != nil {
+		t.Errorf("book = %+v beside a non-nil error, want the zero Book", book)
+	}
+}
+
 // TestIllustrate_UndecodableResponses covers the branch between a
 // successful call and a usable picture: the provider answered, and
-// what came back has no image in it. Both call kinds must fail loudly
-// rather than carry an empty Reference into the next phase.
+// what came back has no image in it. Both call kinds must fail
+// loudly, with the zero Book, rather than carry an empty Reference
+// into the next phase.
 func TestIllustrate_UndecodableResponses(t *testing.T) {
 	t.Run("reference sheet", func(t *testing.T) {
-		fake := &fakeImager{generate: func(ctx context.Context, prompt, model string) ([]byte, error) {
+		fake := &fakeImager{generate: func(ctx context.Context, prompt, model string, opts media.ImageOptions) ([]byte, error) {
 			return []byte(`{"request_id":"r1","status":"success","outcome":{}}`), nil
 		}}
-		_, err := Illustrate(context.Background(), Config{Imager: fake}, twoCastStory())
+		book, err := Illustrate(context.Background(), Config{Imager: fake}, twoCastStory())
 		if !errors.Is(err, ErrNoImage) {
 			t.Fatalf("err = %v, want ErrNoImage", err)
 		}
+		assertZeroBook(t, book)
 	})
 	t.Run("page", func(t *testing.T) {
-		fake := &fakeImager{edit: func(ctx context.Context, ref []byte, prompt, model string) ([]byte, error) {
+		fake := &fakeImager{edit: func(ctx context.Context, prompt, model string, refImages []string, opts media.ImageOptions) ([]byte, error) {
 			return gifBytes(), nil
 		}}
-		_, err := Illustrate(context.Background(), Config{Imager: fake}, twoCastStory())
+		book, err := Illustrate(context.Background(), Config{Imager: fake}, twoCastStory())
 		if !errors.Is(err, ErrUnsupportedImage) {
 			t.Fatalf("err = %v, want ErrUnsupportedImage", err)
 		}
+		assertZeroBook(t, book)
 	})
 }

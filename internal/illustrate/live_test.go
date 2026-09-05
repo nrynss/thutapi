@@ -1,26 +1,33 @@
 //go:build live
 
-// Live probes for T6b item 1: the terminal request-queue record shape for
-// image calls. One GenerateImage call followed by one EditImage call that
-// uses the generated PNG as its reference — both against Flux2-Klein
-// (~$0.02 total, operator-sanctioned 2026-09-05). The point is the
-// envelope's shape, not the picture: does the record echo the submitted
-// payload back, and does the result arrive inline or as a URL under
-// outcome? That decides whether t6-round1.md H1 is Critical or High and
-// hands the remediation agent the real response shape. Run with:
+// Live probe for the post-remediation shape of an image generation: one
+// GenerateImage call (t2i) followed by one EditImage call whose reference is
+// the generated image's own media_urls[0].url — the exact chain
+// internal/illustrate renders a book with (t6b-live-record.md §4, item 1b).
+// Model: seedream-5.0-lite, the one measured generating (the T6b item-1 probe
+// against Flux2-Klein/Z-Image proved those ids accept and never run).
+//
+// What this verifies against production, not a fixture:
+//  1. the t2i record's result is a URL under outcome.media_urls[].url;
+//  2. that URL is publicly fetchable and feeds straight back into
+//     payload.image as an array element;
+//  3. the i2i record echoes the submitted payload (the URL array) and the
+//     render decodes from outcome again, never from the echo — round-1 H1's
+//     exact failure mode, now with URLs in the echo instead of bytes;
+//  4. the rendered bytes differ from the reference: a real edit happened.
+//
+// Run with:
 //
 //	set -a; . ./.env; set +a
-//	go test -tags live -run TestLiveGenerateThenEdit -v ./internal/illustrate/
+//	go test -tags live -run TestLiveURLChaining -v ./internal/illustrate/
 //
-// The rendered PNGs land in data/live/ (gitignored) as eyeball evidence for
-// the record file; the record's JSON shape is logged and pasted into
-// dev-diary/adversarial-review/t6b-live-record.md.
+// The rendered PNGs land in data/live/ (gitignored) as eyeball evidence; the
+// record's JSON shape is logged for the operator record.
 package illustrate
 
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -32,11 +39,12 @@ import (
 	"thutapi/internal/gmi/media"
 )
 
-// queueRecord mirrors the terminal request-queue envelope's documented top
-// level. Payload and Outcome stay raw so the probe records their shape
+// liveQueueRecord mirrors the terminal request-queue envelope's documented
+// top level. Payload and Outcome stay raw so the probe records their shape
 // verbatim instead of trusting a decode of it — the decoder under suspicion
-// is exactly the thing this probe must not depend on.
-type queueRecord struct {
+// is exactly the thing this probe must not depend on. (Named for the live
+// tag: the package's own queueRecord already models the outcome half.)
+type liveQueueRecord struct {
 	RequestID string          `json:"request_id"`
 	Model     string          `json:"model"`
 	Status    string          `json:"status"`
@@ -51,16 +59,15 @@ func liveMediaClient(t *testing.T) *media.Client {
 	if os.Getenv("GMI_API_KEY") == "" {
 		t.Skip("GMI_API_KEY not set")
 	}
-	// The default poll budget is 120s; the live image queue was observed
-	// still `queued` at 120s on the first run of this probe (request
-	// 88d7ffdc-707f-4694-8456-8b93037ae5ea), so give it ten minutes.
+	// A seedream image answers synchronously on the POST (~15-45s), but
+	// keep the generous poll budget in case the queue parks the job.
 	return media.NewWithPoll(media.PollConfig{Timeout: 10 * time.Minute})
 }
 
 // dumpRecord logs the shape facts the record file needs: top-level keys,
 // whether payload is echoed, the outcome subtree verbatim, and the byte size
 // of the payload echo.
-func dumpRecord(t *testing.T, phase string, raw []byte) queueRecord {
+func dumpRecord(t *testing.T, phase string, raw []byte) liveQueueRecord {
 	t.Helper()
 
 	var keys map[string]json.RawMessage
@@ -73,7 +80,7 @@ func dumpRecord(t *testing.T, phase string, raw []byte) queueRecord {
 	}
 	t.Logf("%s: top-level keys (%d): %v", phase, len(names), names)
 
-	var rec queueRecord
+	var rec liveQueueRecord
 	if err := json.Unmarshal(raw, &rec); err != nil {
 		t.Fatalf("%s: terminal record does not match the documented envelope: %v", phase, err)
 	}
@@ -86,80 +93,76 @@ func dumpRecord(t *testing.T, phase string, raw []byte) queueRecord {
 	return rec
 }
 
-// extractImage gets the rendered PNG out of the terminal record without
-// decodeImage: inline data: URI under outcome, or a URL fetched from GMI's
-// public bucket (the T2b record confirmed bucket objects are publicly
-// fetchable). The bytes are asserted to start with the PNG magic and written
-// to data/live/ for the operator's eyeball.
-func extractImage(t *testing.T, phase string, rec queueRecord) []byte {
+// extractImage gets the rendered PNG and its URL out of the terminal record
+// by name — outcome.media_urls, a list of objects {"id","url"} — fetching
+// the first entry's URL from GMI's public bucket (t2b confirmed bucket
+// objects are publicly fetchable). The thumbnail_image_url beside it is
+// deliberately never consulted. The bytes are asserted to start with the PNG
+// magic and written to data/live/ for the operator's eyeball.
+func extractImage(t *testing.T, phase string, rec liveQueueRecord) (png []byte, url string) {
 	t.Helper()
 
 	var outcome struct {
-		Image    string `json:"image"`
-		ImageURL string `json:"image_url"`
+		MediaURLs []struct {
+			URL string `json:"url"`
+		} `json:"media_urls"`
+		ThumbnailImageURL string `json:"thumbnail_image_url"`
 	}
 	if err := json.Unmarshal(rec.Outcome, &outcome); err != nil {
 		t.Fatalf("%s: outcome does not decode: %v (outcome verbatim: %s)", phase, err, rec.Outcome)
 	}
-
-	var png []byte
-	switch {
-	case outcome.Image != "":
-		t.Logf("%s: result arrived INLINE under outcome.image (%d chars)", phase, len(outcome.Image))
-		const prefix = "data:image/png;base64,"
-		if len(outcome.Image) <= len(prefix) || outcome.Image[:len(prefix)] != prefix {
-			t.Fatalf("%s: outcome.image is not a data:image/png;base64 URI (prefix: %.40q)", phase, outcome.Image)
-		}
-		decoded, err := base64.StdEncoding.DecodeString(outcome.Image[len(prefix):])
-		if err != nil {
-			t.Fatalf("%s: outcome.image does not base64-decode: %v", phase, err)
-		}
-		png = decoded
-	case outcome.ImageURL != "":
-		t.Logf("%s: result arrived as a URL under outcome.image_url", phase)
-		resp, err := http.Get(outcome.ImageURL) //nolint:noctx // live probe, bounded below
-		if err != nil {
-			t.Fatalf("%s: fetching outcome.image_url failed: %v", phase, err)
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("%s: fetching outcome.image_url: HTTP %d", phase, resp.StatusCode)
-		}
-		t.Logf("%s: image_url fetch: HTTP %d content-type=%q", phase, resp.StatusCode, resp.Header.Get("Content-Type"))
-		body, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
-		if err != nil {
-			t.Fatalf("%s: reading image_url body failed: %v", phase, err)
-		}
-		png = body
-	default:
-		t.Fatalf("%s: outcome carries neither image nor image_url (verbatim: %s)", phase, rec.Outcome)
+	if len(outcome.MediaURLs) == 0 {
+		t.Fatalf("%s: outcome.media_urls is empty (verbatim: %s)", phase, rec.Outcome)
+	}
+	url = outcome.MediaURLs[0].URL
+	if url == "" {
+		t.Fatalf("%s: outcome.media_urls[0].url is empty", phase)
+	}
+	t.Logf("%s: result at outcome.media_urls[0].url: %s", phase, url)
+	if outcome.ThumbnailImageURL != "" {
+		t.Logf("%s: thumbnail_image_url present (%s) and NOT consulted", phase, outcome.ThumbnailImageURL)
 	}
 
-	if !bytes.HasPrefix(png, []byte("\x89PNG\r\n\x1a\n")) {
-		t.Fatalf("%s: extracted %d bytes do not start with the PNG magic (first 16: %.16q)", phase, len(png), png)
+	resp, err := http.Get(url) //nolint:noctx,gosec // live probe; URL from the authenticated queue's own answer
+	if err != nil {
+		t.Fatalf("%s: fetching media_urls[0].url failed: %v", phase, err)
 	}
-	t.Logf("%s: PNG extracted: %d bytes", phase, len(png))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("%s: fetching media_urls[0].url: HTTP %d", phase, resp.StatusCode)
+	}
+	t.Logf("%s: fetch: HTTP %d content-type=%q", phase, resp.StatusCode, resp.Header.Get("Content-Type"))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+	if err != nil {
+		t.Fatalf("%s: reading body failed: %v", phase, err)
+	}
+	if !bytes.HasPrefix(body, []byte("\x89PNG\r\n\x1a\n")) {
+		t.Fatalf("%s: fetched %d bytes do not start with the PNG magic (first 16: %.16q)", phase, len(body), body)
+	}
+	t.Logf("%s: PNG fetched: %d bytes", phase, len(body))
 
 	dir := filepath.Join("data", "live")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("%s: creating data/live failed: %v", phase, err)
 	}
 	path := filepath.Join(dir, "t6b-"+phase+".png")
-	if err := os.WriteFile(path, png, 0o644); err != nil {
+	if err := os.WriteFile(path, body, 0o644); err != nil {
 		t.Fatalf("%s: writing %s failed: %v", phase, path, err)
 	}
 	t.Logf("%s: saved %s", phase, path)
-	return png
+	return body, url
 }
 
-// TestLiveGenerateThenEdit is T6b item 1: generate a PNG, then edit it with
-// the generated PNG as the reference, recording both terminal envelopes.
-func TestLiveGenerateThenEdit(t *testing.T) {
+// TestLiveURLChaining drives the exact chain the renderer uses: a t2i sheet,
+// then an i2i page whose reference array carries the sheet's own URL.
+func TestLiveURLChaining(t *testing.T) {
 	c := liveMediaClient(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
 
-	genRaw, err := c.GenerateImage(ctx, "a single flat red circle centered on a plain white background, thick black outline, children's picture book style", "Flux2-Klein")
+	genRaw, err := c.GenerateImage(ctx,
+		"a single flat red circle centered on a plain white background, thick black outline, children's picture book style",
+		"seedream-5.0-lite", media.ImageOptions{})
 	if err != nil {
 		t.Fatalf("GenerateImage: %v", err)
 	}
@@ -168,9 +171,11 @@ func TestLiveGenerateThenEdit(t *testing.T) {
 	if genRec.Status != "success" {
 		t.Fatalf("generate: status = %q, want success", genRec.Status)
 	}
-	genPNG := extractImage(t, "generate", genRec)
+	genPNG, sheetURL := extractImage(t, "generate", genRec)
 
-	editRaw, err := c.EditImage(ctx, genPNG, "change the circle's colour from red to blue. Keep everything else on the page exactly the same: the white background, the black outline, the composition.", "Flux2-Klein")
+	editRaw, err := c.EditImage(ctx,
+		"change the circle's colour from red to blue. Keep everything else on the page exactly the same: the white background, the black outline, the composition.",
+		"seedream-5.0-lite", []string{sheetURL}, media.ImageOptions{})
 	if err != nil {
 		t.Fatalf("EditImage: %v", err)
 	}
@@ -179,10 +184,18 @@ func TestLiveGenerateThenEdit(t *testing.T) {
 	if editRec.Status != "success" {
 		t.Fatalf("edit: status = %q, want success", editRec.Status)
 	}
-	editPNG := extractImage(t, "edit", editRec)
-
+	// The i2i echo must repeat the submitted reference URL array (H1's
+	// mechanism, now URL-shaped); assert it is there, then prove the
+	// decode still picked the outcome, never the echo.
+	if !bytes.Contains(editRec.Payload, []byte(sheetURL)) {
+		t.Errorf("edit: the echoed payload does not carry the reference URL %s — H1's echo mechanism is not present in this record", sheetURL)
+	}
+	editPNG, editURL := extractImage(t, "edit", editRec)
+	if editURL == sheetURL {
+		t.Logf("edit: media_urls URL equals the reference URL — worth recording")
+	}
 	if bytes.Equal(genPNG, editPNG) {
-		t.Logf("edit: rendered bytes are identical to the reference — the echo case t6-round1 H1 predicts")
+		t.Errorf("edit: rendered bytes are identical to the reference — the decode may have picked the echo (round-1 H1)")
 	} else {
 		t.Logf("edit: rendered bytes differ from the reference (%d vs %d bytes) — a real edit", len(genPNG), len(editPNG))
 	}

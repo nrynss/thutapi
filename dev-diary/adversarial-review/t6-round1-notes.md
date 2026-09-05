@@ -33,10 +33,14 @@ says "Fan out with `errgroup`, bounded to ~4 concurrent"; AGENTS.md
 both name `golang.org/x/sync/errgroup` as one of the two sanctioned
 third-party dependencies. The dependency was therefore already
 approved by three documents — it had simply never been required by a
-package before, so it sat in `go.mod` as an `// indirect` line. The
-edit promotes it to a direct require. `go.sum` already carried the
-hashes and is **unchanged**; `git diff --stat` is `go.mod | 5 ++++-`
-and nothing else.
+package before. Correction (t6-round1.md L1): the require line is
+**new**, not a promotion — `golang.org/x/sync` appears nowhere in the
+pre-T6 `go.mod` (`git show aaf33bc:go.mod | grep -c golang.org/x/sync`
+is 0), neither in the direct block nor as an `// indirect` line; the
+edit adds it as a direct require. `go.sum` already carried the hashes
+— the module sits in `modernc.org/sqlite`'s graph — and is
+**unchanged**; `git diff --stat` is `go.mod | 5 ++++-` and nothing
+else.
 
 The alternative — hand-rolling a semaphore to avoid touching `go.mod` —
 would have violated an explicit AGENTS.md rule to preserve a seam

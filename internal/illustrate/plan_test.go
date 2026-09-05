@@ -1,6 +1,7 @@
 package illustrate
 
 import (
+	"reflect"
 	"testing"
 
 	"thutapi/internal/story"
@@ -27,6 +28,15 @@ const (
 	liveHappyRiverVisual  = "the same wide blue river, now smiling brightly with sparkles and bubbles dancing on its surface"
 )
 
+// TestNeedsReferenceSheet is H3's both-directions table
+// (t6-round1.md). Down one side: a member whose visual ASSERTS no
+// appearance — two live narrator phrasings, placeholders, clause-
+// and whole-visual anchored — costs no sheet. Down the other: a
+// member whose visual merely CONTAINS an absence word mid-description
+// is a drawable character, because a ghost "with no face", a snowman
+// "never seen without his red scarf" and a boy "in an invisible
+// cloak" are a six-year-old's cast, and under the old substring
+// match one of those words failed the whole book.
 func TestNeedsReferenceSheet(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -46,7 +56,13 @@ func TestNeedsReferenceSheet(t *testing.T) {
 		{"trailing period on phrase", story.CastMember{Name: "Voice", Visual: "No visual."}, false},
 		{"mixed case phrase", story.CastMember{Name: "Voice", Visual: "An UNSEEN narrator, never seen on the page"}, false},
 		{"voice only", story.CastMember{Name: "Radio", Visual: "voice only, heard from the kitchen"}, false},
-		{"documented false positive", story.CastMember{Name: "Ghost Boy", Visual: "an invisible boy in a blue coat"}, false},
+		{"absence asserted at a clause head", story.CastMember{Name: "Voice", Visual: "a warm presence, but no visual"}, false},
+		{"absence asserted whole-visual", story.CastMember{Name: "Ghost", Visual: "not shown in the story, only heard"}, false},
+		{"ghost with no face is drawable", story.CastMember{Name: "Boo", Visual: "a shy little ghost with no face, just two floating eyes and a wobbly white sheet"}, true},
+		{"faceless rag doll is drawable", story.CastMember{Name: "Dolly", Visual: "a faceless rag doll with button eyes sewn on crooked"}, true},
+		{"snowman never seen without his scarf is drawable", story.CastMember{Name: "Snowy", Visual: "a snowman in a top hat who is never seen without his red scarf"}, true},
+		{"boy in an invisible cloak is drawable", story.CastMember{Name: "Will", Visual: "a boy in an invisible cloak, only his boots showing"}, true},
+		{"invisibility described is an appearance", story.CastMember{Name: "Ghost Boy", Visual: "an invisible boy in a blue coat"}, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -141,6 +157,97 @@ func TestPlanReferences_NoBackReferenceKeepsSeparateSheets(t *testing.T) {
 	}
 	if len(plan.Skipped) != 0 {
 		t.Errorf("Skipped = %+v, want none", plan.Skipped)
+	}
+}
+
+// TestPlanReferences_VariantNeedsIdentityEvidence is round 1 H2's
+// corpus — the T5b live cast plus the reviewer's probes. A
+// back-reference marker alone never fuses, and neither does a shared
+// token: fusion needs the "the same <noun>" construction to head
+// with the anchor's own head noun ("the same wide blue river" heads
+// with river, the anchor's kind), or the two names to be aliases of
+// one referent. A shared species word, a comparison, a possessive
+// mention and a dog measured against the girl are different
+// characters, and each anchors a sheet of their own; the river pair
+// fuses, deterministically onto the earlier cast member.
+func TestPlanReferences_VariantNeedsIdentityEvidence(t *testing.T) {
+	tests := []struct {
+		name        string
+		cast        []story.CastMember
+		wantSheets  []string
+		wantVariant string // non-empty: this member is the group's variant
+	}{
+		{
+			name: "mum phrased marker-first is her own character",
+			cast: []story.CastMember{
+				{Name: "Mira", Visual: "a small girl with two red plaits"},
+				{Name: "Mira's Mum", Visual: "the same red hair as Mira, on a tall woman in a yellow raincoat"},
+			},
+			wantSheets: []string{"Mira", "Mira's Mum"},
+		},
+		{
+			name: "two dragons share a species, not an identity",
+			cast: []story.CastMember{
+				{Name: "Blue Dragon", Visual: "a small blue dragon with silvery wings"},
+				{Name: "Green Dragon", Visual: "the same size as her brother, but bright green from nose to tail"},
+			},
+			wantSheets: []string{"Blue Dragon", "Green Dragon"},
+		},
+		{
+			name: "a dog described against the girl is not a variant of her",
+			cast: []story.CastMember{
+				{Name: "Mira", Visual: "a small girl with two red plaits"},
+				{Name: "Bramble", Visual: "the same height as Mira's knee, a shaggy brown dog with one white ear"},
+			},
+			wantSheets: []string{"Mira", "Bramble"},
+		},
+		{
+			name: "one river in two moods is one entity, anchored by the earlier cast member",
+			cast: []story.CastMember{
+				{Name: "Grumpy River", Visual: liveGrumpyRiverVisual},
+				{Name: "Happy River", Visual: liveHappyRiverVisual},
+			},
+			wantSheets:  []string{"Grumpy River"},
+			wantVariant: "Happy River",
+		},
+		{
+			name: "a name and its alias are one referent",
+			cast: []story.CastMember{
+				{Name: "The Sock", Visual: "an odd striped sock with a hole in the toe"},
+				{Name: "Sock", Visual: "the same sock, now lost under the sofa"},
+			},
+			wantSheets:  []string{"The Sock"},
+			wantVariant: "Sock",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			all := make([]string, len(tc.cast))
+			for i, m := range tc.cast {
+				all[i] = m.Name
+			}
+			s := story.Story{
+				Title: "x",
+				Cast:  tc.cast,
+				Pages: []story.Page{page(1, "everyone is here", all...)},
+			}
+			plan := PlanReferences(s)
+			if got := names(plan.Sheets); !reflect.DeepEqual(got, tc.wantSheets) {
+				t.Fatalf("Sheets = %v, want %v — a false fusion is two characters drawn as one", got, tc.wantSheets)
+			}
+			if tc.wantVariant == "" {
+				if len(plan.Skipped) != 0 {
+					t.Errorf("Skipped = %+v, want none", plan.Skipped)
+				}
+				return
+			}
+			if got := plan.SheetOf[tc.wantVariant]; got != tc.wantSheets[0] {
+				t.Errorf("SheetOf[%s] = %q, want %q (the deterministic anchor)", tc.wantVariant, got, tc.wantSheets[0])
+			}
+			if len(plan.Skipped) != 1 || plan.Skipped[0].Reason != SkipVariant {
+				t.Fatalf("Skipped = %+v, want one %s entry for %s", plan.Skipped, SkipVariant, tc.wantVariant)
+			}
+		})
 	}
 }
 

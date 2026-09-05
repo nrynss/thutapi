@@ -71,11 +71,12 @@ func ReferencePrompt(m story.CastMember) string {
 //
 // The page's own Prompt leads. Every character the page names that
 // has a reference sheet then gets a line carrying their Visual
-// unchanged (lock 1), in the order the page lists them. The first
-// such character decides the image-to-image base - the reference
-// sheet Illustrate sends alongside this prompt - so the prompt names
-// that sheet explicitly and tells the model to hold it identical
-// (lock 2). styleDirective and StyleSuffix close it (lock 3).
+// unchanged (lock 1), in the order the page lists them. The pages
+// render with ALL of those characters' reference sheets attached —
+// payload.image is an array of their URLs (t6b-live-record.md item
+// 1b) — so the prompt names every attached sheet and tells the model
+// to hold each character identical to their reference image (lock 2).
+// styleDirective and StyleSuffix close it (lock 3).
 //
 // A character whose sheet belongs to another cast member (a variant -
 // "Happy River" against "Grumpy River"'s sheet) still gets its own
@@ -106,27 +107,32 @@ func sheetIndex(plan Plan) map[string]int {
 	return idx
 }
 
-// buildPage builds a page's prompt and resolves which reference sheet
-// it is rendered against, as an index into plan.Sheets.
+// buildPage builds a page's prompt and resolves which reference
+// sheets it is rendered against, as indexes into plan.Sheets — one per
+// character the page names, in named order, distinct (two names on one
+// sheet appear once).
 //
-// Prompt and sheet are decided together on one pass over
-// p.Characters, so the image Illustrate attaches is always the one
-// the prompt says is attached - lock 2 cannot come apart through two
+// Prompt and sheets are decided together on one pass over
+// p.Characters, so the images Illustrate attaches are always the ones
+// the prompt says are attached — lock 2 cannot come apart through two
 // functions disagreeing about which character leads.
-func buildPage(p story.Page, cast []story.CastMember, plan Plan, refIndex map[string]int) (string, int, error) {
+func buildPage(p story.Page, cast []story.CastMember, plan Plan, refIndex map[string]int) (string, []int, error) {
 	if len(p.Characters) == 0 {
-		return "", 0, fmt.Errorf("illustrate: page %d: %w: the page names no cast member, so there is no reference sheet to draw it against", p.N, ErrNoReference)
+		return "", nil, fmt.Errorf("illustrate: page %d: %w: the page names no cast member, so there is no reference sheet to draw it against", p.N, ErrNoReference)
 	}
 	byName := make(map[string]story.CastMember, len(cast))
 	for _, m := range cast {
 		byName[m.Name] = m
 	}
-	var drawable []story.CastMember
-	lead, sheet := -1, ""
+	var (
+		drawable []story.CastMember
+		sheets   []string
+		seen     = map[string]bool{}
+	)
 	for _, name := range p.Characters {
 		m, ok := byName[name]
 		if !ok {
-			return "", 0, fmt.Errorf("illustrate: page %d: %w: character %q is not in the cast bible, so no reference sheet exists for them", p.N, ErrNoReference, name)
+			return "", nil, fmt.Errorf("illustrate: page %d: %w: character %q is not in the cast bible, so no reference sheet exists for them", p.N, ErrNoReference, name)
 		}
 		anchor, hasSheet := plan.SheetOf[name]
 		if !hasSheet {
@@ -137,19 +143,23 @@ func buildPage(p story.Page, cast []story.CastMember, plan Plan, refIndex map[st
 			// the words.
 			continue
 		}
-		i, planned := refIndex[anchor]
-		if !planned {
+		if _, planned := refIndex[anchor]; !planned {
 			continue
 		}
-		if lead < 0 {
-			lead, sheet = i, anchor
+		if !seen[anchor] {
+			seen[anchor] = true
+			sheets = append(sheets, anchor)
 		}
 		drawable = append(drawable, m)
 	}
-	if lead < 0 {
-		return "", 0, fmt.Errorf("illustrate: page %d: %w: none of the characters it names has a reference sheet (%s)", p.N, ErrNoReference, strings.Join(p.Characters, ", "))
+	if len(sheets) == 0 {
+		return "", nil, fmt.Errorf("illustrate: page %d: %w: none of the characters it names has a reference sheet (%s)", p.N, ErrNoReference, strings.Join(p.Characters, ", "))
 	}
 
+	bases := make([]int, len(sheets))
+	for j, s := range sheets {
+		bases[j] = refIndex[s]
+	}
 	first := drawable[0].Name
 
 	var b strings.Builder
@@ -163,23 +173,54 @@ func buildPage(p story.Page, cast []story.CastMember, plan Plan, refIndex map[st
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")
-	if sheet == first {
-		b.WriteString("The attached reference image is ")
-		b.WriteString(first)
-		b.WriteString(". Keep ")
-		b.WriteString(first)
-		b.WriteString(" identical to that reference image - same face, same hair, same clothing, same colours.\n\n")
+	if len(sheets) == 1 {
+		sheet := sheets[0]
+		if sheet == first {
+			b.WriteString("The attached reference image is ")
+			b.WriteString(first)
+			b.WriteString(". Keep ")
+			b.WriteString(first)
+			b.WriteString(" identical to that reference image - same face, same hair, same clothing, same colours.\n\n")
+		} else {
+			b.WriteString("The attached reference image is ")
+			b.WriteString(sheet)
+			b.WriteString(", who is the same character as ")
+			b.WriteString(first)
+			b.WriteString(". Keep ")
+			b.WriteString(first)
+			b.WriteString(" identical to that reference image - same face, same hair, same clothing, same colours; only the expression may change.\n\n")
+		}
 	} else {
-		b.WriteString("The attached reference image is ")
-		b.WriteString(sheet)
-		b.WriteString(", who is the same character as ")
-		b.WriteString(first)
-		b.WriteString(". Keep ")
-		b.WriteString(first)
-		b.WriteString(" identical to that reference image - same face, same hair, same clothing, same colours; only the expression may change.\n\n")
+		// Several sheets ride along (t6b-live-record.md item 1b:
+		// multi-reference keeps every entity). Name each one, and say
+		// so where a sheet belongs to a variant the page names rather
+		// than to a character under their own name — the same clause
+		// the single-sheet case uses.
+		parts := make([]string, len(sheets))
+		for j, s := range sheets {
+			part := s
+			named := false
+			variant := ""
+			for _, m := range drawable {
+				if m.Name == s {
+					named = true
+					break
+				}
+				if plan.SheetOf[m.Name] == s && variant == "" {
+					variant = m.Name
+				}
+			}
+			if !named && variant != "" {
+				part = s + ", who is the same character as " + variant
+			}
+			parts[j] = part
+		}
+		b.WriteString("The attached reference images are ")
+		b.WriteString(strings.Join(parts, " and "))
+		b.WriteString(". Keep each character identical to their reference image - same face, same hair, same clothing, same colours.\n\n")
 	}
 	b.WriteString(styleDirective)
 	b.WriteString("\n")
 	b.WriteString(StyleSuffix) // lock 3
-	return b.String(), lead, nil
+	return b.String(), bases, nil
 }

@@ -80,9 +80,15 @@ type Plan struct {
 	Skipped []Skip
 }
 
-// noAppearancePhrases are the phrases that assert a cast member has
-// no appearance to draw. They are matched case-insensitively as
-// substrings of the visual.
+// noAppearancePhrases are the phrases that ASSERT a cast member has
+// no appearance to draw. Each is matched only where such an
+// assertion can begin — at the head of the visual, optionally after
+// a leading article, or just after a clause boundary (see
+// absenceSegments). As bare substrings these same words are ordinary
+// description: a ghost "with no face", a boy "in an invisible cloak"
+// and a snowman "never seen without his red scarf" are drawable
+// characters, and the substring match failed the whole book for them
+// (t6-round1.md H3).
 //
 // This is a semantic set, not a fixture set: the two real narrators
 // observed live phrased it differently ("no visual" and "an unseen
@@ -91,36 +97,80 @@ type Plan struct {
 // of an appearance rather than about narrators — "Narrator" is not a
 // reserved name and a child may legitimately name a character that.
 //
-// The known cost: a character whose appearance genuinely is
-// invisibility ("an invisible boy") is skipped too. That is a
-// documented false positive and it stays loud rather than silent —
-// the member lands in Plan.Skipped, and a page naming only that
-// member fails with ErrNoReference instead of quietly rendering
-// text-to-image.
+// Both misses cost money, in opposite directions: a member whose
+// visual genuinely asserts absence ("a voice only") is skipped
+// loudly — Plan.Skipped with SkipNoAppearance, and a page naming
+// only that member fails with ErrNoReference rather than quietly
+// rendering text-to-image — while a member whose visual merely
+// CONTAINS an absence word mid-description is drawn. A missed
+// narrator costs one extra reference sheet; a false skip costs a
+// drawable character and, on a page that names only them, the whole
+// book.
 var noAppearancePhrases = []string{
 	"no visual",
 	"no appearance",
 	"no physical",
-	"no body",
-	"no face",
 	"no image",
 	"no description",
 	"not visible",
-	"not seen",
 	"not shown",
 	"not depicted",
-	"never seen",
-	"never appears",
 	"does not appear",
 	"doesn't appear",
+	"never appears",
 	"unseen",
-	"invisible",
-	"faceless",
 	"voice only",
 	"voice-only",
 	"off-screen",
 	"offscreen",
 	"off screen",
+}
+
+// subordinators are the words an absence assertion can hang on inside
+// a clause — "with no appearance", "but no visual", "who is never
+// depicted".
+var subordinators = []string{"with ", "but ", "and ", "who ", "which ", "that "}
+
+// articles are the articles a visual's subject can open with —
+// "an unseen storyteller".
+var articles = []string{"a ", "an ", "the "}
+
+// absenceSegments splits a lowered visual into the positions an
+// absence assertion can start: each punctuation-delimited clause,
+// with one optional leading subordinator and then one optional
+// leading article stripped. "an unseen storyteller with no
+// appearance" yields "unseen storyteller with no appearance";
+// "a shy little ghost with no face, just two floating eyes" yields
+// "shy little ghost with no face" and "just two floating eyes" —
+// neither is an assertion that the member as a whole has no
+// appearance, which is the point.
+func absenceSegments(v string) []string {
+	parts := strings.FieldsFunc(v, func(r rune) bool {
+		switch r {
+		case ',', ';', ':', '.', '!', '?', '—', '–':
+			return true
+		}
+		return false
+	})
+	segs := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = stripAny(strings.TrimSpace(p), subordinators)
+		p = stripAny(p, articles)
+		if p != "" {
+			segs = append(segs, p)
+		}
+	}
+	return segs
+}
+
+// stripAny removes one leading occurrence of any prefix.
+func stripAny(s string, prefixes []string) string {
+	for _, p := range prefixes {
+		if strings.HasPrefix(s, p) {
+			return strings.TrimPrefix(s, p)
+		}
+	}
+	return s
 }
 
 // noAppearanceExact are whole visuals that assert no appearance
@@ -168,8 +218,11 @@ const minNameToken = 4
 //
 // The predicate is over the *visual*, never the name: "Narrator" is
 // not a reserved word and a child may name a real character that.
-// See noAppearancePhrases for the matched set and its documented
-// false positive.
+// Matching is clause-anchored — see absenceSegments and
+// noAppearancePhrases — so a phrase counts only where an absence
+// assertion can begin, and ordinary description ("a shy little ghost
+// with no face, just two floating eyes and a wobbly white sheet") is
+// an appearance like any other.
 func NeedsReferenceSheet(m story.CastMember) bool {
 	v := strings.ToLower(strings.TrimSpace(m.Visual))
 	v = strings.TrimRight(v, ". ")
@@ -178,9 +231,11 @@ func NeedsReferenceSheet(m story.CastMember) bool {
 			return false
 		}
 	}
-	for _, phrase := range noAppearancePhrases {
-		if strings.Contains(v, phrase) {
-			return false
+	for _, seg := range absenceSegments(v) {
+		for _, phrase := range noAppearancePhrases {
+			if seg == phrase || strings.HasPrefix(seg, phrase+" ") {
+				return false
+			}
 		}
 	}
 	return true
@@ -191,11 +246,12 @@ func NeedsReferenceSheet(m story.CastMember) bool {
 // Members are considered in cast order. A member with no appearance
 // (NeedsReferenceSheet) is skipped. A member whose visual
 // back-references an earlier member — "the same wide blue river, now
-// smiling" — and shares an identifying name token with them is locked
-// to that member's sheet rather than getting its own. Everything else
-// anchors a sheet of its own. Finally, a sheet no page can use (the
-// anchor and all its variants are named by no page) is dropped: a
-// paid call for a picture nothing renders against.
+// smiling" — and, in doing so, names that member's kind (or whose
+// name is an alias of theirs) is locked to that member's sheet rather
+// than getting its own. Everything else anchors a sheet of its own.
+// Finally, a sheet no page can use (the anchor and all its variants
+// are named by no page) is dropped: a paid call for a picture
+// nothing renders against.
 //
 // The result is deterministic — cast order throughout — so the same
 // story always plans the same sheets.
@@ -268,57 +324,195 @@ type refGroup struct {
 // variantGroup reports whether m is an existing group's character in
 // a different mood, and which group.
 //
-// Two conditions must both hold, because either alone over-matches. m
-// must define itself by pointing at another character (a
-// backReferenceMarker: "the same ...", "identical to ..."), AND it
-// must share an identifying token with a member of that group —
-// either between the two names ("Grumpy River" / "Happy River") or as
-// that member's name token appearing in m's visual ("the same wide
-// blue river"). A shared name token alone would fuse "Mira" with
-// "Mira's Mum"; a back-reference alone would fuse every character
-// whose visual happens to say "the same size".
+// The visual must still OPEN by pointing at another character (a
+// backReferenceMarker: "the same ...", "identical to ...") — a member
+// that is another character in a second mood says so from its first
+// words, and requiring the marker keeps mid-sentence comparisons
+// ("a tall woman with the same red hair") out. Given the marker,
+// fusion needs identity evidence, and only two things count:
+//
+//   - the back-reference names the anchor's kind: "the same wide
+//     blue river" heads with the noun the anchor's own name heads
+//     with ("Grumpy River" → river), so it asserts "I am that same
+//     river". "The same red hair as Mira" heads with "hair" and
+//     "the same size as her brother" with "size" — body parts and
+//     comparisons are not people, so neither fuses (t6-round1.md H2:
+//     Mira's Mum and the two dragons); or
+//   - the two names are aliases of one referent: their identifying
+//     token sets, species words removed, are identical and non-empty
+//     ("The Sock" / "Sock").
+//
+// A token of the anchor's name merely APPEARING in the visual is not
+// identity evidence — a comparative sentence is precisely a sentence
+// that names another character, and "the same height as Mira's knee,
+// a shaggy brown dog with one white ear" would otherwise lock the
+// dog to the girl's sheet. A shared species noun is never identity
+// evidence either: see speciesWords.
 //
 // The earliest matching group wins, so the result is deterministic.
 func variantGroup(m story.CastMember, groups []refGroup, cast []story.CastMember) (int, bool) {
 	lowerVisual := strings.ToLower(strings.TrimSpace(m.Visual))
-	backRef := false
-	for _, marker := range backReferenceMarkers {
-		if strings.HasPrefix(lowerVisual, marker) {
-			backRef = true
-			break
-		}
-	}
-	if !backRef {
+	if !opensWithBackReference(lowerVisual) {
 		return 0, false
 	}
-	mine := tokens(m.Name)
-	visualTokens := tokens(m.Visual)
 	for gi, g := range groups {
-		for _, idx := range g.members {
-			for tok := range tokens(cast[idx].Name) {
-				if mine[tok] || visualTokens[tok] {
-					return gi, true
-				}
-			}
+		anchor := cast[g.anchor]
+		if variantNamesTheAnchor(lowerVisual, anchor.Name) {
+			return gi, true
+		}
+		if namesAreAliases(m.Name, anchor.Name) {
+			return gi, true
 		}
 	}
 	return 0, false
 }
 
-// tokens lowercases s, splits it on everything that is not a letter or
-// a digit, and keeps the tokens long enough and distinctive enough to
-// identify a character: at least minNameToken runes and not a
-// nameStopword. Cast names are a child's wording, so the split is
-// Unicode-aware rather than ASCII-only.
+// speciesWords are shared-noun tokens that identify a KIND, never an
+// individual. Two members whose names share only one of these ("Blue
+// Dragon" / "Green Dragon", "Grumpy River" / "Happy River") are not
+// thereby the same entity, so species words are removed before two
+// names are tested for aliasing. The list is the vocabulary a
+// child's cast is actually made of; extend it as live output teaches
+// more. It does NOT govern variantNamesTheAnchor: there the evidence
+// is the explicit "the same <noun>" construction and its head-noun
+// agreement, not the bare shared word.
+var speciesWords = map[string]bool{
+	"dragon": true, "river": true, "dog": true, "robot": true,
+	"mouse": true, "cat": true, "bear": true, "bird": true,
+	"horse": true, "monster": true, "wizard": true, "witch": true,
+}
+
+// opensWithBackReference reports whether a lowered visual opens with
+// a backReferenceMarker.
+func opensWithBackReference(lowerVisual string) bool {
+	for _, marker := range backReferenceMarkers {
+		if strings.HasPrefix(lowerVisual, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// variantNamesTheAnchor reports whether a lowered visual's
+// back-reference is about the anchor's own kind: the noun the
+// "the same ..." phrase heads with equals the noun the anchor's name
+// heads with.
+func variantNamesTheAnchor(lowerVisual, anchorName string) bool {
+	head, ok := samePhraseHead(lowerVisual)
+	return ok && head == headNoun(anchorName)
+}
+
+// phraseBoundaries end the noun phrase a back-reference is about:
+// punctuation, and the words that turn "the same X" into a
+// comparison or an appositive — "the same size as her brother",
+// "the same river, now smiling".
+var phraseBoundaries = []string{
+	",", ";", ":",
+	" as ", " but ", " except ", " now ", " with ",
+	" who ", " which ", " that ", " when ", " and ",
+}
+
+// samePhraseHead extracts the noun a leading back-reference is
+// about: the last word of the noun phrase between the marker and the
+// first boundary. "the same wide blue river, now smiling" → "river";
+// "the same red hair as mira" → "hair"; "the same height as mira's
+// knee" → "height". ok is false when no marker opens the visual or
+// the phrase holds no identifying word.
+func samePhraseHead(lowerVisual string) (string, bool) {
+	for _, marker := range backReferenceMarkers {
+		rest, ok := strings.CutPrefix(lowerVisual, marker)
+		if !ok {
+			continue
+		}
+		end := len(rest)
+		for _, b := range phraseBoundaries {
+			if i := strings.Index(rest, b); i >= 0 && i < end {
+				end = i
+			}
+		}
+		words := tokenList(rest[:end])
+		if len(words) == 0 {
+			return "", false
+		}
+		return words[len(words)-1], true
+	}
+	return "", false
+}
+
+// headNoun is the noun a name heads with — its last identifying
+// token: "Grumpy River" → "river", "Mira" → "mira".
+func headNoun(name string) string {
+	words := tokenList(name)
+	if len(words) == 0 {
+		return ""
+	}
+	return words[len(words)-1]
+}
+
+// namesAreAliases reports whether two cast names denote one referent:
+// their identifying token sets — species words removed — are
+// identical and non-empty. "The Sock" and "Sock" do; "Mira" and
+// "Mira's Mum" do not, and "Blue Dragon" and "Green Dragon" share
+// only their species. Both members still need the back-reference
+// marker in the visual; tokens alone are never enough.
+//
+// A possessive construction ("Mira's Mum") never aliases anything: a
+// name that marks possession names a relation to another referent,
+// not the referent itself. The rule is load-bearing precisely where
+// the token test alone would lie — "mum" is shorter than
+// minNameToken, so "Mira's Mum" tokenises to the same set as "Mira"
+// and the possessive suffix is the only evidence left that these are
+// two people (t6-round1.md H2: marker-first, Mum must anchor her own
+// sheet).
+func namesAreAliases(a, b string) bool {
+	if strings.Contains(a, "'s") || strings.Contains(a, "’s") ||
+		strings.Contains(b, "'s") || strings.Contains(b, "’s") {
+		return false
+	}
+	ta, tb := identityTokens(a), identityTokens(b)
+	if len(ta) == 0 || len(ta) != len(tb) {
+		return false
+	}
+	for t := range ta {
+		if !tb[t] {
+			return false
+		}
+	}
+	return true
+}
+
+// identityTokens is a name's tokens with the species words removed.
+func identityTokens(name string) map[string]bool {
+	m := tokens(name)
+	for w := range speciesWords {
+		delete(m, w)
+	}
+	return m
+}
+
+// tokens lowercases s and reports the words long enough and
+// distinctive enough to identify a character: at least minNameToken
+// runes and not a nameStopword.
 func tokens(s string) map[string]bool {
 	out := make(map[string]bool)
+	for _, f := range tokenList(s) {
+		out[f] = true
+	}
+	return out
+}
+
+// tokenList is tokens in order. It splits on everything that is not a
+// letter or a digit. Cast names are a child's wording, so the split
+// is Unicode-aware rather than ASCII-only.
+func tokenList(s string) []string {
+	var out []string
 	for _, f := range strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	}) {
 		if len([]rune(f)) < minNameToken || nameStopwords[f] {
 			continue
 		}
-		out[f] = true
+		out = append(out, f)
 	}
 	return out
 }

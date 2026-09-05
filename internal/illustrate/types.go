@@ -3,6 +3,8 @@ package illustrate
 import (
 	"context"
 	"net/http"
+
+	"thutapi/internal/gmi/media"
 )
 
 // Imager is illustrate's view of the GMI request-queue image client
@@ -15,13 +17,21 @@ import (
 // and a silent default there is exactly how the forbidden model
 // shipped (t2-round3.md H1) — so this package always passes the
 // resolved id, never "".
+//
+// The reference images travel as URL strings: seedream takes
+// payload.image as an array of URLs, and the pinned practice is to
+// chain GMI's own public output URLs — a sheet renders, its response's
+// media_urls[0].url feeds the next call's reference array
+// (t6b-live-record.md §4). opts carries the pinned production payload
+// fields; its zero value IS the pinned settings (media.ImageOptions),
+// so every call site passes media.ImageOptions{}.
 type Imager interface {
 	// GenerateImage runs text-to-image and returns the raw
 	// request-queue response body.
-	GenerateImage(ctx context.Context, prompt, model string) ([]byte, error)
-	// EditImage runs image-to-image against refImage and returns the
-	// raw request-queue response body.
-	EditImage(ctx context.Context, refImage []byte, prompt, model string) ([]byte, error)
+	GenerateImage(ctx context.Context, prompt, model string, opts media.ImageOptions) ([]byte, error)
+	// EditImage runs image-to-image against refImages (reference
+	// sheet URLs) and returns the raw request-queue response body.
+	EditImage(ctx context.Context, prompt, model string, refImages []string, opts media.ImageOptions) ([]byte, error)
 }
 
 // Config configures Illustrate. Config flows down from the caller;
@@ -80,8 +90,14 @@ type Reference struct {
 	// ContentType is the image type, one of image/png, image/jpeg,
 	// image/webp.
 	ContentType string
-	// Image is the image itself.
+	// Image is the image itself, dereferenced on receipt.
 	Image []byte
+	// URL is the GMI output URL the image came from — what the next
+	// call's reference array carries. Empty only when the response
+	// carried the picture as bytes with no URL, which the render
+	// treats as unusable for lock 2: without a URL there is nothing
+	// to chain into payload.image.
+	URL string
 }
 
 // Illustration is one rendered page.

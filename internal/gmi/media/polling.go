@@ -133,7 +133,7 @@ func NewWithPoll(poll PollConfig) *Client {
 // mid-poll is answered with exactly one resubmit; the second failure
 // surfaces gmi.ErrTransient. Every other error surfaces as-is with its own
 // sentinel.
-func (c *Client) drive(ctx context.Context, model, accept string, payload map[string]any) ([]byte, error) {
+func (c *Client) drive(ctx context.Context, model, accept string, payload any) ([]byte, error) {
 	raw, err := c.post(ctx, model, accept, payload)
 	if err != nil {
 		return nil, err

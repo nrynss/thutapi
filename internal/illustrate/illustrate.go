@@ -17,7 +17,10 @@
 //     here paraphrases, truncates, normalises, case-folds or
 //     regenerates a visual.
 //  2. Image lock. Every reference sheet is generated first, and every
-//     page is then produced with EditImage against one of them. A
+//     page is then produced with EditImage against the reference
+//     sheets of every character it names — payload.image carries all
+//     their sheet URLs (t6b-live-record.md item 1b: multi-reference
+//     keeps both entities). A
 //     page that names no character with a reference sheet is
 //     ErrNoReference — a loud failure, never a quiet text-to-image
 //     fallback, because a t2i page looks fine and has the wrong cast.
@@ -25,12 +28,17 @@
 //
 // # The model
 //
-// DefaultModel is Flux2-Klein (project.md §3, "Start on Flux2-Klein
-// or Z-Image"; both confirmed to resolve on the live request queue on
-// 2026-09-05). Config.Model is the one-line switch to
-// gemini-2.5-flash-image if the cast drifts anyway. Price selects
-// nothing: four models tie at $0.10 a book, and §3's column is per
-// book, not per image.
+// DefaultModel is seedream-5.0-lite (project.md §3 as amended by
+// t6b-live-record.md: the only image model measured generating on the
+// live request queue — synchronous success on the POST itself). §3's
+// original "start on" pair do not get a Config.Model mention as an
+// option, because they are not options: Flux2-Klein and Z-Image accept
+// a request and then never run — no error, a job parked in `queued`
+// forever — so they sit on the forbidden list next to
+// Qwen-Image-2512, for a different reason. Config.Model is still the
+// one-line switch, to gemini-2.5-flash-image if the cast drifts.
+// Price selects nothing: the working models price the same per book,
+// and §3's column is per book, not per image.
 //
 // Qwen-Image-2512 is refused with ErrForbiddenModel before any call
 // is made. It is text-to-image only: an image-to-image call against
@@ -39,7 +47,13 @@
 // line to read. It is a real, callable model id, so nothing upstream
 // rejects it; it shipped as T2's default for both image methods and
 // survived two review rounds (adversarial-review/t2-round3.md H1/M2).
-// IsForbiddenModel is the check, and it runs before the money does.
+// Flux2-Klein and Z-Image are the same refusal: they accept and never
+// finish, so a book generation would hang to its context deadline on
+// every page (t6b-live-record.md §1). IsForbiddenModel is the check,
+// it runs before the money does, and it normalises the id first, so a
+// vendor prefix or registry tag on the same upstream model is the
+// same refusal. Video models ("H3" / any video model, PLAN.md §T6's
+// forbidden table) are refused the same way, by stem.
 //
 // # Shape of a run
 //
@@ -82,16 +96,19 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"thutapi/internal/gmi/media"
 	"thutapi/internal/story"
 )
 
 // DefaultModel is the image model every call uses unless Config.Model
-// names another: project.md §3's "Start on Flux2-Klein or Z-Image".
-// This constant and Config.Model together are the one-line provider
-// switch §3 asks for — the choice may flip to gemini-2.5-flash-image
-// if the cast drifts, and the spread across the whole catalogue is
-// about 23 cents a book, so it is chosen on consistency, never price.
-const DefaultModel = "Flux2-Klein"
+// names another: seedream-5.0-lite, the one model measured generating
+// on the live request queue (project.md §3 as amended by
+// t6b-live-record.md — synchronous success on the POST itself). This
+// constant and Config.Model together are the one-line provider switch
+// §3 asks for — the choice may flip to gemini-2.5-flash-image if the
+// cast drifts. Flux2-Klein and Z-Image are forbidden, not options:
+// they accept a request and never run (t6b-live-record.md §1).
+const DefaultModel = "seedream-5.0-lite"
 
 // DefaultLimit is how many renders run at once when Config.Limit is
 // unset: PLAN.md §T6's "bounded to ~4 concurrent".
@@ -154,7 +171,8 @@ var (
 	ErrUnsupportedImage = errors.New("illustrate: unsupported image type")
 )
 
-// forbiddenModels are the model ids IsForbiddenModel refuses.
+// forbiddenModels are the model ids IsForbiddenModel refuses, compared
+// against the normalised id (see normaliseModelID).
 //
 //   - Qwen-Image-2512 is text-to-image only. An image-to-image call
 //     against it succeeds and ignores the reference image, so the
@@ -162,24 +180,67 @@ var (
 //     strikes the id through; PLAN.md §T6's forbidden table;
 //     t2-round3.md H1/M2, where it shipped as the default for both
 //     image methods and survived two review rounds).
-//   - H3 is a video model: not free and explicitly out of scope
-//     (project.md §Scope, PLAN.md §T6's forbidden table).
-var forbiddenModels = []string{"Qwen-Image-2512", "H3"}
+//   - Flux2-Klein and Z-Image never generate: the queue accepts the
+//     POST and the job sits in `queued` forever, with no error — a
+//     book would hang to its deadline on every page
+//     (t6b-live-record.md §1). PLAN.md §T6 told this track to start
+//     on them; T6b measured that they do not work, and the forbidden
+//     table is where a dead id belongs.
+var forbiddenModels = []string{"Qwen-Image-2512", "Flux2-Klein", "Z-Image"}
+
+// forbiddenModelStems are substrings that mark a model id as a video
+// model — PLAN.md §T6's forbidden table reads "H3 / any video model",
+// and a literal-id match implements neither half: "H3-2" and
+// "MiniMax-Hailuo-02" are the same refusals under decorated
+// spellings. Matched case-folded against the normalised id. The
+// sanctioned ids (DefaultModel, gemini-2.5-flash-image) contain none
+// of these stems; IsForbiddenModel's test pins that, so extending
+// this list re-checks the allow-list by construction.
+var forbiddenModelStems = []string{"h3", "hailuo", "video"}
 
 // IsForbiddenModel reports whether model is one this package refuses
-// to call. The comparison is case-insensitive: a case variant is the
-// same upstream model and would do the same silent damage.
+// to call. The comparison is over the normalised id: a vendor prefix,
+// a registry tag or a case variant names the same upstream model and
+// would do the same silent damage ("MiniMaxAI/Qwen-Image-2512" and
+// "qwen-image-2512:latest" are Qwen-Image-2512; "H3-2" and
+// "MiniMax-Hailuo-02" are the video models the table refuses).
 //
 // The check runs in Config.resolve, before any request is built, so a
 // forbidden id costs an error rather than a book that looks right and
 // has a different cast on every page.
 func IsForbiddenModel(model string) bool {
+	id := normaliseModelID(model)
+	if id == "" {
+		return false
+	}
 	for _, f := range forbiddenModels {
-		if strings.EqualFold(strings.TrimSpace(model), f) {
+		if strings.EqualFold(id, f) {
+			return true
+		}
+	}
+	lower := strings.ToLower(id)
+	for _, stem := range forbiddenModelStems {
+		if strings.Contains(lower, stem) {
 			return true
 		}
 	}
 	return false
+}
+
+// normaliseModelID reduces a model id to its bare upstream name:
+// surrounding space, a trailing path separator, any vendor/registry
+// prefix ("MiniMaxAI/Qwen-Image-2512" — the prefix shape AGENTS.md
+// trains callers to use on the text endpoint) and any tag suffix
+// ("qwen-image-2512:latest") are stripped.
+func normaliseModelID(model string) string {
+	id := strings.TrimRight(strings.TrimSpace(model), "/")
+	if i := strings.LastIndex(id, "/"); i >= 0 {
+		id = id[i+1:]
+	}
+	if i := strings.Index(id, ":"); i >= 0 {
+		id = id[:i]
+	}
+	return strings.TrimSpace(id)
 }
 
 // renderer is a resolved Config: every default already substituted,
@@ -209,7 +270,7 @@ func (cfg Config) resolve() (*renderer, error) {
 		model = DefaultModel
 	}
 	if IsForbiddenModel(model) {
-		return nil, fmt.Errorf("%w: %q cannot carry a reference image; use %s (PLAN.md §T6)", ErrForbiddenModel, model, DefaultModel)
+		return nil, fmt.Errorf("%w: %q is on PLAN.md §T6's forbidden table; use %s", ErrForbiddenModel, model, DefaultModel)
 	}
 	limit := cfg.Limit
 	if limit <= 0 {
@@ -217,7 +278,7 @@ func (cfg Config) resolve() (*renderer, error) {
 	}
 	hc := cfg.HTTPClient
 	if hc == nil {
-		hc = &http.Client{Timeout: defaultFetchTimeout}
+		hc = &http.Client{Timeout: defaultFetchTimeout, CheckRedirect: safeRedirectPolicy}
 	}
 	return &renderer{imager: cfg.Imager, model: model, limit: limit, http: hc, progress: cfg.Progress}, nil
 }
@@ -267,13 +328,14 @@ func Illustrate(ctx context.Context, cfg Config, s story.Story) (Book, error) {
 	}
 
 	// Build every page prompt up front, and resolve which reference
-	// sheet each page renders against. A page with no sheet is
-	// ErrNoReference here, before the first paid call — discovering
+	// sheets each page renders against — one per character the page
+	// names, so payload.image can carry them all. A page with no sheet
+	// is ErrNoReference here, before the first paid call — discovering
 	// it after ten images have been generated would cost the whole
 	// book's spend to learn the same thing.
 	refIndex := sheetIndex(plan)
 	prompts := make([]string, len(s.Pages))
-	bases := make([]int, len(s.Pages))
+	bases := make([][]int, len(s.Pages))
 	for i, p := range s.Pages {
 		prompt, base, err := buildPage(p, s.Cast, plan, refIndex)
 		if err != nil {
@@ -308,15 +370,24 @@ func (r *renderer) renderReferences(ctx context.Context, members []story.CastMem
 	for i, m := range members {
 		g.Go(func() error {
 			prompt := ReferencePrompt(m)
-			raw, err := r.imager.GenerateImage(gctx, prompt, r.model)
+			raw, err := r.imager.GenerateImage(gctx, prompt, r.model, media.ImageOptions{})
 			if err != nil {
 				return fmt.Errorf("illustrate: reference sheet for %q: %w", m.Name, err)
 			}
-			img, ct, err := r.decodeImage(gctx, raw)
+			// GenerateImage sends no reference image, so nothing the
+			// response could echo is excluded from the walk.
+			img, ct, url, err := r.decodeImage(gctx, raw, sentImages{})
 			if err != nil {
 				return fmt.Errorf("illustrate: reference sheet for %q: %w", m.Name, err)
 			}
-			refs[i] = Reference{Name: m.Name, Visual: m.Visual, Prompt: prompt, ContentType: ct, Image: img}
+			if url == "" {
+				// Lock 2 chains this sheet's URL into every page
+				// render that names the member (payload.image is an
+				// array of URLs). Bytes with no URL cannot be
+				// chained, so they are not a successful sheet.
+				return fmt.Errorf("illustrate: reference sheet for %q decoded to bytes but the response named no media URL, so there is nothing to chain into the page renders", m.Name)
+			}
+			refs[i] = Reference{Name: m.Name, Visual: m.Visual, Prompt: prompt, ContentType: ct, Image: img, URL: url}
 			r.report(StageReference, m.Name, 0)
 			return nil
 		})
@@ -328,32 +399,51 @@ func (r *renderer) renderReferences(ctx context.Context, members []story.CastMem
 }
 
 // renderPages renders every page image-to-image against its reference
-// sheet and returns them in page order. prompts and bases are indexed
-// alongside pages; bases[i] is the index into refs of the sheet page i
-// is locked to, resolved by the same buildPage pass that wrote the
-// prompt — so the attached image and the prompt's claim about it
-// cannot disagree.
+// sheets and returns them in page order. prompts and bases are indexed
+// alongside pages; bases[i] holds the indexes into refs of the sheets
+// page i is locked to — one per character the page names, resolved by
+// the same buildPage pass that wrote the prompt — so the attached
+// references and the prompt's claim about them cannot disagree.
 //
 // EditImage is the only call here. There is no GenerateImage fallback
-// for a page, by design: image-to-image against the sheet is lock 2,
+// for a page, by design: image-to-image against the sheets is lock 2,
 // and a page that quietly fell back to text-to-image would come back
-// looking fine with a different cast.
-func (r *renderer) renderPages(ctx context.Context, pages []story.Page, prompts []string, bases []int, refs []Reference) ([]Illustration, error) {
+// looking fine with a different cast. The references travel as the
+// sheets' URLs, every named character's sheet among them
+// (t6b-live-record.md item 1b: multi-reference is live-verified and
+// keeps every entity).
+func (r *renderer) renderPages(ctx context.Context, pages []story.Page, prompts []string, bases [][]int, refs []Reference) ([]Illustration, error) {
 	out := make([]Illustration, len(pages))
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(r.limit)
 	for i, p := range pages {
-		base := refs[bases[i]]
+		var (
+			sheetURLs  []string
+			sheetBytes [][]byte
+			lead       Reference
+		)
+		for j, bi := range bases[i] {
+			ref := refs[bi]
+			sheetURLs = append(sheetURLs, ref.URL)
+			sheetBytes = append(sheetBytes, ref.Image)
+			if j == 0 {
+				lead = ref
+			}
+		}
 		g.Go(func() error {
-			raw, err := r.imager.EditImage(gctx, base.Image, prompts[i], r.model)
+			raw, err := r.imager.EditImage(gctx, prompts[i], r.model, sheetURLs, media.ImageOptions{})
 			if err != nil {
 				return fmt.Errorf("illustrate: page %d: %w", p.N, err)
 			}
-			img, ct, err := r.decodeImage(gctx, raw)
+			// The reference URLs in payload.image come back echoed in
+			// the record's payload (t6b-live-record.md §3); what this
+			// call sent can never be the result, so the decode excludes
+			// it explicitly.
+			img, ct, _, err := r.decodeImage(gctx, raw, sentImages{bytes: sheetBytes, urls: sheetURLs})
 			if err != nil {
 				return fmt.Errorf("illustrate: page %d: %w", p.N, err)
 			}
-			out[i] = Illustration{N: p.N, Prompt: prompts[i], Reference: base.Name, ContentType: ct, Image: img}
+			out[i] = Illustration{N: p.N, Prompt: prompts[i], Reference: lead.Name, ContentType: ct, Image: img}
 			r.report(StageIllustration, "", p.N)
 			return nil
 		})

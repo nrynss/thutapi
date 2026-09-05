@@ -99,7 +99,7 @@ func TestPoll_QueuedProcessingCompleted(t *testing.T) {
 			}
 		})
 
-	raw, err := fastClient().GenerateImage(context.Background(), "x", "Z-Image")
+	raw, err := fastClient().GenerateImage(context.Background(), "x", "Z-Image", ImageOptions{})
 	if err != nil {
 		t.Fatalf("GenerateImage: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestPoll_FailedMidPollResubmitsOnce(t *testing.T) {
 			return http.StatusOK, completed
 		})
 
-	raw, err := fastClient().GenerateImage(context.Background(), "x", "Z-Image")
+	raw, err := fastClient().GenerateImage(context.Background(), "x", "Z-Image", ImageOptions{})
 	if err != nil {
 		t.Fatalf("GenerateImage: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestPoll_FailedBudgetSpent(t *testing.T) {
 			return http.StatusOK, `{"request_id":"req-1","status":"failed","error":"scheduling failed"}`
 		})
 
-	raw, err := fastClient().GenerateImage(context.Background(), "x", "Z-Image")
+	raw, err := fastClient().GenerateImage(context.Background(), "x", "Z-Image", ImageOptions{})
 	if !errors.Is(err, gmi.ErrTransient) {
 		t.Errorf("err = %v, want errors.Is(.., gmi.ErrTransient)", err)
 	}
@@ -193,7 +193,7 @@ func TestPoll_TransientGETToleratedOnce(t *testing.T) {
 			return http.StatusOK, completed
 		})
 
-	raw, err := fastClient().GenerateImage(context.Background(), "x", "Z-Image")
+	raw, err := fastClient().GenerateImage(context.Background(), "x", "Z-Image", ImageOptions{})
 	if err != nil {
 		t.Fatalf("GenerateImage: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestPoll_TwoConsecutiveTransientGETs(t *testing.T) {
 			return http.StatusInternalServerError, "boom"
 		})
 
-	_, err := fastClient().GenerateImage(context.Background(), "x", "Z-Image")
+	_, err := fastClient().GenerateImage(context.Background(), "x", "Z-Image", ImageOptions{})
 	if !errors.Is(err, gmi.ErrTransient) {
 		t.Errorf("err = %v, want errors.Is(.., gmi.ErrTransient)", err)
 	}
@@ -236,7 +236,7 @@ func TestPoll_GET404SurfacesModelNotFound(t *testing.T) {
 			return http.StatusNotFound, "no such request"
 		})
 
-	_, err := fastClient().GenerateImage(context.Background(), "x", "Z-Image")
+	_, err := fastClient().GenerateImage(context.Background(), "x", "Z-Image", ImageOptions{})
 	if !errors.Is(err, gmi.ErrModelNotFound) {
 		t.Errorf("err = %v, want errors.Is(.., gmi.ErrModelNotFound)", err)
 	}
@@ -257,7 +257,7 @@ func TestPoll_CancelledSurfacesSentinel(t *testing.T) {
 			return http.StatusOK, `{"request_id":"req-1","status":"cancelled"}`
 		})
 
-	_, err := fastClient().GenerateImage(context.Background(), "x", "Z-Image")
+	_, err := fastClient().GenerateImage(context.Background(), "x", "Z-Image", ImageOptions{})
 	if !errors.Is(err, ErrCancelled) {
 		t.Errorf("err = %v, want errors.Is(.., ErrCancelled)", err)
 	}
@@ -283,7 +283,7 @@ func TestPoll_SuccessSynonymTerminal(t *testing.T) {
 			return http.StatusOK, success
 		})
 
-	raw, err := fastClient().GenerateImage(context.Background(), "x", "Z-Image")
+	raw, err := fastClient().GenerateImage(context.Background(), "x", "Z-Image", ImageOptions{})
 	if err != nil {
 		t.Fatalf("GenerateImage: %v", err)
 	}
@@ -305,7 +305,7 @@ func TestPoll_DeadlineCutsPoll(t *testing.T) {
 		})
 
 	c := NewWithPoll(PollConfig{Interval: time.Millisecond, Timeout: 40 * time.Millisecond})
-	_, err := c.GenerateImage(context.Background(), "x", "Z-Image")
+	_, err := c.GenerateImage(context.Background(), "x", "Z-Image", ImageOptions{})
 	if !errors.Is(err, ErrPollDeadline) {
 		t.Errorf("err = %v, want errors.Is(.., ErrPollDeadline)", err)
 	}
@@ -328,7 +328,7 @@ func TestPoll_CallerDeadlineCutsPoll(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
 	defer cancel()
 	c := NewWithPoll(PollConfig{Interval: time.Millisecond, Timeout: 30 * time.Second})
-	_, err := c.GenerateImage(ctx, "x", "Z-Image")
+	_, err := c.GenerateImage(ctx, "x", "Z-Image", ImageOptions{})
 	if !errors.Is(err, ErrPollDeadline) {
 		t.Errorf("err = %v, want errors.Is(.., ErrPollDeadline)", err)
 	}
@@ -353,7 +353,7 @@ func TestPoll_DefaultIntervalOnWire(t *testing.T) {
 		})
 
 	start := time.Now()
-	if _, err := New().GenerateImage(context.Background(), "x", "Z-Image"); err != nil {
+	if _, err := New().GenerateImage(context.Background(), "x", "Z-Image", ImageOptions{}); err != nil {
 		t.Fatalf("GenerateImage: %v", err)
 	}
 	if elapsed := time.Since(start); elapsed < DefaultPollInterval {
@@ -393,7 +393,7 @@ func TestSubmitCompletedNoPoll(t *testing.T) {
 			return http.StatusOK, fakeResponse
 		})
 
-	raw, err := fastClient().GenerateImage(context.Background(), "x", "Z-Image")
+	raw, err := fastClient().GenerateImage(context.Background(), "x", "Z-Image", ImageOptions{})
 	if err != nil {
 		t.Fatalf("GenerateImage: %v", err)
 	}
@@ -418,7 +418,7 @@ func TestPoll_MissingRequestID(t *testing.T) {
 			return http.StatusOK, fakeResponse
 		})
 
-	_, err := fastClient().GenerateImage(context.Background(), "x", "Z-Image")
+	_, err := fastClient().GenerateImage(context.Background(), "x", "Z-Image", ImageOptions{})
 	if !errors.Is(err, gmi.ErrTransient) {
 		t.Errorf("err = %v, want errors.Is(.., gmi.ErrTransient)", err)
 	}
@@ -446,7 +446,7 @@ func TestSubmitNonTerminalSubmitBodiesPoll(t *testing.T) {
 					return http.StatusOK, completed
 				})
 
-			raw, err := fastClient().GenerateImage(context.Background(), "x", "Z-Image")
+			raw, err := fastClient().GenerateImage(context.Background(), "x", "Z-Image", ImageOptions{})
 			if err != nil {
 				t.Fatalf("GenerateImage: %v", err)
 			}
@@ -478,7 +478,7 @@ func TestSubmitUnknownStatusWithoutRequestIDPassesThrough(t *testing.T) {
 			return http.StatusOK, `{"status":"completed"}`
 		})
 
-	raw, err := fastClient().GenerateImage(context.Background(), "x", "Z-Image")
+	raw, err := fastClient().GenerateImage(context.Background(), "x", "Z-Image", ImageOptions{})
 	if err != nil {
 		t.Fatalf("GenerateImage: %v", err)
 	}
@@ -508,7 +508,7 @@ func TestPoll_DeadlineDuringInflightGETSurfacesPollDeadline(t *testing.T) {
 		})
 
 	c := NewWithPoll(PollConfig{Interval: 5 * time.Millisecond, Timeout: 40 * time.Millisecond})
-	_, err := c.GenerateImage(context.Background(), "x", "Z-Image")
+	_, err := c.GenerateImage(context.Background(), "x", "Z-Image", ImageOptions{})
 	close(block) // free the handler so the test server can shut down
 
 	if !errors.Is(err, ErrPollDeadline) {
