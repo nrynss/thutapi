@@ -72,8 +72,8 @@ required, and the first things cut.
 | **T4** | DONE. Round 1 (t4-round1.md): REMEDIATE 0C/1H/3M/3L — the stall rule ended interviews after two substantive one-word answers ("Mira" → "red"), end-marker-only replies left ended interviews reopenable, opening-turn failures were invisible to clients, error payloads carried freeform prose instead of machine classes, plus streak-rollback, enforced-end persistence, and doc-comment gaps. Remediation round 1 fixed all seven (end fires only on no-progress/repetition with a per-turn chip-signal directive to the model; closing turn persisted unconditionally on every end path; turn-failure marker surfaced through the catch-up route; sentinel-derived error tokens on the wire). **Round 2: APPROVE 0/0/0/0, zero residue** (t4-round2.md). E2e: start → turns → self-ended (checklist, stall, MaxTurns paths) against a scripted fake, SSE-observable, transcript persisted and ordered; thinking OFF pinned on raw wire. Coverage: interview 93.4%. |
 | **T5** | DONE. Round 1 (t5-round1.md): REMEDIATE 0C/0H/3M/2L — transport-error pin had an empty assertion body (swallow mutant went green), the Done when's live half had no owner, the prompt taught "exactly 8 pages" while the validator enforced no count, a prose-embedded decoy JSON object could be taken as the book (full-story decoy silently in one call), and cast uniqueness was case-sensitive (Mira+mira split the T6 lock). Remediation round 1 fixed all five (real transport pins incl. six-sentinel probe; T5b operator row + amended Done-when; `PageCount = 8` taught by prompt and enforced by validator, cut-to-6 changes exactly that rule; extractStory scans all candidates for first decode-AND-validate with first-candidate fallback errors; EqualFold uniqueness with exact references). **Round 2: APPROVE 0/0/0/0, zero residue** (t5-round2.md). Coverage: story 100%. Live half owned by **T5b**. |
 | **T5b** | **DONE** 2026-09-05. Closes the live half of T5's original `Done when`: two independent live M3 calls with `thinking` ON over a realistic 14-turn transcript, both schema-valid, both 8 pages, all emotions in the taught vocabulary, every page character present in the cast (14s and 37s). Corrective-system-message acceptance **confirmed** — MiniMax obeyed a `system`-role message placed after an assistant turn, which is the mechanism `story.Structure`'s corrective retry depends on. **Two findings handed to T6** (not T5 defects — the validator does what it was specified to do): live casts contain non-visual members (`Narrator`, `visual:"no visual"` / `"an unseen storyteller with no appearance"` — two phrasings, so no literal match works) which would each burn a ~$0.01 reference sheet on nothing; and one entity can occupy two cast slots (`Grumpy River` + `Happy River`, the latter's visual opening "the same wide blue river"), which the image lock would render as two unrelated rivers — the exact drift T6 exists to prevent. Also: M3's page prompts already carry their own style language, which competes with T6's constant style suffix. Probes committed as `//go:build live` tests. Zero cost. See t2b-t5b-live-record.md. |
-| **T6** | **REMEDIATE — round 1, awaiting remediation.** Implementation at `a0340d3` (100% statements, three locks pinned on the marshalled bytes, `Qwen-Image-2512` refused before a request is built, default path asserted with `Config.Model` empty — the test shape whose absence let t2-round3 H1 survive). Round 1: **0C/3H/3M/2L**. **H1** — `decode.go` scans every string for base64 image magic *before* trying the URL, so the queue's echoed `payload.image` (the reference sheet, inlined by `EditImage`) beats the real result: every page would decode to its own reference sheet, and T7 cannot catch it because the page *is* the reference. **C if T6b confirms the image queue echoes `payload`** the way the live TTS call did. **H2** — the variant rule fuses genuinely different characters (`Mira's Mum` when the visual is phrased marker-first; `Blue Dragon`/`Green Dragon` on a shared species token; a dog described by comparison to Mira). **H3** — `NeedsReferenceSheet` substring-matches ordinary description (a ghost "with no face"), and the cost is not one skip: a page naming only that character returns zero book, and elsewhere the character is dropped from the prompt, failing lock 1 silently. M1 forbidden-model guard is exact-match-after-trim (`Qwen/Qwen-Image-2512` passes); M2 the zero-`Book`-on-error contract is unpinned on render paths (partial-book mutant green); M3 one unsupported candidate aborts a render holding a usable PNG; L1 the notes misstate the `go.mod` edit; L2 `fetchImage` follows redirects to any host reachable on the `proxy` network. **10 of 11 claimed pins held under mutation** — only M2 did not. Rulings: `go.mod` sanctioned (`go mod tidy` reproduces it byte-for-byte); persistence reasoning sound but the write is **unassigned** — needs an owner before T7 starts; **T6b recommended**, `Owns: internal/illustrate/live_test.go`, first item a single ~$0.01 `EditImage` call to settle H1. Loop paused here by operator instruction — no remediation agent dispatched. See t6-round1.md. |
-| **T6b** | **Item 1 in progress.** First probe runs: the image queue **accepts jobs but is not scheduling them** — Flux2-Klein *and* Z-Image both stuck `queued` 25+ min (`outcome:null`, record never touched) while audio ran in ~24 s this morning. Three paid requests submitted (ids in t6b-live-record.md); a watcher polls them. Already captured: the polled record **echoes `payload` verbatim** (the mechanism H1 predicts, one step short of the terminal edit record), `outcome` is null while queued, and the poll endpoint matches `polling.go`'s assumption. Remediation proceeds keyed on `outcome` with the echoing fixture. Operator: GMI Discord is the cheap resolver. Items 2–3 wait for a working image queue. |
+| **T6** | **REMEDIATE — round 1 (0C/3H/3M/2L), and the model beneath it has changed.** T6b item 1 (live, 2026-09-05, ~$0.25) established that **`Flux2-Klein` and `Z-Image` never generate** — they accept and sit at `status:"queued"` forever, so T6's `DefaultModel` was dead on arrival. **`seedream-5.0-lite` works**, is synchronous, takes references as an **array of URLs** rather than inline base64, and returns results at `outcome.media_urls[].url` (array of objects, with a thumbnail URL beside it). **H1 is confirmed Critical** — the queue does echo `payload` — and the fix is now unambiguous: read `outcome.media_urls[].url` by name, never walk the body. Pinned production settings: `size:"1792x2240"` (4:5, not the `2K` preset — it infers shape from prose and a book needs identical pages), `output_format:"jpeg"` (342 KB vs 4.4 MB PNG), `watermark:false`. ~$0.39 a book. Forces a **contract change to `media.EditImage`**, whose `refImage []byte` signature cannot express an array of URLs — T2 is closed, so that needs its own owner and round. See t6b-live-record.md. |
+| **T6b** | **Item 1 DONE** 2026-09-05 (~$0.25, 7 calls). Settled the model question, the response shape and H1's severity — see t6b-live-record.md. Items 2–3 (eight pages with a constant cast; render → persist → serve end to end) still wait on T6 closing. **Untested and worth one experiment before remediation hardens per-page i2i:** `sequential_image_generation:"auto"` with `max_images` up to 15, which the vendor offers *for consistency* and which may answer T6's whole problem differently; and multi-reference (up to 14 images), relevant to pages with two or three cast members where today only one reference is passed. |
 | **T7** | Not started. Capability **verified live** 2026-09-04 — see T7. |
 | **T8** | Not started. |
 | **T9** | Not started. |
@@ -666,8 +666,40 @@ error:
 
 | Model id | Why it is forbidden | Where it bites |
 | --- | --- | --- |
+| `Flux2-Klein`, `Z-Image` | **They accept and then never generate.** `status:"queued"` forever — measured 2026-09-05 over ~72s, reproduced in the GMI console. Worse than a 404, which would fail on the first call: this hangs every page to its deadline and reads as a network fault. | Everything. These were §T6's *chosen* models. |
 | `Qwen-Image-2512` | **t2i only — it cannot take a reference image.** An i2i call against it succeeds and ignores the reference. | The image lock, i.e. the whole of §T6 |
 | `H3` / any video model | Not free; explicitly out of scope (project.md §Scope) | Budget |
+
+**Use `seedream-5.0-lite`.** Measured working 2026-09-05; full record in
+`adversarial-review/t6b-live-record.md`. The production call shape:
+
+```json
+{"model":"seedream-5.0-lite","payload":{
+  "prompt":"…visual verbatim… + style suffix…",
+  "image":["https://…reference sheet URL…"],
+  "size":"1792x2240","output_format":"jpeg",
+  "max_images":1,"watermark":false}}
+```
+
+* **Synchronous.** `status:"success"` comes back on the POST, ~14s. No polling.
+* **Read the result at `outcome.media_urls[].url`** — an array of **objects**
+  `{"id","url"}`, with `outcome.thumbnail_image_url` sitting beside it. Read it
+  **by name**. Do not walk the body looking for something media-shaped: that is
+  round-1 **H1**, and the thumbnail alone is enough to break a walker.
+* **`payload.image` is an array of URLs, not inline base64.** Chain GMI's own
+  public output URL from the reference sheet — no hosting needed mid-generation.
+* **`size` is pinned to `1792x2240`, not the `2K` preset.** Both give the same
+  pixels, but the preset infers its shape from prose in the prompt, so a prompt
+  edit silently changes a page's aspect ratio — and eight pages must be
+  identical or the two-page spread has mismatched heights. There is a hard
+  pixel floor of 3,686,400, so a phone-sized image cannot be requested at all.
+* **`output_format: "jpeg"`** — 342 KB against 4.4 MB for the same-size PNG.
+  Decisive because T7 inlines the reference sheet as base64 to M3.
+
+**Contract change this forces.** `media.EditImage(ctx, refImage []byte, …)`
+inlines base64 into `payload.image` as a *string*. Seedream needs an *array of
+URLs*, which that signature cannot express. T2 is closed, so this needs an
+owner and a round — it is not a fix to make in passing.
 
 `Qwen-Image-2512` is not a hypothetical: it shipped as the default for both
 `GenerateImage` and `EditImage` in T2 and survived two review rounds

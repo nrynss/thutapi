@@ -175,10 +175,20 @@ Content-block shape:
   {"type":"image_url","image_url":{"url":"data:image/png;base64,..."}}]}
 ```
 
-**Useful asymmetry:** images go in as **inline `data:` base64 URIs** — no
-hosting needed. That is the opposite of Speech 2.8's `source_audio`, which must
-be a public URL the backend can download. The consistency loop therefore needs
-no infrastructure at all.
+**Useful asymmetry:** for **M3's text endpoint** (this consistency check),
+images go in as **inline `data:` base64 URIs** — no hosting needed.
+
+**The image *generation* endpoint is different, and this was measured on
+2026-09-05.** `seedream-5.0-lite` takes `payload.image` as an **array of
+reference image URLs**, not inline base64. The "no hosting needed" conclusion
+survives anyway, by a different route: GMI's own output URLs are public and
+unauthenticated, so a reference sheet renders, GMI returns a public URL, and
+that URL feeds straight into the next call's `image` array. Nothing needs
+hosting on our side *during* a generation — but those URLs are assumed to
+expire, so T7 still downloads and persists for the finished book.
+
+Speech 2.8's `source_audio` is the third case: a public URL we must host
+ourselves, because the sample originates with us.
 
 This is also worth real points: it uses multimodality *as input* in the
 Multimodality track rather than only emitting picture-and-sound, and it is a
@@ -200,15 +210,27 @@ switch and pick on how well the character holds.
 
 | Model | Per book (10 imgs) | i2i |
 |---|---|---|
-| Z-Image / Flux2-Klein / GLM-Image / Flux2-Dev | **$0.10** | yes |
-| Z-Image-Turbo-Fun-Controlnet-Union-2.1 | $0.10 | yes + controlnet |
+| ~~Z-Image / Flux2-Klein~~ **— DO NOT USE, they never generate** | $0.10 | accepts, then hangs |
+| GLM-Image / Flux2-Dev / Z-Image-Turbo-…-Controlnet | $0.10 | untested — assume nothing |
 | ~~Qwen-Image-2512~~ **— FORBIDDEN, do not use anywhere** | $0.10 | **no — t2i only, cannot take the reference. An i2i call succeeds and silently ignores the reference.** |
 | gemini-2.5-flash-image | $0.39 | yes |
 | seedream-5.0-lite / gemini-3.1-flash-lite-image | $0.35 | yes |
 
-Start on **Flux2-Klein** or **Z-Image**. If characters drift, switch to
-`gemini-2.5-flash-image` — the extra 29 cents is irrelevant and it is the
-strongest of the set at holding a character.
+**Chosen: `seedream-5.0-lite` ($0.035 an image, ~$0.39 a book).** Measured
+live 2026-09-05 — see `adversarial-review/t6b-live-record.md`.
+
+**`Flux2-Klein` and `Z-Image` do not work.** They accept a request, return
+`status:"queued"`, and never generate — verified over ~72s of polling, and
+reproduced by the operator in the GMI console. That is a worse failure than a
+404: a 404 classifies as `ErrModelNotFound` and fails on the first call, while
+this hangs every page until its deadline and looks like a network fault. The
+price advantage of the $0.10 tier was never real, because the tier never
+delivered an image.
+
+Seedream is also **synchronous** (`status:"success"` on the POST itself, ~14s),
+takes up to 14 reference images, and offers `sequential_image_generation` for
+consistency. If characters still drift, `gemini-2.5-flash-image` remains the
+fallback — choose on consistency, never on price.
 
 ### 4. Audio — Speech 2.8
 
