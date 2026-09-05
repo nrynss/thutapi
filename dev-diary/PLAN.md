@@ -104,11 +104,12 @@ size as the yardstick:
 | --- | --- | --- | --- | --- |
 | ~~**T7**~~ | — | — | **DONE** `fa3a516` | Closed at round-2 APPROVE 0/0/0/0 |
 | ~~**T6b‑3**~~ | — | — | **DONE** `6664be3` | render → persist → serve, live PASS |
-| **T8** | `internal/audio/**` + one nil-able hook in `internal/interview` | — (T2, T5 closed) | **M** | 8 narration calls at ~24 s each need fan-out, not a loop; questions must never wait on TTS |
+| **T8** | `internal/audio/**` + one nil-able hook in `internal/interview` | — (T2, T5 closed) | **M**, in flight | Mid-remediation. **Carries one new contract change**: question audio must persist and arrive as a second SSE event (§The flow → wire contract 2) |
 | **T9** | `static/**`, `internal/web/**`, route lines | T4 — and see below on T8 | **L** | The only track whose verification is a **real phone**, not a test. Largest remaining surface |
-| **T9a** | `static/race/**` | — | **S** | The sprites, not the motion. Prototype already runs (`dev-diary/prototypes/race.html`) |
+| ~~**T9a**~~ | `static/race/**` | — | **DONE** | Closed at round-2 APPROVE 0/0/0/0 |
 | **T10a** | `internal/bookvideo/**`, ffmpeg lines in `Dockerfile` | — | **S–M** | Nothing: recipe proven, fixtures on disk (t10-video-record.md). `exec.Command` hygiene, `t.Skip` when ffmpeg is absent |
-| **T10b** | book template in `internal/web/**`, `static/book/**`, route lines | T9, T10a, and T7+T8 for real data | **S** | One route, one `<video>`, `Content-Disposition`. Small *because* T10a took the work |
+| **T10b** | book template in `internal/web/**`, `static/book/**`, route lines | T9, T10a, T10c | **S** | One route, one `<video>`, `Content-Disposition`. Small *because* T10a took the work |
+| **T10c** | `internal/bookgen/**` + route lines | T5, T6, T7, T8, T10a | **M** | Nothing joins the stages today. Exactly-once triggering at ~$0.35 a run, and the events screen 5 lives on |
 | **T11** gate | `internal/gate/**` + route wrap | — | **S** | Middleware against no one else's code |
 | **T11** sweep | retention sweep in `internal/mediastore/` | — (T3 closed) | **S** | Disk cap arithmetic |
 | **T11** prewarm | fixtures | T10b | **M** | Needs real finished books: money, clock, free window |
@@ -129,11 +130,15 @@ re-plumbing every playback call, and the naive retrofit (`new Audio()` per
 clip) is the exact silent iOS failure §T8 warns about. Sequencing removes the
 seam question entirely: T9 builds against a wire that already carries the URL.
 
-What T8 hands T9 is small and additive either way — `questionEvent`
-(`internal/interview/turn.go:19`) gains
-`AudioURL string \`json:"audio_url,omitempty"\``, and the clip serves over T3's
-existing `GET /media/{id}`, so **T8 adds no route and never touches
-`newServer`.**
+~~What T8 hands T9 is a field on `questionEvent`.~~ **Corrected 2026-09-05
+after an outside review — that was wrong twice over**, and the correct
+contract is in §The flow → *The wire contracts*. Putting `audio_url` on
+`questionEvent` would make the event unpublishable until the TTS round-trip
+finished, i.e. **text waiting on audio**, the one rule §T8 and project.md §4
+both lead with; and it names a `/media/{id}` URL that does not exist, because
+`audio.SynthesizeQuestion` returns bytes and deliberately touches no store
+(`internal/audio/audio.go:380`, `:326`). Question audio is a **second SSE
+event**, not a field.
 
 #### Two dependencies this plan overstates
 
@@ -152,8 +157,11 @@ existing `GET /media/{id}`, so **T8 adds no route and never touches
 
 #### The critical path
 
-**~~T7~~ → T8 → T9 → T10b → T11 → T14**, with **T10a in flight** ahead of T10b
-and **T9a** droppable anywhere.
+**~~T7~~ → T8 → T10c → T9 → T10b → T11 → T14**, with ~~T10a~~ and ~~T9a~~ done.
+
+**T10c moved onto the critical path on 2026-09-05** and it sits *before* T9,
+not after: screen 5 cannot be built against a stream that does not exist, and
+T10c is what makes a book exist at all.
 
 That is close to a straight line, and deliberately so. The one place a second
 worker pays for itself is **T14's README and demo-video prep**, which is prose,
@@ -184,9 +192,10 @@ routes anyway; not worth doing speculatively before then.**
 | **T6** | **DONE** 2026-09-05. Round-1 review (0C/3H/3M/2L) remediated and re-reviewed: **round 2 APPROVE 0/0/0/0, zero residue** (t6-round1.md → t6-remediation-round1.md → t6-round2.md). T6b item 1 (live, ~$0.25) had already established the model change beneath the round: **`Flux2-Klein` and `Z-Image` never generate** (accept, sit at `queued` forever) — they moved onto the forbidden table; **`seedream-5.0-lite`** is `DefaultModel`, synchronous, references as an **array of URLs**, results at `outcome.media_urls[].url` (array of objects beside `thumbnail_image_url`). H1 (payload echo beats the result) was confirmed Critical and fixed by keying the decode on `outcome.media_urls` by name; the echoing fixture now lives in the suite and page bytes are asserted ≠ sheet bytes. Round-1 remediation also landed the sanctioned `media.EditImage`/`GenerateImage` contract change (`ImageOptions`, `refImages []string` URL array, clean cutover) and fixed H2 (variant fusion only same-entity), H3 (absence words drawable), M1 (normalised forbidden-id guard incl. dead models and video stems), M2 (zero-Book pinned on render paths, M-k red), M3 (deferred unsupported candidates), L1, L2 (redirect scheme allow-list per hop + cap). Full M-a..M-k table re-run 11/11 red by the round-2 reviewer, tree byte-identical. Pinned production settings: `size:"1792x2240"` (not the `2K` preset), `output_format:"jpeg"`, `max_images:1`, `watermark:false`. The live half of the Done when (eight pages, constant cast; render → persist → serve) is T6b items 2–3, which open now that T6 has closed. |
 | **T6b** | **DONE** 2026-09-05 — all three items closed, ~$1.00 total. Item 1 (~$0.25): settled the model question (seedream-5.0-lite; Flux2-Klein/Z-Image never generate), the response shape (`outcome.media_urls[].url`, array of objects) and H1's severity. Item 2 (10 calls, ~$0.35): full eight-page constant-cast book live after T6 closed — PASS, 236 s, no page byte-identical to its sheet (H1 echo absent live), multi-reference pages hold both entities, M3-as-judge `match=true, drift=none` on all eight pages; renders under `data/live/t6b-book/` for human review. Item 3 (8 calls over two runs, ~$0.28): render → persist → serve end to end after T7 closed — T7's BookWriter placed 2 sheets + 2 pages (immediate sheets, post-approval pages, echo guard held), every id fetched back 200 `image/jpeg` byte-identical through the real `GET /media/{id}` route pattern; the first run's 404s were the probe's own serve-leg bug (bare-mount vs route pattern), not the product. Full record: t6b-live-record.md. The download/mux tail after serve is T10's (offline chain proven in t10-video-record.md). |
 | **T7** | **DONE** 2026-09-05, closed at `fa3a516`. Round-1 review (t7-round1.md) REMEDIATE 0C/0H/2M/1L → remediation (t7-remediation-round1.md) pinned all three → **round-2 APPROVE 0/0/0/0, zero residue** (t7-round2.md; all seven mutants re-run red/hang, byte-identical restores). Implemented T6's closing loop in `internal/illustrate/verify.go` + `persist.go`: echo guard (a page byte-identical to a locked sheet is `ErrDecodeEcho` — a decode defect, judged never, regenerated never), M3-as-judge verdict with up to 2 regenerations of the same prompt+sheets (`ErrConsistency` after the cap), judge transport errors surfaced unretried, `ErrBadVerdict` on unusable replies; sheets persist immediately per render, pages only post-approval, `ErrConflict` re-run replaces the occupant. Config gains `Judge` + `Persist` (nil = off; zero value byte-for-byte T6, no T6 test edited). Six contract rows C1–C6 sanctioned. The judge mechanism was pre-verified live (T6b item 2: M3 verdicts over the eight-page book). Live half of T7's loop (render → persist → serve end to end) is T6b item 3, which opens now. |
-| **T8** | Not started. |
+| **T8** | **In flight** 2026-09-05 (`t8-round1.md`, `t8-remediation-round1.md`). **One contract change is owed on top**, found by an outside review of the T9 spec and recorded in §The flow → wire contract 2: `SynthesizeQuestion` returns bytes and touches no store by design (`internal/audio/audio.go:380`, `:326`), so there is no URL for the UI to play. Question audio must persist like narration and arrive as a **second** SSE event — putting `audio_url` on `questionEvent` would make text wait on audio, the one rule this track leads with. |
 | **T9** | Not started. |
 | **T9a** | **DONE** 2026-09-05. Closed after round-1 remediation and **round-2 APPROVE 0/0/0/0, zero residue** (t9a-round1.md, t9a-remediation-round1.md, t9a-round2.md). Delivered in `static/race/**`: standalone `race.html` and `index.html` with single-property `--done: 0..8` interface, 8 markers, composite-only `transform: scaleX(...)` progress bar, 5 distinct custom animal sprites (Hare, Tortoise, Fox, Duck, Mouse) with unique silhouettes at 64×44, `.runner svg{overflow:visible}` preventing ear clipping during `.bob`, non-overshooting deceleration curve `cubic-bezier(.25, 1, .5, 1)` preventing finish line clipping, full palette tokenization via CSS `var()`, and `prefers-reduced-motion` support. Suite passes in `race_test.go`. |
+| **T10c** | **Not started. Assigned 2026-09-05** on an outside review of the T9 spec — the Phase B orchestration seam. Every stage is built and APPROVE'd and **nothing joins them**: `closeTurn` publishes `ended` and returns, and no caller of `story.Structure`, `illustrate.Illustrate` or `internal/bookvideo` exists outside their own tests. Now on the critical path, **ahead of T9**. See §T10c. |
 | **T10a** | **DONE** 2026-09-05. Closed after round-1 remediation and **round-2 APPROVE 0/0/0/0, zero residue** (t10a-round1.md, t10a-remediation-round1.md, t10a-round2.md). Implemented video pipeline in `internal/bookvideo` (`types.go`, `command.go`, `video.go`, `bookvideo_test.go`): title card (blurred page 1 with title + byline via `textfile=`), page segments (`-shortest`, scale/pad/setsar 1080x1350 4:5 portrait, libx264/aac), end card (flat `0x1b1614` with domain attribution), and concat demuxer (`-c copy +faststart` with MP4 metadata tags). Bounded concurrency via `errgroup.SetLimit`. Added static ffmpeg 7.1 pinned by immutable sha256 digest to `Dockerfile`. Coverage 89.1%. |
 | **T10b** | Not started. Book template under `internal/web/**`, `static/book/**`, and route lines in `newServer`. |
 | **T11** | Not started. |
@@ -263,6 +272,7 @@ Things the task graph assumes exist, that no track's `Owns` line covers.
 | **Job orchestration** (start → job id → progress events → result) | T4, T5, T6, T8, and every SSE consumer | **Assigned: T3b** as `internal/job`, alongside the broker. |
 | **Request-queue polling** | T6, T8 | **Assigned: T3b** — built inside `internal/gmi/media` per invariant 4, so it lands once. |
 | **`internal/web`** (shell template, book template) | T9, T10 | Now named in T9's and T10's `Owns`. Previously implied by AGENTS.md's file layout and by nothing else. |
+| **Phase B orchestration** (interview ends → structure → illustrate + verify + persist → narrate → render → serve) | §The flow screens 5–6, T5, T6, T7, T8, T10a — *everything downstream of the interview* | **Assigned: T10c** (2026-09-05, on an outside review of the T9 spec). Found by grep: **nothing outside its own package and tests calls `story.Structure`, `illustrate.Illustrate` or `internal/bookvideo`.** `closeTurn` (`internal/interview/turn.go:238`) publishes `ended` and triggers nothing. Every generation stage exists and is APPROVE'd; no code makes a book. |
 | **Illustration persistence** (render → `mediastore` blob → `store.SetMediaPlace`) | T6 renders and deliberately writes nothing; T10 serves what must already be on disk | **Resolved: T7** (2026-09-05 — assigned on round-1 ruling 2, implemented in `persist.go`, closed at `fa3a516`). A page is final when the judge approves it; sheets persist immediately, pages post-approval, `ErrConflict` re-run replaces the occupant. T10 now reads what T7 wrote; T6b item 3 proves the render → persist → serve path live. |
 
 
@@ -1078,6 +1088,80 @@ its place; a loop that encodes real state does.
   number (pages approved) and renders. It can be built and reviewed in a
   browser on its own, ahead of or behind anything else in T9.
 
+### The wire contracts these screens need
+
+*Added 2026-09-05 after an outside review of the T9 spec. Every item below was
+checked against the code, and each one is a place where T9's implementer would
+otherwise have had to guess across a closed track.*
+
+**1. Question zero reaches the book through `POST /interviews`.**
+`h.start` takes no request body and creates the book with `WorkingTitle`
+(`internal/interview/http.go:74-75`, `interview.go:157`), and no route writes
+`books.byline`. So the column added at `847e9b6` is currently unreachable.
+**Contract:** `POST /interviews` accepts an optional JSON body
+`{"byline": "Mira"}`; the name lands on the book row **before** the opening
+turn fires, and absent or empty is a normal case. Not a separate endpoint —
+the UI already has to make this call, and a second round-trip buys nothing.
+
+**2. Question audio is a second SSE event, never a field on `questionEvent`.**
+`audio.SynthesizeQuestion` returns **bytes** and touches no store by design —
+*"the question path needs neither"* (`internal/audio/audio.go:380`, `:326`).
+Bundling an `audio_url` into `questionEvent` would therefore both name a URL
+that does not exist **and** hold the text until the TTS round-trip finished,
+which is exactly *text waiting on audio*.
+
+**Contract:** two events on the existing `/interviews/{id}/events` stream.
+
+```
+event: question         → {"turn":1,"text":"…","chips":[…]}   fires immediately
+event: question_audio   → {"turn":1,"audio_url":"/media/<id>"} fires when it lands
+```
+
+The second may **never arrive** — TTS failed, or was slow past the turn — and
+the UI must treat that as normal and stay silent, not spin. This makes question
+audio persist to `mediastore` like narration does, so the URL is real and
+serves over the proven `GET /media/{id}` with Range. **That is a contract
+change against T8, which is mid-remediation: it belongs in T8's next round
+file, not in a quiet edit.**
+
+**3. Something has to start the six minutes — see T10c.** `closeTurn`
+publishes `ended` and returns (`internal/interview/turn.go:226-239`). Nothing
+in the repo calls `story.Structure`, `illustrate.Illustrate` or
+`internal/bookvideo` outside their own tests. Screen 5 has no stream to
+subscribe to and no job to watch until **T10c** exists.
+
+**4. Human pages are singular; the API stays plural.** `GET /interviews/{id}`
+already serves JSON (`cmd/thutapi/main.go:154`), and Go's `ServeMux` matches
+patterns literally — two handlers cannot share that pattern.
+
+| Purpose | Path |
+| --- | --- |
+| Shelf (screen 1) | `GET /` |
+| Interview page (screens 3–5) | `GET /interview/{id}` |
+| Book page (screen 6) | `GET /book/{id}` |
+| API, unchanged | `POST/GET /interviews…`, `GET /media/{id}` |
+
+**Do not content-negotiate on `Accept`.** It cannot be expressed in the mux, it
+makes a cold link's behaviour depend on a header the sharer never sees, and it
+is the kind of thing that works in `curl` and fails in a messaging app's link
+preview.
+
+**5. The audio unlock can be missed, and must fail soft.** Screen 1's CTA is
+the gesture — but a refresh mid-interview, or a shared `/interview/{id}` link
+opened cold, never passes through it, and iOS Safari then throws
+`NotAllowedError` on the first `play()`. **Contract:** when the element is not
+unlocked, render a small *"tap to listen"* speaker chip beside the question;
+the first tap unlocks the element and plays. Never a silent failure, never a
+modal.
+
+**6. Screen 4 degrades on the device, not on the cut list.** T12 and T13 both
+ship — **nothing is cut** (operator, 2026-09-05). What screen 4 must survive is
+a *device* that cannot record: no `MediaRecorder`, no secure context, or a
+denied microphone permission. In each case the record button is absent or
+disabled with a warm line, **upload and skip remain**, and the flow continues.
+`getUserMedia` needs a secure context, so this is not hypothetical — it is what
+a phone hitting `http://192.168.x.x:8080` during §T9 testing will do.
+
 ### Screen 5's other state — the failure path (decided)
 
 T6 and T7 return a **zero Book on any error**, so a failure is total, not
@@ -1366,6 +1450,78 @@ n9.0.1.
 
 ---
 
+## T10c — The generation pipeline
+
+**Owns:** `internal/bookgen/**` and its route lines in `newServer`.
+
+**Depends on:** T5, T6, T7, T8, T10a — every stage it drives. **Done when:** a
+closed interview becomes a finished, playable book with no human step in the
+middle, and screen 5 can watch it happen.
+
+**Assigned 2026-09-05, on an outside review of the T9 spec.** Until then this
+was an unowned seam of the most dangerous kind: *every stage was built and
+APPROVE'd, and nothing joined them.* `closeTurn` publishes `ended` and returns
+(`internal/interview/turn.go:226-239`), and grep finds **no caller of
+`story.Structure`, `illustrate.Illustrate` or `internal/bookvideo` outside
+their own packages and tests**. The task graph's arrows were real as
+dependencies and imaginary as code.
+
+### It is triggered, not automatic — and that follows from screen 4
+
+```
+POST /interviews/{id}/generate   →  job id, then events on the book's topic
+```
+
+Generation must **not** fire on `ended`, because §The flow puts the grown-up
+voice step *between* the interview ending and generation starting, and a clone
+has to exist before narration runs. An automatic trigger would either race
+screen 4 or force it earlier. So the UI calls this once screen 4 is done or
+skipped, and the route is also the natural place for §T11's gate to sit — it is
+the one route in the product that spends money.
+
+**A second POST for a book already generating must not start a second run.**
+T3b's runner has a cancel registry and exactly-once terminal states; use them.
+At ~$0.35 and six minutes a run, a double-fire is the cheapest possible
+expensive bug.
+
+### The stages, in order
+
+1. `story.Structure` — transcript → 8 pages, cast, per-page prompt and emotion.
+2. `illustrate.Illustrate` with **both** `Config.Judge` and `Config.Persist`
+   set — T7's closing loop. Sheets persist on render, pages post-approval.
+3. `audio.NarrateBook` — one persisted clip per page, in page order (§T8).
+4. `bookvideo` — segments and `concat -c copy` into the film (§T10a), then
+   §T12's bed if it landed.
+5. Mark the book ready, so `GET /book/{id}` serves cold.
+
+### The events screen 5 lives on
+
+Runs under `internal/job` (T3b) and publishes to the broker on the **book's**
+topic — not the interview's, which carries turns and ends at `ended`.
+
+```
+event: page_approved  → {"n":3,"image_url":"/media/<id>"}
+event: book_ready     → {"video_url":"/media/<id>"}
+event: failed         → {}                       (no code, no prose — §T9)
+```
+
+`page_approved` is what drives the race: **screen 5 counts them into
+`--done`**, which is the whole reason T9a's interface is one number. A late
+subscriber must be able to catch up — a reload at minute four cannot restart
+the race at zero — so the book's current state has to be readable, the way
+`GET /interviews/{id}` already lets a late subscriber catch up on turns.
+
+### Cost, and the shape of failure
+
+A run is ~$0.35 and ~6 minutes (236 s images measured in T6b item 2, plus the
+judge pass, narration and the render). T6 and T7 return a **zero Book** on any
+error, so a failure is total: there is no partial book to serve, and `failed`
+means the whole run. §The flow's failure path — animals sit, two doors, **no
+automatic retry** — is the UI half of this, and the reason a retry is a tap
+that spends a gate token rather than something the pipeline does on its own.
+
+---
+
 ## T11 — Hardening
 
 **Owns:** `internal/gate/**`, the retention sweep in `internal/mediastore/`, and the prewarm fixtures.
@@ -1602,6 +1758,10 @@ character consistency (T6 — without it there is no book).
 | 11 | T1 artifacts vs T1b live verification — split T1 into artifact-only close + operator-dependent T1b (DNS + foleyflow SSH). | T13, T14 | Done 2026-09-04 — T1 closed at 65df379, T1b unblocks operator run; without the split T2-T13 all blocked on operator work. |
 | 13 | Book delivery: flipbook or MP4. | T10, T14 | **Decided 2026-09-05: MP4.** Free to decide now, expensive once a page-turn UI is laid out. Deletes the swipe/spread/audio-sync work, collapses the T8 autoplay hazard, and hands T14 a shareable artifact it needs anyway. |
 | 14 | Byline on the title card, and where the name comes from. | T9, T10 | **Decided 2026-09-05: the child's name, and the interview asks for it — as question zero, outside the model loop.** The byline is not a privacy question: the parent uploads the file and can change anything before it goes anywhere. It is also **not a checklist slot and not in the prompt** (operator, explicit): the checklist is six *story* slots taught in `internal/interview/prompt.go` in three places, and T4 is closed. Question zero is asked by the UI, answered by the child, stored on the book — M3 never sees it. Blank ⇒ the card carries the title alone. |
+| 18 | How question zero reaches `books.byline`. | T9, T4 | **Decided 2026-09-05: `POST /interviews` takes an optional `{"byline":"…"}`.** The UI already makes that call; a second endpoint buys a round-trip and nothing else. Absent or empty is normal. |
+| 19 | How question audio reaches the client. | T8, T9 | **Decided 2026-09-05: a second SSE event `question_audio`, never a field on `questionEvent`.** A field would hold the text until TTS returned — *text waiting on audio* — and would name a `/media` URL that does not exist, since `SynthesizeQuestion` touches no store. It may never arrive; the UI stays silent, not spinning. |
+| 20 | What starts the six minutes. | T9, T10c | **Decided 2026-09-05: an explicit `POST /interviews/{id}/generate`, not an automatic trigger on `ended`.** Screen 4 sits between the interview ending and generation starting, and the clone must exist before narration; an automatic trigger would race it. It is also where §T11's gate belongs — the one route that spends money. |
+| 21 | UI routes vs the JSON API. | T9, T10b | **Decided 2026-09-05: human pages are singular (`/`, `/interview/{id}`, `/book/{id}`), the API stays plural.** `GET /interviews/{id}` already serves JSON and Go's `ServeMux` matches literally. **No `Accept` negotiation** — it cannot be expressed in the mux and makes a shared link's behaviour depend on a header the sharer never sees. |
 | 15 | The ~6-minute wait: spinner, or something to watch. | T9, T9a | **Decided 2026-09-05: the race** (§The flow screen 5). Eight markers, one per page — the animation encodes real progress, so §T10's "no percentage" rule survives. Prototyped the same day; the mechanism is settled and only the sprites are left. |
 | 16 | Where voice capture sits in the flow. | T9, T13 | **Decided 2026-09-05: at the interview's end**, one skippable screen. Narration has not started, so the clone is ready exactly when T8 needs it and nothing regenerates. |
 | 17 | What the child sees when generation fails. | T9 | **Decided 2026-09-05: animals sit down, one warm line, two equal doors — *try again* and *look at other books*. No automatic retry** — a regeneration is ~$0.35 and six minutes, and after 2026-09-06 it bills; an auto-retry on a public URL is the open wallet §T11 item 1 exists to prevent. |
