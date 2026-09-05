@@ -20,13 +20,15 @@ import (
 )
 
 // runBook executes one book's generation pipeline, in the PLAN.md
-// §T10c/§T10f stage order: structure → rows → illustrate (judge + persist)
-// → narrate → PDF → film → ready. It is the body of the generate job and
-// returns the persisted PDF and film media ids on success — the values
-// book_ready's pdf_url and video_url are built from — and an error on
-// any fatal failure. When narration fails with a transient error (e.g. 503 /
-// gmi.ErrTransient), narration is skipped, narration_unavailable is published,
-// film rendering is skipped, but the PDF is still rendered and the run succeeds.
+// §T10c/§T10f/§T10g stage order: structure → rows → illustrate (judge +
+// persist) → narrate → PDF → film → ready. It is the body of the generate
+// job and returns the persisted PDF and film media ids on success — the
+// values book_ready's pdf_url and video_url are built from — and an error
+// on any fatal failure. When narration fails with a transient error (e.g.
+// 503 / gmi.ErrTransient), narration is skipped and narration_unavailable is
+// published, but the film is still rendered — a captioned silent film whose
+// page segments hold for words/2.0 s (§T10g three tiers) — and the run
+// succeeds with both a pdf_url and a video_url.
 func (h *Handler) runBook(ctx context.Context, bookID, ivID string) (pdfID, videoID string, err error) {
 	// The run outlives the POST that started it, so everything is read
 	// fresh: the interview row carries the transcript to structure and
@@ -66,11 +68,13 @@ func (h *Handler) runBook(ctx context.Context, bookID, ivID string) (pdfID, vide
 		// the race must never silently lose a page.
 		return "", "", err
 	}
-
 	// Stage 3 — narrate: one persisted clip per page, in page order.
 	// If narration fails with a transient error (e.g. 503 / gmi.ErrTransient),
-	// narration is skipped, narration_unavailable is published, and film
-	// is skipped; the PDF is still rendered and the run succeeds.
+	// narration is skipped and narration_unavailable is published once; the
+	// run continues to the PDF stage and then the film stage, which renders a
+	// captioned silent film (§T10g: the outage costs the voices, not the
+	// video). Any other narration failure is total — the run ends before the
+	// PDF stage.
 	clips, err := audio.NarrateBook(ctx, audio.Config{
 		TTS:   h.cfg.TTS,
 		DB:    h.cfg.DB,
@@ -78,7 +82,7 @@ func (h *Handler) runBook(ctx context.Context, bookID, ivID string) (pdfID, vide
 	}, bookID, st.Pages)
 	if err != nil {
 		if errors.Is(err, gmi.ErrTransient) && ctx.Err() == nil {
-			h.log.Warn("bookgen: narration unavailable, skipping narration and film", "book", bookID, "err", err)
+			h.log.Warn("bookgen: narration unavailable; the film will be captioned and silent", "book", bookID, "err", err)
 			h.cfg.Broker.Publish(Topic(bookID), stream.Event{Name: "narration_unavailable", Data: narrationUnavailableData})
 			clips = nil
 		} else {
@@ -92,12 +96,11 @@ func (h *Handler) runBook(ctx context.Context, bookID, ivID string) (pdfID, vide
 		return "", "", err
 	}
 
-	// Stage 5 — Film: rendered only when narration clips exist.
-	if clips != nil {
-		videoID, err = h.renderFilm(ctx, bookID, st, clips)
-		if err != nil {
-			return "", "", err
-		}
+	// Stage 5 — Film: always rendered (with narration when clips exist,
+	// captioned-silent otherwise).
+	videoID, err = h.renderFilm(ctx, bookID, st, clips)
+	if err != nil {
+		return "", "", err
 	}
 
 	return pdfID, videoID, nil
@@ -244,9 +247,9 @@ func (b *approvalBridge) progress(p illustrate.Progress) {
 func (b *approvalBridge) err() error { return b.first }
 
 // renderFilm is stage 5 (PDF stage 4 always ran first): it reads the
-// persisted illustrations and narration clips, renders the film through
-// the video renderer, and persists the MP4 — blob first, then a store
-// row attached to the book
+// persisted illustrations and the page words, renders the film through the
+// video renderer, and persists the MP4 — blob first, then a store row
+// attached to the book
 // (kind empty: the store's kinds name a blob's role in its book and a
 // film has no page or cast anchor, so it is book media with no role —
 // BookMedia lists it, the §T11 retention sweep never touches it, and
@@ -254,13 +257,18 @@ func (b *approvalBridge) err() error { return b.first }
 // to the book (a regeneration) is superseded: the new blob is placed
 // first and the old rows are removed afterwards, so the book keeps
 // serving the previous film until the new one is on disk.
+//
+// clips is nil exactly when narration was unavailable (§T10g): the film is
+// then captioned and silent — every page still carries its words (they are
+// what the film shows) and bookvideo derives each silent page's hold from
+// them. When clips are present they must cover every page in order.
 func (h *Handler) renderFilm(ctx context.Context, bookID string, st story.Story, clips []audio.Clip) (string, error) {
-	if len(clips) != len(st.Pages) {
+	if clips != nil && len(clips) != len(st.Pages) {
 		return "", fmt.Errorf("bookgen: render: narrate returned %d clips for %d pages", len(clips), len(st.Pages))
 	}
 	inputs := make([]bookvideo.PageInput, len(st.Pages))
 	for i, p := range st.Pages {
-		if clips[i].N != p.N {
+		if clips != nil && clips[i].N != p.N {
 			return "", fmt.Errorf("bookgen: render: clip %d is for page %d, want page %d in order", i, clips[i].N, p.N)
 		}
 		ill, err := h.cfg.DB.PageMedia(ctx, bookID, p.N, store.MediaIllustration)
@@ -271,11 +279,15 @@ func (h *Handler) renderFilm(ctx context.Context, bookID string, st story.Story,
 		if err != nil {
 			return "", fmt.Errorf("bookgen: render: read page %d illustration blob: %w", p.N, err)
 		}
-		aud, err := os.ReadFile(filepath.Join(h.cfg.MediaDir, clips[i].Media.ID))
-		if err != nil {
-			return "", fmt.Errorf("bookgen: render: read page %d narration blob: %w", p.N, err)
+		page := bookvideo.PageInput{N: p.N, Text: p.Text, ImageBytes: img}
+		if clips != nil {
+			aud, err := os.ReadFile(filepath.Join(h.cfg.MediaDir, clips[i].Media.ID))
+			if err != nil {
+				return "", fmt.Errorf("bookgen: render: read page %d narration blob: %w", p.N, err)
+			}
+			page.AudioBytes = aud
 		}
-		inputs[i] = bookvideo.PageInput{N: p.N, ImageBytes: img, AudioBytes: aud}
+		inputs[i] = page
 	}
 
 	// The book row now carries the authored title and the byline; the

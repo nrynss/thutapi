@@ -513,12 +513,15 @@ func TestPipeline_RenderFailureAndFilmFailureAreTotal(t *testing.T) {
 	}
 }
 
-// TestPipeline_NarrationTransientOutageProducesPDF pins T10f's outage path:
-// when MiniMax TTS fails with gmi.ErrTransient (e.g. 503 capacity outage),
-// narration is skipped, narration_unavailable {} is published, film rendering
-// is skipped, the PDF is still rendered and attached, and book_ready is emitted
-// with pdf_url (and empty video_url). The run completes with StatusDone (not failed).
-func TestPipeline_NarrationTransientOutageProducesPDF(t *testing.T) {
+// TestPipeline_NarrationTransientOutageProducesCaptionedSilentFilm pins
+// §T10g's outage path, which supersedes T10f's pre-activation contract: when
+// MiniMax TTS fails with gmi.ErrTransient (e.g. 503 capacity outage),
+// narration is skipped, narration_unavailable {} is published once, the PDF
+// is still rendered and attached, and the film is STILL rendered — captioned
+// and silent, with the page words reaching the renderer and no audio bytes —
+// so book_ready carries both pdf_url and video_url. The run completes with
+// StatusDone (not failed).
+func TestPipeline_NarrationTransientOutageProducesCaptionedSilentFilm(t *testing.T) {
 	ph := newPipelineHarness(t)
 	ivID, bookID := ph.makeEndedInterview("Leo")
 	st := fullStory()
@@ -545,14 +548,15 @@ func TestPipeline_NarrationTransientOutageProducesPDF(t *testing.T) {
 		t.Fatalf("narration_unavailable event data = %+v, want empty {}", nu)
 	}
 
-	// book_ready arrives with pdf_url and empty/absent video_url:
+	// book_ready arrives with pdf_url AND video_url (the captioned-silent film):
 	ready := ph.waitEvent(sub, "book_ready")
 	pdfURL, ok := ready["pdf_url"].(string)
 	if !ok || len(pdfURL) < len("/media/x") || pdfURL[:len("/media/")] != "/media/" {
 		t.Fatalf("book_ready pdf_url = %q, want /media/<id>", pdfURL)
 	}
-	if v, exists := ready["video_url"]; exists && v != "" {
-		t.Fatalf("book_ready video_url = %v, want empty/absent during narration outage", v)
+	videoURL, ok := ready["video_url"].(string)
+	if !ok || len(videoURL) < len("/media/x") || videoURL[:len("/media/")] != "/media/" {
+		t.Fatalf("book_ready video_url = %v, want /media/<id> (the film is captioned-silent, never absent)", videoURL)
 	}
 
 	// Job finishes successfully!
@@ -561,9 +565,25 @@ func TestPipeline_NarrationTransientOutageProducesPDF(t *testing.T) {
 		t.Fatalf("job result = %+v, want done with no error", runRes)
 	}
 
-	// Film renderer was never called:
-	if len(ph.render.inputs()) != 0 {
-		t.Fatalf("film renderer was called %d times, want 0 on narration outage", len(ph.render.inputs()))
+	// Film renderer WAS called once — with the page words and no audio bytes
+	// (bookvideo derives each silent page's hold from its words).
+	ins := ph.render.inputs()
+	if len(ins) != 1 {
+		t.Fatalf("film renderer calls = %d, want 1 (captioned-silent film)", len(ins))
+	}
+	if len(ins[0].Pages) != story.PageCount {
+		t.Fatalf("render input pages = %d, want %d", len(ins[0].Pages), story.PageCount)
+	}
+	for i, p := range ins[0].Pages {
+		if p.Text != st.Pages[i].Text {
+			t.Fatalf("render input page %d text = %q, want the page's own words %q", p.N, p.Text, st.Pages[i].Text)
+		}
+		if len(p.AudioBytes) != 0 {
+			t.Fatalf("render input page %d carries audio bytes, want silent on outage", p.N)
+		}
+		if len(p.ImageBytes) == 0 {
+			t.Fatalf("render input page %d lacks image bytes", p.N)
+		}
 	}
 
 	// PDF renderer WAS called with the story:
@@ -575,7 +595,7 @@ func TestPipeline_NarrationTransientOutageProducesPDF(t *testing.T) {
 		t.Fatalf("pdf input title/byline = %q/%q, want %q/Leo", pdfIns[0].Title, pdfIns[0].Byline, st.Title)
 	}
 
-	// Exactly one application/pdf row attached to book, and NO video/mp4 row:
+	// Exactly one application/pdf row AND one video/mp4 row attached to the book:
 	all, err := ph.db.BookMedia(t.Context(), bookID)
 	if err != nil {
 		t.Fatalf("book media: %v", err)
@@ -592,11 +612,14 @@ func TestPipeline_NarrationTransientOutageProducesPDF(t *testing.T) {
 	if len(pdfRows) != 1 {
 		t.Fatalf("pdf rows = %d, want exactly 1", len(pdfRows))
 	}
-	if len(filmRows) != 0 {
-		t.Fatalf("film rows = %d, want 0 when narration is unavailable", len(filmRows))
+	if len(filmRows) != 1 {
+		t.Fatalf("film rows = %d, want exactly 1 (captioned-silent film)", len(filmRows))
 	}
 	if pdfRows[0].ID != pdfURL[len("/media/"):] {
 		t.Fatalf("book_ready pdf id %q != attached pdf row %q", pdfURL, pdfRows[0].ID)
+	}
+	if filmRows[0].ID != videoURL[len("/media/"):] {
+		t.Fatalf("book_ready video id %q != attached film row %q", videoURL, filmRows[0].ID)
 	}
 
 	// Served PDF matches:

@@ -999,8 +999,8 @@ func TestLiveBookGeneration(t *testing.T) {
 			if s.CodecName != "h264" {
 				t.Errorf("video codec = %q, want h264", s.CodecName)
 			}
-			if s.Width != 1080 || s.Height != 1350 {
-				t.Errorf("video dimensions = %dx%d, want 1080x1350", s.Width, s.Height)
+			if s.Width != 1080 || s.Height != 1620 {
+				t.Errorf("video dimensions = %dx%d, want 1080x1620", s.Width, s.Height)
 			}
 		}
 		if s.CodecType == "audio" {

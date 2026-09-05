@@ -33,21 +33,23 @@
 //	event: narration_unavailable → {}
 //	event: book_ready            → {"pdf_url":"/media/<id>","video_url":"/media/<id>"}
 //	event: failed                → {}
-//
+
 // page_approved fires the moment a page's illustration is approved and
 // persisted (the count screen 5's race reads into --done — PLAN.md
 // §T9a); book_ready fires once the run's finished artifacts are in
-// place: the PDF always, and the film whenever narration clips exist (a
-// transient narration outage leaves video_url out of the payload —
-// see the stage list); failed fires on ANY error, including a panic,
-// and means the whole run (T6/T7 return a zero Book on error — there
-// is no partial book to serve). The stream is from-now-on: a late
-// subscriber catches up from the store (approved pages are
-// MediaIllustration rows; the finished film and PDF are the book's
-// video/mp4 and application/pdf media rows), the way GET
-// /interviews/{id} catches up on turns. The HTTP read that serves that
-// state on the book's own route is T10b's surface — recorded as
-// contract row C4 of the T10c round-1 record, not invented here.
+// place: the PDF always, and the film always too — with narration when
+// clips exist, captioned-silent when a transient narration outage made
+// the run publish narration_unavailable (§T10g: the outage costs the
+// voices, not the video, so video_url is always present);
+// failed fires on ANY error, including a panic, and means the whole
+// run (T6/T7 return a zero Book on error — there is no partial book to
+// serve). The stream is from-now-on: a late subscriber catches up from
+// the store (approved pages are MediaIllustration rows; the finished
+// film and PDF are the book's video/mp4 and application/pdf media
+// rows), the way GET /interviews/{id} catches up on turns. The HTTP
+// read that serves that state on the book's own route is T10b's
+// surface — recorded as contract row C4 of the T10c round-1 record,
+// not invented here.
 //
 // # The stages, in order (all inside the job)
 //
@@ -67,22 +69,23 @@
 //     as page_approved events (see the bridge below).
 //  3. audio.NarrateBook — one persisted clip per page, in page order.
 //     A transient narration failure (gmi.ErrTransient, e.g. a 503
-//     capacity outage) is an outage, not an error: narration and the
-//     film are skipped, narration_unavailable {} is published once,
-//     and the run continues to the PDF stage and succeeds PDF-only.
-//     Any other narration failure is total — the run ends before the
-//     PDF stage.
+//     capacity outage) is an outage, not an error: narration is
+//     skipped, narration_unavailable {} is published once, and the run
+//     continues to the PDF stage. Any other narration failure is total
+//     — the run ends before the PDF stage.
 //  4. The printable PDF (PLAN.md §T10f): bookpdf renders the cover and
 //     pages from the persisted illustrations and text; the PDF is
 //     persisted, attached to the book, and supersedes any earlier PDF
 //     on regeneration. The PDF stage always runs once reached: its
 //     inputs (illustrations, text) never depend on narration, so the
 //     outage path reaches it too.
-//  5. The film: bookvideo renders title card + page segments + end
-//     card + concat from the persisted illustrations and narration;
-//     the MP4 is persisted and attached to the book (the row that
-//     makes GET /book/{id} serve cold, and the video_url book_ready
-//     names). Rendered only when narration clips exist.
+//  5. The film: bookvideo renders title card + captioned page segments
+//     + end card + concat from the persisted illustrations, the page
+//     words and — when narration exists — the clips; the MP4 is
+//     persisted and attached to the book (the row that makes
+//     GET /book/{id} serve cold, and the video_url book_ready names).
+//     The film is ALWAYS rendered: a transient narration outage leaves
+//     it captioned and silent (§T10g), never absent.
 //
 // A failure anywhere is total: the run returns an error, failed {}
 // fires, the job lands its terminal error state, and nothing retries
@@ -171,7 +174,7 @@ type pageApprovedEvent struct {
 
 type bookReadyEvent struct {
 	PDFURL   string `json:"pdf_url"`
-	VideoURL string `json:"video_url,omitempty"`
+	VideoURL string `json:"video_url"`
 }
 
 // failedData is the failed event's payload: {} — no code, no prose
@@ -474,10 +477,8 @@ func (h *Handler) generateJob(bookID, ivID string) job.Func {
 			return nil, err
 		}
 		ready := bookReadyEvent{
-			PDFURL: "/media/" + pdfID,
-		}
-		if videoID != "" {
-			ready.VideoURL = "/media/" + videoID
+			PDFURL:   "/media/" + pdfID,
+			VideoURL: "/media/" + videoID,
 		}
 		b, merr := json.Marshal(ready)
 		if merr != nil {

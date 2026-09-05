@@ -3,6 +3,7 @@ package bookgen
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"thutapi/internal/job"
@@ -101,7 +102,9 @@ func TestWirePayloadRawJSON(t *testing.T) {
 		t.Fatalf("page_approved wire = %s, want %s", b, want)
 	}
 
-	// Full book_ready with both PDF and Video:
+	// book_ready ALWAYS carries both URLs — §T10g: the outage costs the
+	// voices, not the video, so even a transient narration outage leaves
+	// video_url present (the captioned-silent film).
 	b, err = json.Marshal(bookReadyEvent{PDFURL: "/media/pdf1", VideoURL: "/media/vid1"})
 	if err != nil {
 		t.Fatalf("marshal book_ready: %v", err)
@@ -110,15 +113,8 @@ func TestWirePayloadRawJSON(t *testing.T) {
 	if string(b) != want {
 		t.Fatalf("book_ready wire = %s, want %s", b, want)
 	}
-
-	// Outage book_ready with PDF only (video_url omitted):
-	b, err = json.Marshal(bookReadyEvent{PDFURL: "/media/pdf1"})
-	if err != nil {
-		t.Fatalf("marshal book_ready outage: %v", err)
-	}
-	want = `{"pdf_url":"/media/pdf1"}`
-	if string(b) != want {
-		t.Fatalf("book_ready outage wire = %s, want %s", b, want)
+	if !strings.Contains(string(b), `"video_url"`) {
+		t.Fatalf("book_ready wire lacks video_url: %s", b)
 	}
 
 	if failedData != "{}" {

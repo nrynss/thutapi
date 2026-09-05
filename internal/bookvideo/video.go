@@ -42,8 +42,68 @@ func resolveConfig(cfg Config) (Config, error) {
 	return cfg, nil
 }
 
+// materializeFont returns a path to a drawtext font file: cfg.FontFile when
+// set, otherwise the embedded Fredoka Regular instance written into dir. The
+// runtime image ships no fonts and no fontconfig config, so every drawtext
+// needs an explicit fontfile (verified in-container); the embedded face is
+// the film's caption/card face (§T10g D4). The caller removes the returned
+// file when cleanup is non-nil.
+func materializeFont(cfg Config, dir string) (fontPath string, cleanup func(), err error) {
+	if cfg.FontFile != "" {
+		return cfg.FontFile, nil, nil
+	}
+	p, err := writeTempFile(dir, "fredoka-*.ttf", fredokaRegularTTF)
+	if err != nil {
+		return "", nil, fmt.Errorf("materialize font: %w", err)
+	}
+	return p, func() { _ = os.Remove(p) }, nil
+}
+
+// buildFontOpt renders the leading drawtext option fragment for a font path,
+// escaped for the filtergraph, ending with the option separator colon.
+func buildFontOpt(fontPath string) string {
+	return "fontfile=" + escapeFilterPath(fontPath) + ":"
+}
+
+// artAndBandVF is the page segment's geometry prefix: the illustration is
+// scaled to fill the 4:5 top area (increase + crop, so a stray aspect fills
+// rather than bars — §T10g) and the 270 px caption band below is the --surface
+// colour. Every page segment shares it so concat -c copy stays free.
+func artAndBandVF() string {
+	return fmt.Sprintf(
+		"scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,pad=%d:%d:0:0:color=%s,setsar=1,",
+		artWidth, artHeight, artWidth, artHeight, frameWidth, frameHeight, surfaceColor)
+}
+
+// captionDrawtext renders one caption block: a textfile of pre-wrapped lines,
+// centred per line with text_align=C at the band's vertical centre. Never one
+// drawtext per line and never text= — the words are model/child output and
+// belong in a file (§T10g).
+func captionDrawtext(fontPath, captionFile string, fontSize int) string {
+	return fmt.Sprintf("drawtext=%stextfile=%s:fontcolor=%s:fontsize=%d:line_spacing=0:expansion=none:text_align=C:x=(w-text_w)/2:y=%d+((%d-text_h)/2)",
+		buildFontOpt(fontPath), escapeFilterPath(captionFile), inkColor, fontSize, artHeight, bandHeight)
+}
+
+// writeCaptionFile lays out text for the caption band and writes the wrapped
+// lines to a scratch file in dir. It returns the textfile path, the drawtext
+// fontsize chosen by the layout, and an error if the write fails. Empty text
+// yields no file and fontSize 0 — callers then omit the caption drawtext.
+func writeCaptionFile(dir, text string) (path string, fontSize int, err error) {
+	layout := layoutCaption(text)
+	if len(layout.lines) == 0 {
+		return "", 0, nil
+	}
+	p, err := writeTempFile(dir, "caption-*.txt", []byte(strings.Join(layout.lines, "\n")))
+	if err != nil {
+		return "", 0, err
+	}
+	return p, layout.fontSize, nil
+}
+
 // BuildTitleCard renders a blurred title card from the provided page image with
-// story title and optional byline text.
+// story title and optional byline text. The card shares the master geometry
+// (1080×1620) so it concat-copies with pages and the end card; its ground is
+// --film where the 4:5 page art does not reach (§T10g).
 func BuildTitleCard(ctx context.Context, cfg Config, imagePath, title, byline, outPath string) error {
 	if imagePath == "" {
 		return fmt.Errorf("%w: title card requires an image path", ErrInvalidInput)
@@ -65,6 +125,14 @@ func BuildTitleCard(ctx context.Context, cfg Config, imagePath, title, byline, o
 		workDir = filepath.Dir(outPath)
 	}
 
+	fontPath, cleanup, err := materializeFont(resolved, workDir)
+	if err != nil {
+		return err
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+
 	titleFile, err := writeTempFile(workDir, "title-*.txt", []byte(title))
 	if err != nil {
 		return fmt.Errorf("write title text: %w", err)
@@ -82,13 +150,12 @@ func BuildTitleCard(ctx context.Context, cfg Config, imagePath, title, byline, o
 		defer os.Remove(bylineFile) // best effort cleanup
 	}
 
-	var fontOpt string
-	if resolved.FontFile != "" {
-		fontOpt = "fontfile=" + escapeFilterPath(resolved.FontFile) + ":"
-	}
+	fontOpt := buildFontOpt(fontPath)
 
 	var vf strings.Builder
-	vf.WriteString("scale=1080:1350:force_original_aspect_ratio=decrease,pad=1080:1350:(ow-iw)/2:(oh-ih)/2:color=0x1b1614,setsar=1,")
+	vf.WriteString(fmt.Sprintf(
+		"scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=%s,setsar=1,",
+		frameWidth, frameHeight, frameWidth, frameHeight, filmColor))
 	vf.WriteString("boxblur=18:2,eq=brightness=-0.22:saturation=0.8,")
 
 	if formattedByline != "" {
@@ -126,13 +193,19 @@ func BuildTitleCard(ctx context.Context, cfg Config, imagePath, title, byline, o
 	return runFFmpeg(ctx, resolved.Runner, resolved.FFmpegPath, args)
 }
 
-// BuildPageSegment encodes a single page image and its narration audio into an MP4 segment.
-func BuildPageSegment(ctx context.Context, cfg Config, imagePath, audioPath, outPath string) error {
-	if imagePath == "" || audioPath == "" {
-		return fmt.Errorf("%w: page segment requires image and audio paths", ErrInvalidInput)
-	}
-	if outPath == "" {
-		return fmt.Errorf("%w: page segment requires an output path", ErrInvalidInput)
+// BuildPageSegment encodes a single page image, its caption words and its
+// narration audio (when present) into an MP4 segment. The page is 1080×1350 of
+// art over a 270 px caption band on --surface carrying the page's own words.
+//
+// Audio tier (T10g): when audioPath is non-empty the narration drives the
+// segment exactly as before (-shortest against the clip, captions add no
+// duration). When it is empty the page is silent: a synthesized anullsrc
+// track holds the page for captionHold(text) — words/2.0 s, floor 4 s, cap
+// 14 s — so every tier still produces a concat-copyable aac 44100 stereo
+// segment.
+func BuildPageSegment(ctx context.Context, cfg Config, imagePath, text, audioPath, outPath string) error {
+	if imagePath == "" || outPath == "" {
+		return fmt.Errorf("%w: page segment requires image and output paths", ErrInvalidInput)
 	}
 
 	resolved, err := resolveConfig(cfg)
@@ -140,12 +213,47 @@ func BuildPageSegment(ctx context.Context, cfg Config, imagePath, audioPath, out
 		return err
 	}
 
-	vf := "scale=1080:1350:force_original_aspect_ratio=decrease,pad=1080:1350:(ow-iw)/2:(oh-ih)/2:color=0x1b1614,setsar=1,format=yuv420p"
+	workDir := resolved.WorkDir
+	if workDir == "" {
+		workDir = filepath.Dir(outPath)
+	}
+
+	fontPath, cleanup, err := materializeFont(resolved, workDir)
+	if err != nil {
+		return err
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+
+	vf := artAndBandVF()
+	captionFile, fontSize, err := writeCaptionFile(workDir, text)
+	if err != nil {
+		return fmt.Errorf("write caption text: %w", err)
+	}
+	if captionFile != "" {
+		defer os.Remove(captionFile) // best effort cleanup
+		vf += captionDrawtext(fontPath, captionFile, fontSize)
+	}
+	vf += ",format=yuv420p"
 
 	args := []string{
 		"-loop", "1",
 		"-i", imagePath,
-		"-i", audioPath,
+	}
+	if audioPath != "" {
+		// Narrated tier: the clip's length governs via -shortest.
+		args = append(args, "-i", audioPath)
+	} else {
+		// Silent tier: anullsrc of the words-derived hold length; -shortest
+		// ends the looped image when the silence does.
+		holdStr := fmt.Sprintf("%.3f", captionHold(text).Seconds())
+		args = append(args,
+			"-f", "lavfi",
+			"-t", holdStr,
+			"-i", "anullsrc=channel_layout=stereo:sample_rate=44100")
+	}
+	args = append(args,
 		"-vf", vf,
 		"-r", "25",
 		"-c:v", "libx264",
@@ -159,12 +267,14 @@ func BuildPageSegment(ctx context.Context, cfg Config, imagePath, audioPath, out
 		"-movflags", "+faststart",
 		"-y",
 		outPath,
-	}
+	)
 
 	return runFFmpeg(ctx, resolved.Runner, resolved.FFmpegPath, args)
 }
 
-// BuildEndCard encodes a flat color end card with site branding and domain text.
+// BuildEndCard encodes a flat --film color end card with site branding and
+// domain text, at the same 1080×1620 geometry as every other segment
+// (§T10g: the cards' ground is --film).
 func BuildEndCard(ctx context.Context, cfg Config, outPath string) error {
 	if outPath == "" {
 		return fmt.Errorf("%w: end card requires an output path", ErrInvalidInput)
@@ -180,6 +290,14 @@ func BuildEndCard(ctx context.Context, cfg Config, outPath string) error {
 		workDir = filepath.Dir(outPath)
 	}
 
+	fontPath, cleanup, err := materializeFont(resolved, workDir)
+	if err != nil {
+		return err
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+
 	endTitleFile, err := writeTempFile(workDir, "end_title-*.txt", []byte("Made with Thutapi"))
 	if err != nil {
 		return fmt.Errorf("write end title text: %w", err)
@@ -192,10 +310,7 @@ func BuildEndCard(ctx context.Context, cfg Config, outPath string) error {
 	}
 	defer os.Remove(endDomainFile) // best effort cleanup
 
-	var fontOpt string
-	if resolved.FontFile != "" {
-		fontOpt = "fontfile=" + escapeFilterPath(resolved.FontFile) + ":"
-	}
+	fontOpt := buildFontOpt(fontPath)
 
 	var vf strings.Builder
 	vf.WriteString(fmt.Sprintf("drawtext=%stextfile=%s:fontcolor=white:fontsize=56:x=(w-text_w)/2:y=(h-text_h)/2-30,", fontOpt, escapeFilterPath(endTitleFile)))
@@ -206,7 +321,7 @@ func BuildEndCard(ctx context.Context, cfg Config, outPath string) error {
 
 	args := []string{
 		"-f", "lavfi",
-		"-i", "color=c=0x1b1614:s=1080x1350:r=25",
+		"-i", fmt.Sprintf("color=c=%s:s=%dx%d:r=25", filmColor, frameWidth, frameHeight),
 		"-f", "lavfi",
 		"-t", durStr,
 		"-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
@@ -294,8 +409,10 @@ func Render(ctx context.Context, cfg Config, in Input) error {
 		if p.ImagePath == "" && len(p.ImageBytes) == 0 {
 			return fmt.Errorf("%w: page %d has no image path or bytes", ErrInvalidInput, p.N)
 		}
-		if p.AudioPath == "" && len(p.AudioBytes) == 0 {
-			return fmt.Errorf("%w: page %d has no audio path or bytes", ErrInvalidInput, p.N)
+		// T10g: the page's words are required — every page of the film shows
+		// its own words, whether or not narration exists.
+		if strings.TrimSpace(p.Text) == "" {
+			return fmt.Errorf("%w: page %d has no words", ErrInvalidInput, p.N)
 		}
 		if p.ImagePath != "" {
 			if _, err := os.Stat(p.ImagePath); err != nil {
@@ -327,6 +444,17 @@ func Render(ctx context.Context, cfg Config, in Input) error {
 
 	resolved.WorkDir = workDir
 
+	// Materialise the drawtext face once so every concurrent segment builder
+	// reuses the same fontfile path (the runtime image has no fonts).
+	fontPath, cleanup, err := materializeFont(resolved, workDir)
+	if err != nil {
+		return err
+	}
+	resolved.FontFile = fontPath
+	if cleanup != nil {
+		defer cleanup()
+	}
+
 	// Materialize page assets into workDir if passed as raw bytes.
 	materializedImages := make([]string, len(in.Pages))
 	materializedAudios := make([]string, len(in.Pages))
@@ -349,13 +477,15 @@ func Render(ctx context.Context, cfg Config, in Input) error {
 
 		if p.AudioPath != "" {
 			materializedAudios[i] = p.AudioPath
-		} else {
+		} else if len(p.AudioBytes) > 0 {
 			audPath := filepath.Join(workDir, fmt.Sprintf("narration-%02d.mp3", n))
 			if err := os.WriteFile(audPath, p.AudioBytes, 0o600); err != nil {
 				return fmt.Errorf("write page %d audio bytes: %w", n, err)
 			}
 			materializedAudios[i] = audPath
 		}
+		// No audio at all → the silent tier; BuildPageSegment synthesises a
+		// words-derived hold.
 	}
 
 	titleSeg := filepath.Join(workDir, "seg-title.mp4")
@@ -377,7 +507,7 @@ func Render(ctx context.Context, cfg Config, in Input) error {
 	for i := range in.Pages {
 		idx := i
 		g.Go(func() error {
-			return BuildPageSegment(gctx, resolved, materializedImages[idx], materializedAudios[idx], pageSegs[idx])
+			return BuildPageSegment(gctx, resolved, materializedImages[idx], in.Pages[idx].Text, materializedAudios[idx], pageSegs[idx])
 		})
 	}
 

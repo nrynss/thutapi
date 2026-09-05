@@ -134,8 +134,11 @@ func TestBuildTitleCard_ArgumentConstruction(t *testing.T) {
 	if !strings.Contains(joined, "boxblur=18:2,eq=brightness=-0.22:saturation=0.8") {
 		t.Errorf("filter missing boxblur/brightness: %s", joined)
 	}
-	if !strings.Contains(joined, "scale=1080:1350:force_original_aspect_ratio=decrease,pad=1080:1350:(ow-iw)/2:(oh-ih)/2:color=0x1b1614,setsar=1") {
-		t.Errorf("filter missing 1080x1350 geometry: %s", joined)
+	if !strings.Contains(joined, "scale=1080:1620:force_original_aspect_ratio=decrease,pad=1080:1620:(ow-iw)/2:(oh-ih)/2:color=0x12241e,setsar=1") {
+		t.Errorf("filter missing 1080x1620 --film geometry: %s", joined)
+	}
+	if !strings.Contains(joined, "fontfile=") {
+		t.Errorf("title card drawtext missing fontfile (embedded Fredoka): %s", joined)
 	}
 	if !strings.Contains(joined, "drawtext=") || !strings.Contains(joined, "textfile=") {
 		t.Errorf("title card missing drawtext textfile: %s", joined)
@@ -194,7 +197,9 @@ func TestBuildTitleCard_WithFontFile(t *testing.T) {
 	}
 }
 
-// TestBuildPageSegment_ArgumentConstruction asserts page segment arguments and geometry.
+// TestBuildPageSegment_ArgumentConstruction asserts page segment arguments
+// and geometry: 1080×1350 art over a 1080×270 --surface band with a caption
+// drawtext (textfile, text_align=C, --ink words), narrated with -shortest.
 func TestBuildPageSegment_ArgumentConstruction(t *testing.T) {
 	runner := &mockRunner{}
 	tmpDir := t.TempDir()
@@ -209,7 +214,7 @@ func TestBuildPageSegment_ArgumentConstruction(t *testing.T) {
 	_ = os.WriteFile(img, []byte("jpg"), 0o600) // test fixture
 	_ = os.WriteFile(aud, []byte("mp3"), 0o600) // test fixture
 
-	if err := BuildPageSegment(context.Background(), cfg, img, aud, out); err != nil {
+	if err := BuildPageSegment(context.Background(), cfg, img, "Mira opens the garden gate.", aud, out); err != nil {
 		t.Fatalf("BuildPageSegment: %v", err)
 	}
 
@@ -219,7 +224,13 @@ func TestBuildPageSegment_ArgumentConstruction(t *testing.T) {
 		"-loop 1",
 		"-i " + img,
 		"-i " + aud,
-		"scale=1080:1350:force_original_aspect_ratio=decrease,pad=1080:1350:(ow-iw)/2:(oh-ih)/2:color=0x1b1614,setsar=1,format=yuv420p",
+		"scale=1080:1350:force_original_aspect_ratio=increase,crop=1080:1350,pad=1080:1620:0:0:color=0xd8efe3,setsar=1,",
+		"drawtext=",
+		"textfile=",
+		"fontcolor=0x17332b",
+		"expansion=none",
+		"text_align=C",
+		"y=1350+((270-text_h)/2)",
 		"-r 25",
 		"-c:v libx264",
 		"-preset veryfast",
@@ -237,6 +248,122 @@ func TestBuildPageSegment_ArgumentConstruction(t *testing.T) {
 		if !strings.Contains(joined, sub) {
 			t.Errorf("BuildPageSegment missing substring %q in command %s", sub, joined)
 		}
+	}
+	if strings.Contains(joined, ":text=") && !strings.Contains(joined, "textfile=") {
+		t.Errorf("inline text= detected in page segment, must use textfile=: %s", joined)
+	}
+}
+
+// TestBuildPageSegment_SilentTier asserts that a page with no narration
+// synthesises anullsrc of the words-derived hold and still carries the
+// caption: no narration input, no -shortest against a clip, same geometry.
+func TestBuildPageSegment_SilentTier(t *testing.T) {
+	var captions []string
+	runner := &mockRunner{
+		customFn: func(ctx context.Context, name string, args ...string) ([]byte, error) {
+			// Read the caption textfile while BuildPageSegment still owns it.
+			for _, a := range args {
+				if strings.Contains(a, "textfile=") {
+					idx := strings.Index(a, "textfile=")
+					rest := a[idx+len("textfile="):]
+					end := strings.Index(rest, ":")
+					if end < 0 {
+						return nil, fmt.Errorf("textfile option unterminated in %q", a)
+					}
+					data, err := os.ReadFile(rest[:end])
+					if err != nil {
+						return nil, fmt.Errorf("read caption file: %w", err)
+					}
+					captions = append(captions, string(data))
+				}
+			}
+			return []byte("ok"), nil
+		},
+	}
+	tmpDir := t.TempDir()
+	cfg := Config{
+		Runner:  runner,
+		WorkDir: tmpDir,
+	}
+
+	img := filepath.Join(tmpDir, "p1.jpg")
+	out := filepath.Join(tmpDir, "seg.mp4")
+	_ = os.WriteFile(img, []byte("jpg"), 0o600) // test fixture
+
+	// Ten words → 5.000 s hold (10/2.0).
+	text := "one two three four five six seven eight nine ten"
+	if err := BuildPageSegment(context.Background(), cfg, img, text, "", out); err != nil {
+		t.Fatalf("BuildPageSegment silent: %v", err)
+	}
+
+	call := runner.lastCall()
+	joined := strings.Join(call, " ")
+	want := []string{
+		"-i " + img,
+		"-t 5.000",
+		"anullsrc=channel_layout=stereo:sample_rate=44100",
+		"-shortest",
+		"scale=1080:1350:force_original_aspect_ratio=increase,crop=1080:1350,pad=1080:1620:0:0:color=0xd8efe3,setsar=1,",
+		"drawtext=",
+		"textfile=",
+		"text_align=C",
+		"fontfile=",
+	}
+	for _, sub := range want {
+		if !strings.Contains(joined, sub) {
+			t.Errorf("silent page segment missing %q in %s", sub, joined)
+		}
+	}
+	if strings.Contains(joined, "-i "+filepath.Join(tmpDir, "narration")) {
+		t.Errorf("silent page segment carries a narration input: %s", joined)
+	}
+
+	// The caption textfile holds the wrapped words; no inline text=.
+	if len(captions) != 1 {
+		t.Fatalf("caption files read = %d, want 1", len(captions))
+	}
+	if !strings.Contains(captions[0], "one two three") {
+		t.Errorf("caption file content = %q, want the page words", captions[0])
+	}
+	if strings.Contains(joined, ":text=") {
+		t.Errorf("inline text= detected, must use textfile=: %s", joined)
+	}
+}
+
+// TestBuildPageSegment_SilentHoldClamps pins the hold duration floor and
+// ceiling on the silent tier.
+func TestBuildPageSegment_SilentHoldClamps(t *testing.T) {
+	runner := &mockRunner{}
+	tmpDir := t.TempDir()
+	cfg := Config{
+		Runner:  runner,
+		WorkDir: tmpDir,
+	}
+	img := filepath.Join(tmpDir, "p1.jpg")
+	_ = os.WriteFile(img, []byte("jpg"), 0o600) // test fixture
+
+	// One word → below the 4 s floor.
+	out := filepath.Join(tmpDir, "seg-floor.mp4")
+	if err := BuildPageSegment(context.Background(), cfg, img, "hello", "", out); err != nil {
+		t.Fatalf("BuildPageSegment floor: %v", err)
+	}
+	if got := strings.Join(runner.lastCall(), " "); !strings.Contains(got, "-t 4.000") {
+		t.Errorf("one-word page hold = %s, want the 4.000 s floor", got)
+	}
+
+	// 60 words → 30 s, above the 14 s ceiling.
+	words := strings.Fields("one two three four five six seven eight nine ten " +
+		"eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty " +
+		"twentyone twentytwo twentythree twentyfour twentyfive twentysix twentyseven twentyeight twentynine thirty " +
+		"thirtyone thirtytwo thirtythree thirtyfour thirtyfive thirtysix thirtyseven thirtyeight thirtynine forty " +
+		"fortyone fortytwo fortythree fortyfour fortyfive fortysix fortyseven fortyeight fortynine fifty " +
+		"fiftyone fiftytwo fiftythree fiftyfour fiftyfive fiftysix fiftyseven fiftyeight fiftynine sixty")
+	out = filepath.Join(tmpDir, "seg-cap.mp4")
+	if err := BuildPageSegment(context.Background(), cfg, img, strings.Join(words, " "), "", out); err != nil {
+		t.Fatalf("BuildPageSegment ceiling: %v", err)
+	}
+	if got := strings.Join(runner.lastCall(), " "); !strings.Contains(got, "-t 14.000") {
+		t.Errorf("60-word page hold = %s, want the 14.000 s ceiling", got)
 	}
 }
 
@@ -259,7 +386,7 @@ func TestBuildEndCard_ArgumentConstruction(t *testing.T) {
 	call := runner.lastCall()
 	joined := strings.Join(call, " ")
 	wantSubstrings := []string{
-		"color=c=0x1b1614:s=1080x1350:r=25",
+		"color=c=0x12241e:s=1080x1620:r=25",
 		"anullsrc=channel_layout=stereo:sample_rate=44100",
 		"textfile=",
 		"-shortest",
@@ -338,11 +465,13 @@ func TestRender_EndToEnd_Mock(t *testing.T) {
 				N:          1,
 				ImageBytes: []byte("page1-image-data"),
 				AudioBytes: []byte("page1-audio-data"),
+				Text:       "The secret garden gate opens.",
 			},
 			{
 				N:          2,
 				ImageBytes: []byte("page2-image-data"),
 				AudioBytes: []byte("page2-audio-data"),
+				Text:       "Bramble chases the butterfly home.",
 			},
 		},
 		OutputPath: outPath,
@@ -389,14 +518,15 @@ func TestErrorSentinels(t *testing.T) {
 	}
 
 	// BuildPageSegment errors
-	if err := BuildPageSegment(context.Background(), cfg, "", "aud.mp3", "out.mp4"); !errors.Is(err, ErrInvalidInput) {
+	if err := BuildPageSegment(context.Background(), cfg, "", "words", "aud.mp3", "out.mp4"); !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput for empty image, got %v", err)
 	}
-	if err := BuildPageSegment(context.Background(), cfg, "img.jpg", "", "out.mp4"); !errors.Is(err, ErrInvalidInput) {
-		t.Errorf("expected ErrInvalidInput for empty audio, got %v", err)
-	}
-	if err := BuildPageSegment(context.Background(), cfg, "img.jpg", "aud.mp3", ""); !errors.Is(err, ErrInvalidInput) {
+	if err := BuildPageSegment(context.Background(), cfg, "img.jpg", "words", "aud.mp3", ""); !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput for empty outPath, got %v", err)
+	}
+	// No audio is valid — silent tier (image + words only).
+	if err := BuildPageSegment(context.Background(), cfg, "img.jpg", "words", "", "out.mp4"); err != nil {
+		t.Errorf("page segment without audio must be valid (silent tier), got %v", err)
 	}
 
 	// BuildEndCard errors
@@ -427,7 +557,7 @@ func TestErrorSentinels(t *testing.T) {
 		OutputPath: "out.mp4",
 		Pages:      []PageInput{{N: 1}},
 	}); !errors.Is(err, ErrInvalidInput) {
-		t.Errorf("expected ErrInvalidInput for page without image or audio, got %v", err)
+		t.Errorf("expected ErrInvalidInput for page without image or words, got %v", err)
 	}
 	if err := Render(context.Background(), cfg, Input{
 		Title:      "T",
@@ -437,7 +567,7 @@ func TestErrorSentinels(t *testing.T) {
 			ImageBytes: []byte("img"),
 		}},
 	}); !errors.Is(err, ErrInvalidInput) {
-		t.Errorf("expected ErrInvalidInput for page without audio, got %v", err)
+		t.Errorf("expected ErrInvalidInput for page without words, got %v", err)
 	}
 	if err := Render(context.Background(), cfg, Input{
 		Title:      "T",
@@ -445,6 +575,7 @@ func TestErrorSentinels(t *testing.T) {
 		Pages: []PageInput{{
 			N:          1,
 			ImagePath:  "/nonexistent/path/to/img.jpg",
+			Text:       "page words",
 			AudioBytes: []byte("aud"),
 		}},
 	}); !errors.Is(err, ErrInvalidInput) {
@@ -456,16 +587,30 @@ func TestErrorSentinels(t *testing.T) {
 		Pages: []PageInput{{
 			N:          1,
 			ImageBytes: []byte("img"),
+			Text:       "page words",
 			AudioPath:  "/nonexistent/path/to/aud.mp3",
 		}},
 	}); !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput for non-existent audio path, got %v", err)
 	}
+	// A silent page (image + words, no audio) is valid — the run may still
+	// fail later (mock runner writes no files), but not at validation.
+	if err := Render(context.Background(), cfg, Input{
+		Title:      "T",
+		OutputPath: "out.mp4",
+		Pages: []PageInput{{
+			N:          1,
+			ImageBytes: []byte("img"),
+			Text:       "page words",
+		}},
+	}); errors.Is(err, ErrInvalidInput) {
+		t.Errorf("silent page must pass validation, got %v", err)
+	}
 
 	// Runner failure in BuildPageSegment
 	failRunner := &mockRunner{err: errors.New("exit status 1")}
 	failCfg := Config{Runner: failRunner, WorkDir: tmpDir}
-	err := BuildPageSegment(context.Background(), failCfg, "img.jpg", "aud.mp3", "out.mp4")
+	err := BuildPageSegment(context.Background(), failCfg, "img.jpg", "words", "aud.mp3", "out.mp4")
 	if !errors.Is(err, ErrFFmpegFailed) {
 		t.Errorf("expected ErrFFmpegFailed on runner error, got %v", err)
 	}
@@ -647,11 +792,13 @@ func TestRender_RealFFmpeg(t *testing.T) {
 				N:          1,
 				ImageBytes: img1,
 				AudioBytes: aud1,
+				Text:       "Mira opens the garden gate to start the morning adventure.",
 			},
 			{
 				N:          2,
 				ImageBytes: img2,
 				AudioBytes: aud2,
+				Text:       "Bramble chases a yellow butterfly across the sunny green lawn.",
 			},
 		},
 		OutputPath: outPath,
@@ -683,8 +830,8 @@ func TestRender_RealFFmpeg(t *testing.T) {
 		} else {
 			probeStr := strings.TrimSpace(string(out))
 			t.Logf("ffprobe stream output: %s", probeStr)
-			if !strings.Contains(probeStr, "1080") || !strings.Contains(probeStr, "1350") {
-				t.Errorf("expected 1080x1350 in ffprobe output, got %s", probeStr)
+			if !strings.Contains(probeStr, "1080") || !strings.Contains(probeStr, "1620") {
+				t.Errorf("expected 1080x1620 in ffprobe output, got %s", probeStr)
 			}
 		}
 
@@ -752,6 +899,7 @@ func TestRender_SubcommandFailures(t *testing.T) {
 				N:          1,
 				ImageBytes: []byte("img"),
 				AudioBytes: []byte("aud"),
+				Text:       "A page that fails.",
 			},
 		},
 	}

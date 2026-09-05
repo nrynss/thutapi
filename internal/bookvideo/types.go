@@ -64,7 +64,11 @@ type Config struct {
 	EndCardDomain string
 
 	// FontFile is an optional path to a TTF or OTF font file for drawtext filters.
-	// If empty, ffmpeg uses system fontconfig defaults.
+	// If empty, the package's embedded Fredoka-Regular instance is materialised
+	// into the render workdir and passed as fontfile= to every drawtext — the
+	// runtime image ships no fonts and no fontconfig config, so there is no
+	// system fallback (§T10g D4). An explicit path overrides the embedded
+	// default.
 	FontFile string
 
 	// Concurrency limits the number of page segments rendered in parallel.
@@ -91,6 +95,12 @@ type PageInput struct {
 
 	// AudioBytes is the raw byte content of the narration audio, used if AudioPath is empty.
 	AudioBytes []byte
+
+	// Text is the page's own words, drawn in the caption band beneath the
+	// illustration (T10g). Required for every page: the film shows the words
+	// whether or not narration exists, and a silent page's hold duration is
+	// derived from them (silentHoldFor).
+	Text string
 }
 
 // Input specifies the story details and sequence of pages to render into video.
