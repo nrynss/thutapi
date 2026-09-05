@@ -1458,10 +1458,16 @@ demo button's white label goes to `--accent` per the defect above.
 **Fredoka** for headings and chips, **Baloo 2** for body. Both SIL OFL, so
 bundling is unrestricted.
 
-* **Self-hosted `woff2` under `static/vendor/`, subset to Latin.** No CDN
-  (§T0's rule and a judge's offline `docker run`), and **nothing is vendored
-  today** — `static/` contains only `race/`. This is a real T9 deliverable, not
-  a stylesheet line.
+* **Fredoka is vendored** at `static/vendor/fonts/Fredoka[wdth,wght].ttf`
+  with its `OFL.txt` beside it — a 159 KB variable face covering Light through
+  Bold, so **one file serves headings, chips and body**. Baloo 2 is dropped:
+  a second family costs bytes and a second licence for a weight Fredoka
+  already has.
+* The TTF is what `drawtext` (§T10g) and the PDF (§T10f) need. **A `woff2` for
+  the web is still outstanding** — the TTF works in `@font-face` and is the
+  honest fallback, but woff2 is roughly a third the size, and on a phone that
+  is the difference worth having. T9's call.
+* No CDN (§T0's rule, and a judge's offline `docker run`).
 * **Always a real fallback stack**: `"Fredoka", system-ui, sans-serif`. A
   missing font file must degrade, not blank the page.
 * Scale, rounded up for young eyes: body **18px**, chips **18px**, headings
@@ -2164,22 +2170,32 @@ The band goes **beside** the art, not over it — a picture book does not print
 its text on top of the illustration.
 
 ```
-1080 × 1620   (2:3, portrait)   ground: --bg  #eef8f2
+1080 × 1620   (2:3, portrait)
 ┌──────────────┐
-│   ┌────────┐ │  the illustration, inset ~80px so the page
-│   │  art   │ │  ground reads as a mat around it
-│   └────────┘ │
-│  the words   │  --ink #17332b, centred, 12.52:1
+│              │
+│  1080 × 1350 │  the illustration, FULL BLEED — its own cream
+│     art      │  carries the top of the frame
+│              │
+├──────────────┤
+│ 1080 × 270   │  --surface #d8efe3, --ink #17332b text (11.25:1)
 └──────────────┘
 ```
 
-**The page is light, not dark.** An earlier draft of this section put the
-words on `--film`; that was wrong. A picture book page is a light ground with
-dark text — it matches §T10f's PDF, and the two artifacts are the same book.
-`--film` stays what it is: the ground of the title and end cards only.
+**Mint sits under the words only** (operator, 2026-09-05). The art bleeds edge
+to edge and brings its own cream with it — the renders sample around
+`#f9f5e5`, and it varies per page, which is exactly why no ground should show.
+At 1080×1350 the art fills its area precisely: §T6 pins `size:"1792x2240"`,
+the same 4:5, so nothing is cropped or letterboxed. Keep
+`force_original_aspect_ratio=increase,crop=1080:1350` anyway, so a stray
+aspect fills rather than bars.
 
-**Mocked up 2026-09-05** against a real T6b render at 1080×1620 — the
-illustration inset, the caption below, and the page ground reading as a mat.
+**The page is light, not dark.** An earlier draft put the words on `--film`;
+that was wrong, and `--film` stays what it is — the ground of the title and end
+cards only. A picture book page is light with dark text, and it matches
+§T10f's PDF, so the two artifacts read as one book.
+
+**Rendered 2026-09-05** at 1080×1620 from a real T6b page, in Fredoka, inside
+the shipping container.
 
 **This supersedes §T10's "1080×1350 (4:5) … do not letterbox" bullet.** That
 line was right when narration carried the words. Full width is kept, so the
@@ -2209,11 +2225,13 @@ than assuming the change is free.
   which **is present in the shipping image's ffmpeg 7.1** (verified
   2026-09-05, `-h filter=drawtext`). Use it; do not emit one `drawtext` per
   line.
-* **Fredoka**, the same TTF §T10f embeds and §T9 vendors as `woff2`.
-* **Colours from §The look**: band `--film` `#12241e`, text `--bg` `#eef8f2` —
-  14.92:1. Note `internal/bookvideo` currently hardcodes `0x1b1614`, which
-  predates §The look; T10g's lines use the token value and the cards come with
-  them.
+* **Fredoka, vendored** at `static/vendor/fonts/Fredoka[wdth,wght].ttf`
+  (159 KB, SIL OFL, licence beside it). **Verified rendering inside the
+  shipping image's ffmpeg 7.1** — not assumed from the docs.
+* **Colours from §The look**: band `--surface` `#d8efe3`, text `--ink`
+  `#17332b` — 11.25:1. Note `internal/bookvideo` currently hardcodes
+  `0x1b1614` for the card ground, which predates §The look; T10g's lines move
+  the cards to `--film` `#12241e` at the same time.
 
 ### Captions make a SILENT film possible — and that rescues the demo
 
