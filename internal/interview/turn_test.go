@@ -483,8 +483,12 @@ func TestTurn_QuestionContainingFarewellWordDoesNotEnd(t *testing.T) {
 		t.Fatalf("start status = %d (%v), want 201", code, body)
 	}
 	id := body["id"].(string)
+	// The opening question can be published before this test
+	// subscribes — the documented race, and it is not what this
+	// test is about. Wait for it in the store, then subscribe, so
+	// the stream carries only the turn under test.
+	waitTranscriptTurn(t, h, id, 1)
 	s := sub(t, broker, id)
-	waitEvent(t, s, "question")
 
 	code, body = postJSON(t, srv.URL+"/interviews/"+id+"/answers", map[string]string{"text": "Pip"})
 	if code != http.StatusAccepted {
@@ -520,8 +524,12 @@ func TestTurn_ModelEndFinishesCleanly(t *testing.T) {
 	}
 	id := body["id"].(string)
 
+	// The opening question can be published before this test
+	// subscribes — the documented race, and it is not what this
+	// test is about. Wait for it in the store, then subscribe, so
+	// the stream carries only the turn under test.
+	waitTranscriptTurn(t, h, id, 1)
 	s := sub(t, broker, id)
-	waitEvent(t, s, "question")
 
 	code, body = postJSON(t, srv.URL+"/interviews/"+id+"/answers", map[string]string{"text": "Alice"})
 	if code != 202 {
