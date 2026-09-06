@@ -513,14 +513,14 @@ type timedVideoRenderer struct {
 	t          *testing.T
 }
 
-func (v *timedVideoRenderer) Render(ctx context.Context, in bookvideo.Input) error {
+func (v *timedVideoRenderer) Render(ctx context.Context, in bookvideo.Input) (time.Duration, error) {
 	v.metrics.mu.Lock()
 	v.metrics.videoStart = time.Now()
 	v.metrics.mu.Unlock()
 
 	v.t.Logf("[%s] Stage 4: Film render (ffmpeg) starting with %d pages...", time.Now().Format("15:04:05"), len(in.Pages))
 	t0 := time.Now()
-	err := v.underlying.Render(ctx, in)
+	dur, err := v.underlying.Render(ctx, in)
 	d := time.Since(t0)
 
 	v.metrics.mu.Lock()
@@ -533,7 +533,7 @@ func (v *timedVideoRenderer) Render(ctx context.Context, in bookvideo.Input) err
 	} else {
 		v.t.Logf("[%s] Stage 4: Film render completed in %s", time.Now().Format("15:04:05"), d.Round(time.Millisecond))
 	}
-	return err
+	return dur, err
 }
 
 type timedFilmStore struct {

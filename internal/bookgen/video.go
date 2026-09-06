@@ -2,6 +2,7 @@ package bookgen
 
 import (
 	"context"
+	"time"
 
 	"thutapi/internal/bookvideo"
 )
@@ -24,7 +25,9 @@ func NewFFmpegRenderer(cfg bookvideo.Config) *FFmpegRenderer {
 	return &FFmpegRenderer{cfg: cfg}
 }
 
-// Render renders in through ffmpeg into in.OutputPath.
-func (r *FFmpegRenderer) Render(ctx context.Context, in bookvideo.Input) error {
+// Render renders in through ffmpeg into in.OutputPath and returns the
+// film's total duration the render computed (bookvideo.Render's
+// arithmetic — the value the music mix anchors its wind-down to).
+func (r *FFmpegRenderer) Render(ctx context.Context, in bookvideo.Input) (time.Duration, error) {
 	return bookvideo.Render(ctx, r.cfg, in)
 }

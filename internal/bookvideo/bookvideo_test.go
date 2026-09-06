@@ -465,12 +465,14 @@ func TestRender_EndToEnd_Mock(t *testing.T) {
 				N:          1,
 				ImageBytes: []byte("page1-image-data"),
 				AudioBytes: []byte("page1-audio-data"),
+				Duration:   2 * time.Second,
 				Text:       "The secret garden gate opens.",
 			},
 			{
 				N:          2,
 				ImageBytes: []byte("page2-image-data"),
 				AudioBytes: []byte("page2-audio-data"),
+				Duration:   3 * time.Second,
 				Text:       "Bramble chases the butterfly home.",
 			},
 		},
@@ -481,8 +483,17 @@ func TestRender_EndToEnd_Mock(t *testing.T) {
 		Runner: runner,
 	}
 
-	if err := Render(context.Background(), cfg, in); err != nil {
+	total, err := Render(context.Background(), cfg, in)
+	if err != nil {
 		t.Fatalf("Render: %v", err)
+	}
+
+	// The returned total is the render phase's arithmetic (contract
+	// row C3 of t12-round1.md): title 3.5 s + page 1 (2 s clip) +
+	// page 2 (3 s clip) + end card 3.0 s. The mix's wind-down anchors
+	// to exactly this value.
+	if want := DefaultTitleCardDuration + 2*time.Second + 3*time.Second + DefaultEndCardDuration; total != want {
+		t.Errorf("render total = %v, want %v (cards + Go-known clip durations)", total, want)
 	}
 
 	// Output file must exist and contain the mocked mp4 content
@@ -543,23 +554,23 @@ func TestErrorSentinels(t *testing.T) {
 	}
 
 	// Render input validation errors
-	if err := Render(context.Background(), cfg, Input{}); !errors.Is(err, ErrInvalidInput) {
+	if _, err := Render(context.Background(), cfg, Input{}); !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput for empty Title, got %v", err)
 	}
-	if err := Render(context.Background(), cfg, Input{Title: "T"}); !errors.Is(err, ErrInvalidInput) {
+	if _, err := Render(context.Background(), cfg, Input{Title: "T"}); !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput for empty OutputPath, got %v", err)
 	}
-	if err := Render(context.Background(), cfg, Input{Title: "T", OutputPath: "out.mp4"}); !errors.Is(err, ErrInvalidInput) {
+	if _, err := Render(context.Background(), cfg, Input{Title: "T", OutputPath: "out.mp4"}); !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput for 0 pages, got %v", err)
 	}
-	if err := Render(context.Background(), cfg, Input{
+	if _, err := Render(context.Background(), cfg, Input{
 		Title:      "T",
 		OutputPath: "out.mp4",
 		Pages:      []PageInput{{N: 1}},
 	}); !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput for page without image or words, got %v", err)
 	}
-	if err := Render(context.Background(), cfg, Input{
+	if _, err := Render(context.Background(), cfg, Input{
 		Title:      "T",
 		OutputPath: "out.mp4",
 		Pages: []PageInput{{
@@ -569,7 +580,7 @@ func TestErrorSentinels(t *testing.T) {
 	}); !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput for page without words, got %v", err)
 	}
-	if err := Render(context.Background(), cfg, Input{
+	if _, err := Render(context.Background(), cfg, Input{
 		Title:      "T",
 		OutputPath: "out.mp4",
 		Pages: []PageInput{{
@@ -577,11 +588,12 @@ func TestErrorSentinels(t *testing.T) {
 			ImagePath:  "/nonexistent/path/to/img.jpg",
 			Text:       "page words",
 			AudioBytes: []byte("aud"),
+			Duration:   time.Second,
 		}},
 	}); !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput for non-existent image path, got %v", err)
 	}
-	if err := Render(context.Background(), cfg, Input{
+	if _, err := Render(context.Background(), cfg, Input{
 		Title:      "T",
 		OutputPath: "out.mp4",
 		Pages: []PageInput{{
@@ -589,13 +601,41 @@ func TestErrorSentinels(t *testing.T) {
 			ImageBytes: []byte("img"),
 			Text:       "page words",
 			AudioPath:  "/nonexistent/path/to/aud.mp3",
+			Duration:   time.Second,
 		}},
 	}); !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput for non-existent audio path, got %v", err)
 	}
+	// T12 (contract row C3): a narration page without its Go-known
+	// Duration, and a Duration on a page without narration, are both
+	// invalid — the film total must be fully computable in Go.
+	if _, err := Render(context.Background(), cfg, Input{
+		Title:      "T",
+		OutputPath: "out.mp4",
+		Pages: []PageInput{{
+			N:          1,
+			ImageBytes: []byte("img"),
+			Text:       "page words",
+			AudioBytes: []byte("aud"),
+		}},
+	}); !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("narration without Duration must fail validation, got %v", err)
+	}
+	if _, err := Render(context.Background(), cfg, Input{
+		Title:      "T",
+		OutputPath: "out.mp4",
+		Pages: []PageInput{{
+			N:          1,
+			ImageBytes: []byte("img"),
+			Text:       "page words",
+			Duration:   2 * time.Second,
+		}},
+	}); !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("Duration without narration must fail validation, got %v", err)
+	}
 	// A silent page (image + words, no audio) is valid — the run may still
 	// fail later (mock runner writes no files), but not at validation.
-	if err := Render(context.Background(), cfg, Input{
+	if _, err := Render(context.Background(), cfg, Input{
 		Title:      "T",
 		OutputPath: "out.mp4",
 		Pages: []PageInput{{
@@ -792,12 +832,14 @@ func TestRender_RealFFmpeg(t *testing.T) {
 				N:          1,
 				ImageBytes: img1,
 				AudioBytes: aud1,
+				Duration:   2 * time.Second,
 				Text:       "Mira opens the garden gate to start the morning adventure.",
 			},
 			{
 				N:          2,
 				ImageBytes: img2,
 				AudioBytes: aud2,
+				Duration:   3 * time.Second,
 				Text:       "Bramble chases a yellow butterfly across the sunny green lawn.",
 			},
 		},
@@ -807,9 +849,15 @@ func TestRender_RealFFmpeg(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	// Default Config exercises all default paths with real ffmpeg.
-	if err := Render(ctx, Config{}, in); err != nil {
+	// Default Config exercises all default paths with real ffmpeg. The
+	// two narration clips are 2 s and 3 s WAVs, so the returned total
+	// is the exact render arithmetic: 3.5 + 2 + 3 + 3.0.
+	total, err := Render(ctx, Config{}, in)
+	if err != nil {
 		t.Fatalf("Render with real ffmpeg: %v", err)
+	}
+	if want := DefaultTitleCardDuration + 2*time.Second + 3*time.Second + DefaultEndCardDuration; total != want {
+		t.Errorf("render total = %v, want %v", total, want)
 	}
 
 	info, err := os.Stat(outPath)
@@ -899,6 +947,7 @@ func TestRender_SubcommandFailures(t *testing.T) {
 				N:          1,
 				ImageBytes: []byte("img"),
 				AudioBytes: []byte("aud"),
+				Duration:   2 * time.Second,
 				Text:       "A page that fails.",
 			},
 		},
@@ -918,7 +967,7 @@ func TestRender_SubcommandFailures(t *testing.T) {
 		},
 	}
 
-	err := Render(context.Background(), Config{Runner: failConcatRunner}, in)
+	_, err := Render(context.Background(), Config{Runner: failConcatRunner}, in)
 	if !errors.Is(err, ErrFFmpegFailed) {
 		t.Errorf("expected ErrFFmpegFailed on concat failure, got %v", err)
 	}
@@ -929,7 +978,7 @@ func TestRender_SubcommandFailures(t *testing.T) {
 			return nil, errors.New("segment failed")
 		},
 	}
-	err = Render(context.Background(), Config{Runner: failSegRunner}, in)
+	_, err = Render(context.Background(), Config{Runner: failSegRunner}, in)
 	if !errors.Is(err, ErrFFmpegFailed) {
 		t.Errorf("expected ErrFFmpegFailed on segment build failure, got %v", err)
 	}

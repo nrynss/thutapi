@@ -13,3 +13,13 @@ import (
 // silently at a wiring point. Same shape as the illustrate precedent
 // (illustrate/wire_test.go: var _ Imager = (*media.Client)(nil)).
 var _ TTS = (*media.Client)(nil)
+
+// The compile-time half of contract row C1 (t12-round1.md): the real
+// media client also satisfies the music seam this package consumes.
+// The declaration builds only while media.SynthesizeMusic's signature
+// matches the seam's exactly — SynthesizeMusic(ctx, lyrics, prompt,
+// model string) — so a drift between the provider and this consumer's
+// view of it fails here, at compile time, instead of silently at a
+// wiring point (PLAN.md invariant 1: the music POST goes through
+// internal/gmi).
+var _ Music = (*media.Client)(nil)

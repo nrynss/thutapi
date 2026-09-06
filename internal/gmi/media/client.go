@@ -2,7 +2,7 @@
 // console.gmicloud.ai — the image/audio/video side of Thutapi's two GMI
 // clients.
 //
-// Three methods today:
+// Four methods today:
 //
 //   - GenerateImage: text-to-image. Prompt only; no reference image.
 //     Used for character reference sheets (T6).
@@ -21,8 +21,13 @@
 //     payload uses the typo'd flag need_volumn_normalization (no 'u'
 //     in volume) — project.md §4 spells it out: match the typo or the
 //     flag is silently ignored by the upstream.
+//   - SynthesizeMusic: music generation (T12). Lyrics + an optional
+//     style prompt + format mp3. minimax-music-3.0 REQUIRES lyrics —
+//     it wants to write a song — and has no duration parameter
+//     (PLAN.md §T12, settled 2026-09-05; the bed's fit to the film is
+//     the mixer's job, not the request's).
 //
-// All three POST the same envelope {model, payload} to a single path.
+// All four POST the same envelope {model, payload} to a single path.
 // The base URL is GMI_MEDIA_BASE_URL when set, otherwise the production
 // host. The GMI_API_KEY is read from env at call time, same as the
 // text client (AGENTS.md "Secrets never enter the repo").
@@ -32,7 +37,7 @@
 // published them all, so with two days left a typed struct would be a
 // fabrication. Both response kinds are handed to callers as raw
 // bytes; the decode belongs to the track that knows which model it
-// asked for (T6, T8). The reasoning is recorded where the criterion
+// asked for (T6, T8, T12). The reasoning is recorded where the criterion
 // lives: PLAN.md §T2 "Done when". The retry contract of PLAN.md §T2
 // (one transient retry, never a 4xx, a deadline on every call) is
 // enforced in post.
@@ -59,9 +64,9 @@ import (
 // mirror.
 const defaultBaseURL = "https://console.gmicloud.ai"
 
-// pathRequestQueue is the single endpoint all three methods hit. The
+// pathRequestQueue is the single endpoint all four methods hit. The
 // request-queue API dispatches by the {model, payload} envelope, not by
-// path — three different model ids, one path.
+// path — four different model ids, one path.
 const pathRequestQueue = "/api/v1/ie/requestqueue/apikey/requests"
 
 // defaultCallTimeout bounds one request-queue call — the initial
@@ -89,6 +94,20 @@ const (
 	acceptJSON  = "application/json"
 	acceptAudio = "audio/*"
 )
+
+// defaultMusicModel is the model SynthesizeMusic calls when model is
+// empty: minimax-music-3.0, the request-queue music model T12 mixes
+// under the finished film (PLAN.md §T12). Same convention as
+// SynthesizeSpeech's inline default: the model id is pinned here and
+// on the wire by the raw-JSON tests.
+const defaultMusicModel = "minimax-music-3.0"
+
+// defaultMusicFormat is the payload `format` every music call sends:
+// mp3, the format the bed is downloaded and mixed as (PLAN.md §T12;
+// wav and pcm are upstream alternatives nothing here uses).
+const defaultMusicFormat = "mp3"
+
+const voiceCloneModel = "minimax-audio-voice-clone-speech-2.8-turbo"
 
 // Client is the request-queue client. One per process; same lifetime as
 // the text client. The HTTP timeout is 120s because image generation
@@ -335,6 +354,76 @@ func (c *Client) SynthesizeSpeech(ctx context.Context, text, emotion, voice, mod
 		payload["emotion"] = emotion
 	}
 	return c.drive(ctx, model, acceptAudio, payload)
+}
+
+// CloneVoice submits the confirmed Speech 2.8 voice-clone envelope and returns
+// the provider's terminal response raw. The caller owns response decoding
+// until a consented live request establishes the returned voice-id shape.
+func (c *Client) CloneVoice(ctx context.Context, sourceAudio, text, voiceID string) ([]byte, error) {
+	if strings.TrimSpace(sourceAudio) == "" || strings.TrimSpace(text) == "" || strings.TrimSpace(voiceID) == "" {
+		return nil, errors.New("media: CloneVoice source_audio, text, and voice_id are required")
+	}
+	return c.drive(ctx, voiceCloneModel, acceptAudio, voiceClonePayload{
+		SourceAudio:             sourceAudio,
+		Text:                    text,
+		VoiceID:                 voiceID,
+		NeedNoiseReduction:      true,
+		NeedVolumnNormalization: true,
+	})
+}
+
+type voiceClonePayload struct {
+	SourceAudio             string `json:"source_audio"`
+	Text                    string `json:"text"`
+	VoiceID                 string `json:"voice_id"`
+	NeedNoiseReduction      bool   `json:"need_noise_reduction"`
+	NeedVolumnNormalization bool   `json:"need_volumn_normalization"`
+}
+
+// SynthesizeMusic runs one minimax-music-3.0 call and returns the
+// terminal request-queue response body raw. The audio is not in the
+// body: the terminal music record carries the bed at
+// outcome.media_urls[0].url (beside outcome.audio_url) and its length
+// at outcome.duration_ms — the caller downloads the URL on receipt
+// (PLAN.md invariant 7), exactly as T8 downloads a TTS clip.
+//
+// lyrics is REQUIRED by the upstream model and must be non-empty:
+// minimax-music-3.0 wants to write a song, and a wordless bed is made
+// by directing the lyrics themselves (the gibberish-vocalise default
+// lives in internal/audio — the settled operator-verified shape,
+// PLAN.md §T12). prompt is the optional style description and is sent
+// verbatim when non-empty; format is pinned to defaultMusicFormat
+// (mp3). model defaults to defaultMusicModel when empty.
+//
+// This is contract row C1 of dev-diary/adversarial-review/t12-round1.md:
+// the music POST goes through this request-queue client (PLAN.md
+// invariant 1), and internal/audio's GenerateMusicBed consumes it
+// through a one-method seam pinned at compile time (audio/wire_test.go).
+func (c *Client) SynthesizeMusic(ctx context.Context, lyrics, prompt, model string) ([]byte, error) {
+	if strings.TrimSpace(lyrics) == "" {
+		return nil, errors.New("media: SynthesizeMusic lyrics are empty")
+	}
+	if model == "" {
+		model = defaultMusicModel
+	}
+	// acceptAudio, not acceptJSON: music is an audio model, and the
+	// TTS precedent is that a gateway honouring Accept answers a
+	// JSON advertisement on an audio call with 406
+	// (adversarial-review/t2-round3.md L4). The body is still the
+	// queue's JSON envelope — the record is decoded by the caller.
+	return c.drive(ctx, model, acceptAudio, musicPayload{Lyrics: lyrics, Prompt: prompt, Format: defaultMusicFormat})
+}
+
+// musicPayload is the wire shape of a minimax-music-3.0 call: a named
+// struct, never a map (AGENTS.md §Go style). Lyrics is required by the
+// model (PLAN.md §T12's settled schema table); prompt is the optional
+// style description, omitted when empty; format is pinned to mp3 and
+// always present. sample_rate and bitrate exist upstream but are not
+// sent — nothing here needs anything but the model's own defaults.
+type musicPayload struct {
+	Lyrics string `json:"lyrics"`
+	Prompt string `json:"prompt,omitempty"`
+	Format string `json:"format"`
 }
 
 // post sends one envelope to the request-queue endpoint. The whole

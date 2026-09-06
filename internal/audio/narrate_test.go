@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync"
@@ -54,6 +56,13 @@ func TestNarrateBook_DefaultsReachTheCalls(t *testing.T) {
 		if clip.N != threePages()[i].N {
 			t.Errorf("clip %d carries page %d, want %d", i, clip.N, threePages()[i].N)
 		}
+		// Contract row C2 of t12-round1.md: NarrateBook measures each
+		// clip's length out of its own bytes and carries it forward —
+		// the Go-known duration a narrated film's total is summed
+		// from. Every fixture clip measures exactly fixtureClipDuration.
+		if clip.Duration != fixtureClipDuration() {
+			t.Errorf("clip %d duration = %v, want the measured fixture duration %v", i, clip.Duration, fixtureClipDuration())
+		}
 		row, err := h.db.PageMedia(t.Context(), h.bookID, clip.N, store.MediaNarration)
 		if err != nil {
 			t.Fatalf("page %d narration row missing: %v", clip.N, err)
@@ -61,6 +70,36 @@ func TestNarrateBook_DefaultsReachTheCalls(t *testing.T) {
 		if row.ID != clip.Media.ID {
 			t.Errorf("clip %d media id %s differs from the placed row %s", i, clip.Media.ID, row.ID)
 		}
+	}
+}
+
+// TestNarrateBook_UnmeasurableClipFailsLoudly pins contract row C2's
+// error branch: a clip that passes the content-type gate but whose
+// bytes are not a readable MP3/WAV structure cannot carry the Go-known
+// duration the film total needs, so the run fails with ErrClipDuration
+// before persisting anything — loudly, never a silent zero.
+func TestNarrateBook_UnmeasurableClipFailsLoudly(t *testing.T) {
+	h := newNarrationHarness(t, 1)
+	// A fake TTS that answers with an audio/mpeg envelope whose bytes
+	// are arbitrary (content-type gate passes, structure is absent).
+	// Note: h.cfg would re-point the fake at the harness's parseable
+	// clip server, so the config is built by hand here.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "audio/mpeg")
+		_, _ = w.Write([]byte("this is not an mp3 at all"))
+	}))
+	defer srv.Close()
+	fake := &fakeTTS{audioBase: srv.URL}
+	pages := threePages()[:1]
+	clips, err := NarrateBook(t.Context(), Config{TTS: fake, DB: h.db, Blobs: h.blobs}, h.bookID, pages)
+	if !errors.Is(err, ErrClipDuration) {
+		t.Fatalf("err = %v, want errors.Is(.., ErrClipDuration)", err)
+	}
+	if clips != nil {
+		t.Fatalf("clips = %v, want nil on failure", clips)
+	}
+	if _, err := h.db.PageMedia(t.Context(), h.bookID, 1, store.MediaNarration); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("page 1 err = %v, want ErrNotFound (nothing persisted)", err)
 	}
 }
 

@@ -101,6 +101,17 @@ type PageInput struct {
 	// whether or not narration exists, and a silent page's hold duration is
 	// derived from them (silentHoldFor).
 	Text string
+
+	// Duration is the narration clip's Go-known length (contract row
+	// C3 of t12-round1.md). REQUIRED whenever the page carries audio:
+	// -shortest holds the page exactly as long as its clip, and the
+	// film's total — which the music mix's end fade anchors to — is
+	// the sum of these per-page holds plus the fixed card holds, all
+	// computed in Go, never by probing the finished film. A narration
+	// page without one is invalid input; a Duration on a page without
+	// audio is equally refused (a silent page's hold comes from its
+	// words).
+	Duration time.Duration
 }
 
 // Input specifies the story details and sequence of pages to render into video.

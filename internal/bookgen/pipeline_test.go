@@ -2,11 +2,14 @@ package bookgen
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"thutapi/internal/audio"
 	"thutapi/internal/gmi"
 	"thutapi/internal/interview"
 	"thutapi/internal/job"
@@ -896,5 +899,254 @@ func TestUpsert_RowsAreReplacedNotDuplicated(t *testing.T) {
 	}
 	if len(pages) != len(st.Pages) {
 		t.Fatalf("page rows = %d after two upserts, want %d", len(pages), len(st.Pages))
+	}
+}
+
+// musicHarness turns a pipeline harness's music step on: the film
+// stage generates a bed (fakeMusic) and mixes it (fakeMixRunner whose
+// fake ffmpeg writes a distinguishable mixed film).
+func (ph *pipelineHarness) enableMusic(t *testing.T) (*fakeMusic, *fakeMixRunner) {
+	t.Helper()
+	bed := newBedServer()
+	t.Cleanup(bed.Close)
+	music := &fakeMusic{bedBase: bed.URL}
+	mix := &fakeMixRunner{}
+	ph.h.cfg.Music = music
+	ph.h.cfg.MusicMix = audio.MixConfig{Runner: mix}
+	ph.render.dur = 20 * time.Second
+	return music, mix
+}
+
+// TestPipeline_MusicOnMixesTheBedUnderTheFilm pins contract row C4 end
+// to end: when Config.Music is set, stage 5 generates a wordless bed
+// through the settled default shape, mixes it under the RENDERED film
+// with the renderer's computed total as the fade anchor, and persists
+// the MIXED film as the book's one video row — the render output never
+// reaches the store. The music-off path is every other test in this
+// file: no music client, no mix, plain film persisted.
+func TestPipeline_MusicOnMixesTheBedUnderTheFilm(t *testing.T) {
+	ph := newPipelineHarness(t)
+	music, mix := ph.enableMusic(t)
+	ivID, bookID := ph.makeEndedInterview("Mira")
+	st := fullStory()
+	sub := ph.subscribe(bookID)
+	srv := httptest.NewServer(ph.mux())
+	defer srv.Close()
+
+	code, res, _ := ph.postGenerate(srv, ivID)
+	if code != http.StatusAccepted {
+		t.Fatalf("POST generate status = %d, want 202", code)
+	}
+	for range st.Pages {
+		ph.waitEvent(sub, "page_approved")
+	}
+	ready := ph.waitEvent(sub, "book_ready")
+	videoURL, _ := ready["video_url"].(string)
+	if !strings.HasPrefix(videoURL, "/media/") {
+		t.Fatalf("book_ready video_url = %q, want /media/<id>", videoURL)
+	}
+	runRes := ph.waitJob(res.JobID)
+	if runRes.Status != job.StatusDone || runRes.Err != nil {
+		t.Fatalf("job = %+v, want done", runRes)
+	}
+
+	// The bed was generated once with the settled default shape.
+	calls := music.recorded()
+	if len(calls) != 1 {
+		t.Fatalf("music calls = %d, want 1", len(calls))
+	}
+	if calls[0].lyrics != audio.DefaultMusicLyrics || calls[0].prompt != audio.DefaultMusicPrompt {
+		t.Errorf("music call = (%q, %q), want the gibberish-vocalise default shape", calls[0].lyrics, calls[0].prompt)
+	}
+	if calls[0].model != audio.DefaultMusicModel {
+		t.Errorf("music model = %q, want %q", calls[0].model, audio.DefaultMusicModel)
+	}
+
+	// The mix ran exactly once, over the renderer's own output, with
+	// the renderer's computed total as the film duration.
+	if mix.count() != 1 {
+		t.Fatalf("mix calls = %d, want 1", mix.count())
+	}
+	got := mix.last()
+	filmIdx, bedIdx, outIdx := -1, -1, -1
+	for i, a := range got {
+		switch a {
+		case "-i":
+			if filmIdx == -1 {
+				filmIdx = i + 1
+			} else if bedIdx == -1 {
+				bedIdx = i + 1
+			}
+		case "-y":
+			outIdx = i + 1
+		}
+	}
+	if filmIdx == -1 || bedIdx == -1 || outIdx == -1 {
+		t.Fatalf("mix command missing inputs/output: %v", got)
+	}
+	// The mix's film input is the RENDERER'S OWN output file — the
+	// render happens before the mix and its path rides straight over
+	// (the temp files are cleaned up by the time this test reads the
+	// recorded command, so the identity is asserted by path).
+	ins := ph.render.inputs()
+	if len(ins) != 1 {
+		t.Fatalf("render calls = %d, want 1", len(ins))
+	}
+	if got[filmIdx] != ins[0].OutputPath {
+		t.Errorf("mix film input = %q, want the renderer's output %q", got[filmIdx], ins[0].OutputPath)
+	}
+	if got[bedIdx] == "" {
+		t.Error("mix bed input is empty")
+	}
+	// The fade anchor: the mix received the renderer's computed total
+	// (the fake renderer returned 20s), and its filter ends the fade at
+	// exactly that total.
+	filter := ""
+	for i, a := range got {
+		if a == "-filter_complex" {
+			filter = got[i+1]
+		}
+	}
+	if !strings.Contains(filter, "afade=t=out:st=18.000:d=2.000") {
+		t.Errorf("mix filter = %q, want the end fade anchored at the renderer's 20s total (2 s wind-down)", filter)
+	}
+
+	// The persisted video row holds the MIXED bytes, never the plain
+	// render — the music film replaced the plain one in the single
+	// video slot.
+	all, err := ph.db.BookMedia(t.Context(), bookID)
+	if err != nil {
+		t.Fatalf("book media: %v", err)
+	}
+	var films []store.Media
+	for _, m := range all {
+		if m.ContentType == "video/mp4" {
+			films = append(films, m)
+		}
+	}
+	if len(films) != 1 {
+		t.Fatalf("video rows = %d, want exactly 1 (the mixed film replaced the plain render)", len(films))
+	}
+	if films[0].ID != videoURL[len("/media/"):] {
+		t.Fatalf("video row %q != book_ready's %q", films[0].ID, videoURL)
+	}
+	served := getMedia(t, srv, films[0].ID)
+	if !strings.HasPrefix(string(served), "mixed-film:") {
+		t.Errorf("persisted film = %q, want the MIXED film bytes", served)
+	}
+}
+
+// TestPipeline_MusicTransientFailureDegradesToThePlainFilm pins the
+// degradation path: a bed generation failure wrapped in gmi.ErrTransient
+// is an outage, not an error — the film plays without music and the run
+// still lands book_ready (exactly how the narration outage degrades).
+func TestPipeline_MusicTransientFailureDegradesToThePlainFilm(t *testing.T) {
+	ph := newPipelineHarness(t)
+	_, mix := ph.enableMusic(t)
+	ph.h.cfg.Music.(*fakeMusic).err = fmt.Errorf("%w: music queue down", gmi.ErrTransient)
+	ivID, bookID := ph.makeEndedInterview("Mira")
+	st := fullStory()
+	sub := ph.subscribe(bookID)
+	srv := httptest.NewServer(ph.mux())
+	defer srv.Close()
+
+	code, res, _ := ph.postGenerate(srv, ivID)
+	if code != http.StatusAccepted {
+		t.Fatalf("POST generate status = %d, want 202", code)
+	}
+	for range st.Pages {
+		ph.waitEvent(sub, "page_approved")
+	}
+	ready := ph.waitEvent(sub, "book_ready")
+	videoURL, _ := ready["video_url"].(string)
+	runRes := ph.waitJob(res.JobID)
+	if runRes.Status != job.StatusDone || runRes.Err != nil {
+		t.Fatalf("job = %+v, want done despite the music outage", runRes)
+	}
+	if mix.count() != 0 {
+		t.Errorf("mix calls = %d, want 0 (no bed, no mix)", mix.count())
+	}
+	all, err := ph.db.BookMedia(t.Context(), bookID)
+	if err != nil {
+		t.Fatalf("book media: %v", err)
+	}
+	for _, m := range all {
+		if m.ContentType == "video/mp4" {
+			if m.ID != videoURL[len("/media/"):] {
+				t.Fatalf("video row %q != book_ready's %q", m.ID, videoURL)
+			}
+			if !strings.HasPrefix(string(getMedia(t, srv, m.ID)), "film:") {
+				t.Errorf("persisted film = %q, want the PLAIN film (no music)", getMedia(t, srv, m.ID))
+			}
+		}
+	}
+}
+
+// TestPipeline_MusicHardFailureFailsRun pins that a NON-transient music
+// failure is total: the run fails and no film row lands.
+func TestPipeline_MusicHardFailureFailsRun(t *testing.T) {
+	ph := newPipelineHarness(t)
+	ph.enableMusic(t)
+	ph.h.cfg.Music.(*fakeMusic).err = errors.New("media: payload rejected")
+	ivID, bookID := ph.makeEndedInterview("Mira")
+	sub := ph.subscribe(bookID)
+	srv := httptest.NewServer(ph.mux())
+	defer srv.Close()
+
+	code, res, _ := ph.postGenerate(srv, ivID)
+	if code != http.StatusAccepted {
+		t.Fatalf("POST generate status = %d, want 202", code)
+	}
+	for range fullStory().Pages {
+		ph.waitEvent(sub, "page_approved")
+	}
+	runRes := ph.waitJob(res.JobID)
+	if runRes.Status != job.StatusError {
+		t.Fatalf("job = %+v, want error", runRes)
+	}
+	ph.waitEvent(sub, "failed")
+	all, err := ph.db.BookMedia(t.Context(), bookID)
+	if err != nil {
+		t.Fatalf("book media: %v", err)
+	}
+	for _, m := range all {
+		if m.ContentType == "video/mp4" {
+			t.Fatalf("failed run left a film row: %+v", m)
+		}
+	}
+}
+
+// TestPipeline_MixFailureFailsRun pins that an ffmpeg failure in the
+// mix step is total: the run fails and no film row lands (the render
+// itself succeeded; the book still has no new film).
+func TestPipeline_MixFailureFailsRun(t *testing.T) {
+	ph := newPipelineHarness(t)
+	ph.enableMusic(t)
+	ph.h.cfg.MusicMix = audio.MixConfig{Runner: &fakeMixRunner{err: errors.New("ffmpeg died")}}
+	ivID, bookID := ph.makeEndedInterview("Mira")
+	sub := ph.subscribe(bookID)
+	srv := httptest.NewServer(ph.mux())
+	defer srv.Close()
+
+	code, res, _ := ph.postGenerate(srv, ivID)
+	if code != http.StatusAccepted {
+		t.Fatalf("POST generate status = %d, want 202", code)
+	}
+	for range fullStory().Pages {
+		ph.waitEvent(sub, "page_approved")
+	}
+	runRes := ph.waitJob(res.JobID)
+	if runRes.Status != job.StatusError {
+		t.Fatalf("job = %+v, want error", runRes)
+	}
+	ph.waitEvent(sub, "failed")
+	all, err := ph.db.BookMedia(t.Context(), bookID)
+	if err != nil {
+		t.Fatalf("book media: %v", err)
+	}
+	for _, m := range all {
+		if m.ContentType == "video/mp4" {
+			t.Fatalf("failed mix left a film row: %+v", m)
+		}
 	}
 }

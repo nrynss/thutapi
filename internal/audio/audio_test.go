@@ -11,19 +11,61 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"thutapi/internal/mediastore"
 	"thutapi/internal/store"
 	"thutapi/internal/story"
 )
 
+// mp3FixtureFrameLen is the byte length of one frame in the fixture
+// MP3s: MPEG-1 Layer III, 128 kbps, 44.1 kHz, mono, no padding —
+// 144×128000/44100 = 417 bytes. The parser's CBR arithmetic counts
+// dataBytes/frameLen frames, so a fixture of n full frames measures
+// exactly n×1152/44100 seconds.
+const mp3FixtureFrameLen = 417
+
+// fixtureFrames is how many MPEG frames every narration fixture clip
+// carries. The count is arbitrary but fixed: it makes every clip
+// parseable by measureDuration (NarrateBook measures each clip as it
+// downloads — contract row C2 of t12-round1.md) with a deterministic,
+// assertable Go-known duration.
+const fixtureFrames = 77
+
+// makeMP3 builds a parseable mono MPEG-1 Layer III CBR clip: an ID3v2
+// tag whose body is the distinct text (so the bytes differ per page —
+// what lets a test assert the blob on disk is exactly the clip
+// downloaded for that page's text) followed by fixtureFrames silent
+// frames. The bytes are a real MP3 structure for measureDuration, but
+// nothing downstream decodes them: the download path accepts the
+// served Content-Type, and the measurement reads structure, not audio.
+func makeMP3(text string) []byte {
+	size := len(text)
+	buf := make([]byte, 0, 10+size+fixtureFrames*mp3FixtureFrameLen)
+	buf = append(buf, 'I', 'D', '3', 4, 0, 0,
+		byte(size>>21&0x7f), byte(size>>14&0x7f), byte(size>>7&0x7f), byte(size&0x7f))
+	buf = append(buf, text...)
+	for i := 0; i < fixtureFrames; i++ {
+		buf = append(buf, 0xFF, 0xFB, 0x90, 0xC0)
+		buf = append(buf, make([]byte, mp3FixtureFrameLen-4)...)
+	}
+	return buf
+}
+
+// fixtureClipDuration is the Go-known duration of every makeMP3 clip:
+// fixtureFrames × 1152 samples / 44100 Hz. NarrateBook pins it on
+// Clip.Duration, so narration tests assert it exactly.
+func fixtureClipDuration() time.Duration {
+	return mp3DurationFrom(fixtureFrames, 1152, 44100)
+}
+
 // clipBytes is the deterministic audio payload an audio server serves
-// for text. The bytes are deliberately not a real MP3: the download
-// path accepts the served Content-Type, so the fixture only needs to
-// be distinct per page — which is what lets a test assert that the
-// blob on disk is exactly the clip downloaded for that page's text.
+// for text: a parseable MP3 whose ID3v2 body is the text itself (see
+// makeMP3). It must be distinct per page — which is what lets a test
+// assert that the blob on disk is exactly the clip downloaded for that
+// page's text.
 func clipBytes(text string) []byte {
-	return []byte("clip-for:" + text)
+	return makeMP3(text)
 }
 
 // successEnvelope is a terminal request-queue TTS record naming the

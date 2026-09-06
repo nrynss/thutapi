@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"thutapi/internal/audio"
 	"thutapi/internal/bookpdf"
@@ -262,7 +263,19 @@ func (b *approvalBridge) err() error { return b.first }
 // clips is nil exactly when narration was unavailable (§T10g): the film is
 // then captioned and silent — every page still carries its words (they are
 // what the film shows) and bookvideo derives each silent page's hold from
-// them. When clips are present they must cover every page in order.
+// them. When clips are present they must cover every page in order, and
+// each page carries its clip's Go-known Duration (audio.Clip.Duration —
+// contract row C2 of t12-round1.md) so the renderer can total the film.
+//
+// Music (PLAN.md §T12; contract row C4): when Config.Music is set, the
+// film stage generates a wordless bed and runs the verified bed-fit mix
+// (audio.MixBed) over the RENDERED film BEFORE persisting — the end fade
+// anchored to the renderer's computed total — and the MIXED film is what
+// is persisted as the book's one video row (the bed film replaces the
+// plain one; no second row). A TRANSIENT music failure (gmi.ErrTransient)
+// degrades to the no-music film with a log warning, exactly as a
+// transient narration outage degrades to a captioned-silent film — the
+// book must still land. Any other music failure fails the run.
 func (h *Handler) renderFilm(ctx context.Context, bookID string, st story.Story, clips []audio.Clip) (string, error) {
 	if clips != nil && len(clips) != len(st.Pages) {
 		return "", fmt.Errorf("bookgen: render: narrate returned %d clips for %d pages", len(clips), len(st.Pages))
@@ -286,7 +299,12 @@ func (h *Handler) renderFilm(ctx context.Context, bookID string, st story.Story,
 			if err != nil {
 				return "", fmt.Errorf("bookgen: render: read page %d narration blob: %w", p.N, err)
 			}
+			// The clip's Go-known duration rides onto the render input
+			// (contract row C3 of t12-round1.md): without it the film
+			// total — and with it the mix's wind-down — is
+			// uncomputable for a narrated book.
 			page.AudioBytes = aud
+			page.Duration = clips[i].Duration
 		}
 		inputs[i] = page
 	}
@@ -308,16 +326,33 @@ func (h *Handler) renderFilm(ctx context.Context, bookID string, st story.Story,
 	}
 	defer os.Remove(name) // best effort cleanup: the film lives in the blob store now
 
-	if err := h.cfg.Video.Render(ctx, bookvideo.Input{
+	total, err := h.cfg.Video.Render(ctx, bookvideo.Input{
 		Title:      book.Title,
 		Byline:     book.Byline,
 		Pages:      inputs,
 		OutputPath: name,
-	}); err != nil {
+	})
+	if err != nil {
 		return "", fmt.Errorf("bookgen: render: %w", err)
 	}
 
-	f, err := os.Open(name)
+	// Music step (contract row C4): the bed-fit final pass runs over
+	// the finished film at name, and the mixed film replaces it as
+	// what gets persisted. FilmDuration is the total the render just
+	// computed — the mix anchors its end fade to it and never probes
+	// the file.
+	persistPath := name
+	if h.cfg.Music != nil {
+		persistPath, err = h.mixFilm(ctx, name, total)
+		if err != nil {
+			return "", fmt.Errorf("bookgen: music bed: %w", err)
+		}
+		if persistPath != name {
+			defer func() { _ = os.Remove(persistPath) }() // best effort cleanup after persist
+		}
+	}
+
+	f, err := os.Open(persistPath)
 	if err != nil {
 		return "", fmt.Errorf("bookgen: render: open film: %w", err)
 	}
@@ -338,6 +373,61 @@ func (h *Handler) renderFilm(ctx context.Context, bookID string, st story.Story,
 	}
 	h.supersedeFilms(ctx, bookID, videoID)
 	return videoID, nil
+}
+
+// mixFilm generates the wordless bed and mixes it under the finished
+// film at filmPath (whose total is total), returning the path of the
+// MIXED film to persist. A bed generation failure wrapped in
+// gmi.ErrTransient is an outage, not an error: the film is returned
+// WITHOUT music and the caller proceeds — a captioned or narrated film
+// with no bed is a complete book (the same degradation the narration
+// outage path uses). Any other failure is total.
+func (h *Handler) mixFilm(ctx context.Context, filmPath string, total time.Duration) (string, error) {
+	bed, err := audio.GenerateMusicBed(ctx, audio.MusicConfig{Music: h.cfg.Music})
+	if err != nil {
+		if errors.Is(err, gmi.ErrTransient) && ctx.Err() == nil {
+			h.log.Warn("bookgen: music bed unavailable; the film plays without music", "err", err)
+			return filmPath, nil
+		}
+		return "", err
+	}
+	bedTmp, err := os.CreateTemp("", "thutapi-music-bed-*.mp3")
+	if err != nil {
+		return "", fmt.Errorf("write music bed: %w", err)
+	}
+	bedName := bedTmp.Name()
+	if _, err := bedTmp.Write(bed.Audio); err != nil {
+		_ = bedTmp.Close()
+		_ = os.Remove(bedName) // best effort cleanup on write error
+		return "", fmt.Errorf("write music bed: %w", err)
+	}
+	if err := bedTmp.Close(); err != nil {
+		_ = os.Remove(bedName) // best effort cleanup on close error
+		return "", fmt.Errorf("write music bed: %w", err)
+	}
+	defer os.Remove(bedName) // best effort cleanup: the mixed film lives in the blob store
+
+	mixedTmp, err := os.CreateTemp("", "thutapi-music-film-*.mp4")
+	if err != nil {
+		return "", fmt.Errorf("create mixed film: %w", err)
+	}
+	mixedName := mixedTmp.Name()
+	if err := mixedTmp.Close(); err != nil {
+		_ = os.Remove(mixedName) // best effort cleanup on close error
+		return "", fmt.Errorf("create mixed film: %w", err)
+	}
+	// The caller persists the returned file and removes it afterwards;
+	// removing it here would delete the film before the persist reads it.
+
+	if err := audio.MixBed(ctx, h.cfg.MusicMix, audio.MixInput{
+		FilmPath:     filmPath,
+		BedPath:      bedName,
+		FilmDuration: total,
+		OutputPath:   mixedName,
+	}); err != nil {
+		return "", fmt.Errorf("mix the bed under the film: %w", err)
+	}
+	return mixedName, nil
 }
 
 // supersedeFilms removes a book's older films once the new one is

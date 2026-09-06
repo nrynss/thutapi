@@ -127,6 +127,7 @@ import (
 	"net/http"
 	"slices"
 	"sync"
+	"time"
 
 	"thutapi/internal/audio"
 	"thutapi/internal/bookpdf"
@@ -292,10 +293,13 @@ type pdfRenderer interface {
 
 // videoRenderer is bookgen's view of the film renderer (PLAN.md
 // invariant 3): page images and narration in, one MP4 at
-// in.OutputPath. Satisfied by *FFmpegRenderer, which adapts
-// bookvideo.Render.
+// in.OutputPath, plus the film's TOTAL duration — computed by the
+// render phase's own arithmetic, never by probing the finished file
+// (contract row C3 of t12-round1.md). The total is what the music
+// mix's wind-down anchors to. Satisfied by *FFmpegRenderer, which
+// adapts bookvideo.Render.
 type videoRenderer interface {
-	Render(ctx context.Context, in bookvideo.Input) error
+	Render(ctx context.Context, in bookvideo.Input) (time.Duration, error)
 }
 
 // filmStore is bookgen's view of the media store for finished
@@ -339,6 +343,25 @@ type Config struct {
 	// TTS is the GMI speech client audio.NarrateBook speaks with.
 	// Satisfied by *gmi/media.Client.
 	TTS audio.TTS
+	// Music is the GMI music client the film stage mixes a bed under
+	// the finished film with (PLAN.md §T12; contract row C4 of
+	// t12-round1.md). Nil means NO music — the book's film is the
+	// plain render, exactly the pre-T12 behaviour. When set, stage 5
+	// generates a wordless bed (audio.GenerateMusicBed — the settled
+	// gibberish-vocalise wire shape), mixes it under the finished
+	// film with audio.MixBed — the end fade anchored to the film's
+	// render-computed total — and persists the MIXED film as the
+	// book's one video row (the bed film replaces the plain one). A
+	// transient music failure degrades to the no-music film (like the
+	// narration outage path); any other music failure fails the run.
+	// Satisfied by *gmi/media.Client.
+	Music audio.Music
+	// MusicMix configures the music step's ffmpeg pass (contract row
+	// C4 of t12-round1.md): the bed-fit mix under the finished film.
+	// The zero value is usable and means audio.MixConfig's defaults
+	// (ffmpeg on PATH, 0.15 gain, 2 s end fade, exec runner); tests
+	// inject a scripted Runner so the mix step runs without ffmpeg.
+	MusicMix audio.MixConfig
 	// Broker carries the book-topic events and serves the SSE route.
 	Broker broadcaster
 	// Jobs runs the pipeline off the request path.

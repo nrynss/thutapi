@@ -132,6 +132,34 @@ func TestGenerateImage(t *testing.T) {
 	}
 }
 
+func TestCloneVoice_TypoPinnedInRawJSON(t *testing.T) {
+	srv, got := fakeServer(t, fakeResponse, http.StatusOK)
+	defer srv.Close()
+	t.Setenv("GMI_API_KEY", "test-key")
+	t.Setenv("GMI_MEDIA_BASE_URL", srv.URL)
+
+	if _, err := New().CloneVoice(context.Background(), "https://thutapi.nryn.dev/media/sample", "consented sample", "English_expressive_narrator"); err != nil {
+		t.Fatalf("CloneVoice: %v", err)
+	}
+	if got.envelope.Model != voiceCloneModel {
+		t.Fatalf("model = %q, want %q", got.envelope.Model, voiceCloneModel)
+	}
+	for key, want := range map[string]any{
+		"source_audio":              "https://thutapi.nryn.dev/media/sample",
+		"text":                      "consented sample",
+		"voice_id":                  "English_expressive_narrator",
+		"need_noise_reduction":      true,
+		"need_volumn_normalization": true,
+	} {
+		if got.envelope.Payload[key] != want {
+			t.Errorf("payload[%q] = %#v, want %#v", key, got.envelope.Payload[key], want)
+		}
+	}
+	if got.accept != "audio/*" {
+		t.Errorf("Accept = %q, want audio/*", got.accept)
+	}
+}
+
 // TestEditImage asserts the i2i wire shape: payload.image is an ARRAY
 // OF URL STRINGS carried verbatim — seedream takes references as URLs,
 // not inline base64, and the pinned practice is to chain GMI's own
@@ -805,5 +833,92 @@ func TestCallerDeadlineRespected(t *testing.T) {
 	}
 	if left := time.Until(rec.deadline); left <= 0 || left > 5*time.Second {
 		t.Errorf("deadline in %v, want within the caller's 5s, not the %v default", left, defaultCallTimeout)
+	}
+}
+
+// TestSynthesizeMusic asserts the music wire shape: one envelope with
+// model minimax-music-3.0 and the payload {lyrics, prompt, format:
+// mp3} — minimax-music-3.0 REQUIRES lyrics and has no duration
+// parameter (PLAN.md §T12's settled schema table). The audio-family
+// Accept header (audio/*) is pinned the same way SynthesizeSpeech's
+// is: a JSON advertisement on an audio call invites a 406 from a
+// gateway that honours Accept (t2-round3.md L4).
+func TestSynthesizeMusic(t *testing.T) {
+	srv, got := fakeServer(t, fakeResponse, http.StatusOK)
+	defer srv.Close()
+
+	t.Setenv("GMI_API_KEY", "test-key")
+	t.Setenv("GMI_MEDIA_BASE_URL", srv.URL)
+
+	c := New()
+	_, err := c.SynthesizeMusic(context.Background(), "La la la / Mm mm", "wordless vocalise", "")
+	if err != nil {
+		t.Fatalf("SynthesizeMusic: %v", err)
+	}
+
+	if got.envelope.Model != "minimax-music-3.0" {
+		t.Errorf("envelope.model = %q, want minimax-music-3.0 (the empty-model default)", got.envelope.Model)
+	}
+	if got.accept != "audio/*" {
+		t.Errorf("Accept = %q, want audio/* on the music call (audio family, like TTS)", got.accept)
+	}
+	if got.envelope.Payload["lyrics"] != "La la la / Mm mm" {
+		t.Errorf("envelope.payload[lyrics] = %v, want the literal lyrics", got.envelope.Payload["lyrics"])
+	}
+	if got.envelope.Payload["prompt"] != "wordless vocalise" {
+		t.Errorf("envelope.payload[prompt] = %v, want the literal style prompt", got.envelope.Payload["prompt"])
+	}
+	if got.envelope.Payload["format"] != "mp3" {
+		t.Errorf("envelope.payload[format] = %v, want mp3 (the pinned bed format)", got.envelope.Payload["format"])
+	}
+}
+
+// TestSynthesizeMusic_RawWirePinned is the raw-bytes half of the music
+// payload pin: it asserts the marshalled envelope exactly, so a struct
+// rename, a dropped key or an added sample_rate/bitrate cannot drift
+// the wire unnoticed. minimax-music-3.0's accepted payload fields are
+// the settled table in PLAN.md §T12; an empty prompt must OMIT the key
+// (it is optional upstream).
+func TestSynthesizeMusic_RawWirePinned(t *testing.T) {
+	var raw []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		raw, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(fakeResponse))
+	}))
+	defer srv.Close()
+
+	t.Setenv("GMI_API_KEY", "test-key")
+	t.Setenv("GMI_MEDIA_BASE_URL", srv.URL)
+
+	c := New()
+	if _, err := c.SynthesizeMusic(context.Background(), "La la la / Doo doo / Mm mm", "", ""); err != nil {
+		t.Fatalf("SynthesizeMusic: %v", err)
+	}
+
+	const want = `{"model":"minimax-music-3.0","payload":{"lyrics":"La la la / Doo doo / Mm mm","format":"mp3"}}`
+	if string(raw) != want {
+		t.Errorf("wire body = %s, want %s", raw, want)
+	}
+}
+
+// TestSynthesizeMusic_EmptyLyricsRejected pins the REQUIRED field: the
+// model will not make a bed without lyrics, so the client refuses an
+// empty one before any round-trip (a silent empty-lyrics call would
+// fail upstream after the POST).
+func TestSynthesizeMusic_EmptyLyricsRejected(t *testing.T) {
+	t.Setenv("GMI_API_KEY", "k")
+	t.Setenv("GMI_MEDIA_BASE_URL", "http://unused.invalid")
+	c := New()
+	if _, err := c.SynthesizeMusic(context.Background(), "", "wordless", ""); err == nil {
+		t.Error("SynthesizeMusic accepted empty lyrics")
+	}
+	if _, err := c.SynthesizeMusic(context.Background(), "   ", "wordless", ""); err == nil {
+		t.Error("SynthesizeMusic accepted whitespace-only lyrics")
 	}
 }

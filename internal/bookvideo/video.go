@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -393,42 +394,78 @@ func ConcatSegments(ctx context.Context, cfg Config, segmentPaths []string, titl
 	return runFFmpeg(ctx, resolved.Runner, resolved.FFmpegPath, args)
 }
 
-// Render encodes an entire story book into a finished MP4 video file at in.OutputPath.
-func Render(ctx context.Context, cfg Config, in Input) error {
+// Render encodes an entire story book into a finished MP4 video file at
+// in.OutputPath and returns the film's TOTAL duration, computed from
+// the render phase's own arithmetic — never measured from the finished
+// file (contract row C3 of t12-round1.md; operator directive
+// 2026-09-06):
+//
+//   - the title card holds resolved.TitleCardDuration,
+//   - a page with narration holds its narration clip's length, carried
+//     as PageInput.Duration — the Go-known clip duration measured at
+//     narrate time (audio.Clip.Duration, contract row C2 of
+//     t12-round1.md) — because -shortest makes the page hold exactly
+//     as long as its clip and Go never learns that length from the
+//     file,
+//   - a silent page holds captionHold(text) (words/2.0 s, [4s, 14s]),
+//   - the end card holds resolved.EndCardDuration.
+//
+// The total is what the music mix's wind-down anchors to: the mix's
+// end fade is positioned to reach silence exactly at this total, so a
+// narrated film mixes correctly without any ffprobe of the finished
+// film (the runtime image ships no ffprobe — only /ffmpeg is copied
+// into it).
+//
+// A page whose narration has no Go-known duration (audio present but
+// PageInput.Duration <= 0) is refused loudly at validation: the total
+// would be uncomputable. The reverse — a Duration on a page with no
+// audio — is equally refused: the silent tier's hold comes from the
+// words, and a stray duration would silently mis-total the film.
+func Render(ctx context.Context, cfg Config, in Input) (time.Duration, error) {
 	if in.Title == "" {
-		return fmt.Errorf("%w: story title is required", ErrInvalidInput)
+		return 0, fmt.Errorf("%w: story title is required", ErrInvalidInput)
 	}
 	if in.OutputPath == "" {
-		return fmt.Errorf("%w: output path is required", ErrInvalidInput)
+		return 0, fmt.Errorf("%w: output path is required", ErrInvalidInput)
 	}
 	if len(in.Pages) == 0 {
-		return fmt.Errorf("%w: story has no pages", ErrInvalidInput)
+		return 0, fmt.Errorf("%w: story has no pages", ErrInvalidInput)
 	}
 
 	for _, p := range in.Pages {
 		if p.ImagePath == "" && len(p.ImageBytes) == 0 {
-			return fmt.Errorf("%w: page %d has no image path or bytes", ErrInvalidInput, p.N)
+			return 0, fmt.Errorf("%w: page %d has no image path or bytes", ErrInvalidInput, p.N)
 		}
 		// T10g: the page's words are required — every page of the film shows
 		// its own words, whether or not narration exists.
 		if strings.TrimSpace(p.Text) == "" {
-			return fmt.Errorf("%w: page %d has no words", ErrInvalidInput, p.N)
+			return 0, fmt.Errorf("%w: page %d has no words", ErrInvalidInput, p.N)
 		}
 		if p.ImagePath != "" {
 			if _, err := os.Stat(p.ImagePath); err != nil {
-				return fmt.Errorf("%w: page %d image file not accessible: %v", ErrInvalidInput, p.N, err)
+				return 0, fmt.Errorf("%w: page %d image file not accessible: %v", ErrInvalidInput, p.N, err)
 			}
 		}
 		if p.AudioPath != "" {
 			if _, err := os.Stat(p.AudioPath); err != nil {
-				return fmt.Errorf("%w: page %d audio file not accessible: %v", ErrInvalidInput, p.N, err)
+				return 0, fmt.Errorf("%w: page %d audio file not accessible: %v", ErrInvalidInput, p.N, err)
 			}
+		}
+		// T12 (contract row C3): narration pages must carry their
+		// Go-known clip duration, and only narration pages may carry
+		// one — see the Render doc.
+		hasAudio := p.AudioPath != "" || len(p.AudioBytes) > 0
+		if hasAudio && p.Duration <= 0 {
+			return 0, fmt.Errorf("%w: page %d has narration but no Go-known Duration — the film total needs each clip's measured length (audio.Clip.Duration)", ErrInvalidInput, p.N)
+		}
+		if !hasAudio && p.Duration > 0 {
+			return 0, fmt.Errorf("%w: page %d carries a Duration %v but no narration — a silent page's hold comes from its words", ErrInvalidInput, p.N, p.Duration)
 		}
 	}
 
 	resolved, err := resolveConfig(cfg)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	var workDir string
@@ -438,7 +475,7 @@ func Render(ctx context.Context, cfg Config, in Input) error {
 		workDir, err = os.MkdirTemp("", "thutapi-bookvideo-")
 	}
 	if err != nil {
-		return fmt.Errorf("create temp work dir: %w", err)
+		return 0, fmt.Errorf("create temp work dir: %w", err)
 	}
 	defer os.RemoveAll(workDir) // best effort cleanup
 
@@ -448,7 +485,7 @@ func Render(ctx context.Context, cfg Config, in Input) error {
 	// reuses the same fontfile path (the runtime image has no fonts).
 	fontPath, cleanup, err := materializeFont(resolved, workDir)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	resolved.FontFile = fontPath
 	if cleanup != nil {
@@ -470,7 +507,7 @@ func Render(ctx context.Context, cfg Config, in Input) error {
 		} else {
 			imgPath := filepath.Join(workDir, fmt.Sprintf("page-%02d.jpg", n))
 			if err := os.WriteFile(imgPath, p.ImageBytes, 0o600); err != nil {
-				return fmt.Errorf("write page %d image bytes: %w", n, err)
+				return 0, fmt.Errorf("write page %d image bytes: %w", n, err)
 			}
 			materializedImages[i] = imgPath
 		}
@@ -480,7 +517,7 @@ func Render(ctx context.Context, cfg Config, in Input) error {
 		} else if len(p.AudioBytes) > 0 {
 			audPath := filepath.Join(workDir, fmt.Sprintf("narration-%02d.mp3", n))
 			if err := os.WriteFile(audPath, p.AudioBytes, 0o600); err != nil {
-				return fmt.Errorf("write page %d audio bytes: %w", n, err)
+				return 0, fmt.Errorf("write page %d audio bytes: %w", n, err)
 			}
 			materializedAudios[i] = audPath
 		}
@@ -517,7 +554,7 @@ func Render(ctx context.Context, cfg Config, in Input) error {
 	})
 
 	if err := g.Wait(); err != nil {
-		return err
+		return 0, err
 	}
 
 	allSegments := make([]string, 0, len(in.Pages)+2)
@@ -527,12 +564,24 @@ func Render(ctx context.Context, cfg Config, in Input) error {
 
 	tmpOut := filepath.Join(workDir, "final.mp4")
 	if err := ConcatSegments(ctx, resolved, allSegments, in.Title, tmpOut); err != nil {
-		return err
+		return 0, err
 	}
 
 	if err := os.MkdirAll(filepath.Dir(in.OutputPath), 0o755); err != nil {
-		return fmt.Errorf("create output directory: %w", err)
+		return 0, fmt.Errorf("create output directory: %w", err)
 	}
 
-	return copyOrMoveFile(tmpOut, in.OutputPath)
+	// The film's total, from the render phase's own arithmetic: fixed
+	// card holds plus each page's Go-known hold (the narration
+	// Duration or the silent captionHold). Every term was validated
+	// above, so the sum is complete before any mix anchors to it.
+	total := resolved.TitleCardDuration + resolved.EndCardDuration
+	for i := range in.Pages {
+		if materializedAudios[i] != "" {
+			total += in.Pages[i].Duration
+		} else {
+			total += captionHold(in.Pages[i].Text)
+		}
+	}
+	return total, copyOrMoveFile(tmpOut, in.OutputPath)
 }

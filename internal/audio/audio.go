@@ -111,6 +111,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -261,17 +262,26 @@ type Config struct {
 	Model string
 }
 
-// Clip is one page's persisted narration: which page it speaks (N)
-// and the metadata row the store placed for it. Rows are returned in
-// the order the pages were given, so clip i always describes pages[i]
-// — the one deterministic contract a caller can rely on under the
-// fan-out.
+// Clip is one page's persisted narration: which page it speaks (N),
+// the metadata row the store placed for it, and the clip's length —
+// measured out of the downloaded bytes in pure Go as they arrived
+// (contract row C2 of t12-round1.md: the GMI TTS outcome carries no
+// duration and the runtime image has no ffprobe, so this Go-known
+// measurement is the only way the film render can total a narrated
+// page's hold). Rows are returned in the order the pages were given,
+// so clip i always describes pages[i] — the one deterministic
+// contract a caller can rely on under the fan-out.
 type Clip struct {
 	// N is the page number, copied from the story page.
 	N int
 	// Media is the placed store row: its ID names the blob file on
 	// disk, ContentType and SizeBytes describe it.
 	Media store.Media
+	// Duration is the clip's length, measured from its own bytes
+	// (see measureDuration in music.go). It is what makes a narrated
+	// film's total computable in Go before the mix's wind-down is
+	// anchored (PLAN.md §T12).
+	Duration time.Duration
 }
 
 // speaker is a resolved Config: every default already substituted, so
@@ -357,11 +367,11 @@ func NarrateBook(ctx context.Context, cfg Config, bookID string, pages []story.P
 	g.SetLimit(sp.limit)
 	for i, p := range pages {
 		g.Go(func() error {
-			m, err := sp.narratePage(gctx, w, p)
+			m, d, err := sp.narratePage(gctx, w, p)
 			if err != nil {
 				return fmt.Errorf("audio: narrate page %d: %w", p.N, err)
 			}
-			clips[i] = Clip{N: p.N, Media: m}
+			clips[i] = Clip{N: p.N, Media: m, Duration: d}
 			return nil
 		})
 	}
@@ -372,22 +382,33 @@ func NarrateBook(ctx context.Context, cfg Config, bookID string, pages []story.P
 }
 
 // narratePage runs one page through the whole narration pipeline:
-// synthesise, decode the envelope, download the audio on receipt, and
-// persist the clip at (book, narration, page N).
-func (sp *speaker) narratePage(ctx context.Context, w *narrationWriter, p story.Page) (store.Media, error) {
+// synthesise, decode the envelope, download the audio on receipt,
+// measure the clip's length out of its own bytes (the Go-known
+// duration the film total needs — ErrClipDuration when the bytes are
+// not a readable MP3/WAV), and persist the clip at (book, narration,
+// page N).
+func (sp *speaker) narratePage(ctx context.Context, w *narrationWriter, p story.Page) (store.Media, time.Duration, error) {
 	raw, err := sp.tts.SynthesizeSpeech(ctx, p.Text, p.Emotion, sp.voice, sp.model)
 	if err != nil {
-		return store.Media{}, err
+		return store.Media{}, 0, err
 	}
 	audioURL, err := decodeAudioURL(raw)
 	if err != nil {
-		return store.Media{}, err
+		return store.Media{}, 0, err
 	}
 	b, ct, err := sp.fetchAudio(ctx, audioURL)
 	if err != nil {
-		return store.Media{}, err
+		return store.Media{}, 0, err
 	}
-	return w.storeClip(ctx, p.N, b, ct)
+	d, err := measureDuration(b)
+	if err != nil {
+		return store.Media{}, 0, fmt.Errorf("audio: measure page %d clip: %w", p.N, err)
+	}
+	m, err := w.storeClip(ctx, p.N, b, ct)
+	if err != nil {
+		return store.Media{}, 0, err
+	}
+	return m, d, nil
 }
 
 // SynthesizeQuestion speaks one interview question and returns the

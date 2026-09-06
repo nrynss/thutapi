@@ -137,7 +137,34 @@ func audioEnvelope(audioURL string) []byte {
 // clipBytes is the deterministic audio payload served for one page's
 // text; the download path accepts the served Content-Type, so the
 // bytes only need to be distinct per page.
-func clipBytes(text string) []byte { return []byte("clip-for:" + text) }
+// makeMP3 builds a parseable mono MPEG-1 Layer III CBR narration clip
+// for the harness's fake TTS: an ID3v2 tag whose body is the distinct
+// text (so the bytes differ per page) followed by 77 silent frames.
+// NarrateBook measures every clip as it downloads (audio.Clip.Duration
+// — contract row C2 of t12-round1.md), so the harness's clips must be
+// real MP3 structures, not arbitrary bytes.
+func makeMP3(text string) []byte {
+	const frameLen = 417 // 144 x 128000 / 44100, mono MPEG-1 Layer III
+	const frames = 77
+	size := len(text)
+	buf := make([]byte, 0, 10+size+frames*frameLen)
+	buf = append(buf, 'I', 'D', '3', 4, 0, 0,
+		byte(size>>21&0x7f), byte(size>>14&0x7f), byte(size>>7&0x7f), byte(size&0x7f))
+	buf = append(buf, text...)
+	for i := 0; i < frames; i++ {
+		buf = append(buf, 0xFF, 0xFB, 0x90, 0xC0)
+		buf = append(buf, make([]byte, frameLen-4)...)
+	}
+	return buf
+}
+
+// fixtureClipDuration is the Go-known duration every harness narration
+// clip measures to: 77 frames x 1152 samples / 44100 Hz
+// (2.011428571428... s; 2011428571 ns after truncation, exactly what
+// the audio package's float measurement yields).
+const fixtureClipDuration = 2011428571 * time.Nanosecond
+
+func clipBytes(text string) []byte { return makeMP3(text) }
 
 // orderRecorder is a mutex-guarded call log the stage fakes share, so
 // an ordering pin observes stage boundaries without racing the fan-out.
@@ -329,6 +356,107 @@ func newClipServer() *clipServer {
 	return s
 }
 
+// musicCall is one recorded SynthesizeMusic invocation.
+type musicCall struct {
+	lyrics, prompt, model string
+}
+
+// fakeMusic is audio.Music, scripted: it records every call and answers
+// with a music envelope whose media_urls[0].url points at the bed
+// server. The bed step of the pipeline (audio.GenerateMusicBed) then
+// downloads real bytes from that URL.
+type fakeMusic struct {
+	bedBase string
+	err     error
+	mu      sync.Mutex
+	calls   []musicCall
+}
+
+func (f *fakeMusic) SynthesizeMusic(ctx context.Context, lyrics, prompt, model string) ([]byte, error) {
+	f.mu.Lock()
+	f.calls = append(f.calls, musicCall{lyrics: lyrics, prompt: prompt, model: model})
+	err := f.err
+	f.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return musicEnvelope(f.bedBase + "/bed.mp3"), nil
+}
+
+func (f *fakeMusic) recorded() []musicCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]musicCall(nil), f.calls...)
+}
+
+// musicEnvelope is a terminal music record in the observed shape of
+// t12-music-record.json: the bed at outcome.media_urls[0].url beside
+// outcome.audio_url, with its length at outcome.duration_ms.
+func musicEnvelope(bedURL string) []byte {
+	return []byte(`{"request_id":"req-music","model":"minimax-music-3.0","status":"success",` +
+		`"payload":{"lyrics":"echoed","prompt":"echoed","format":"mp3"},` +
+		`"outcome":{"media_urls":[{"id":"0","url":"` + bedURL + `"}],"audio_url":"` + bedURL +
+		`","duration_ms":3000,"format":"mp3","status":"success"}}`)
+}
+
+// bedServer serves the bed bytes the music step downloads.
+type bedServer struct {
+	*httptest.Server
+}
+
+func newBedServer() *bedServer {
+	b := &bedServer{}
+	b.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "audio/mpeg")
+		_, _ = w.Write([]byte("the-wordless-bed-bytes"))
+	}))
+	return b
+}
+
+// fakeMixRunner is audio.Runner for the music step: it records the mix
+// command, writes a distinct MIXED film to the output path (so the
+// persist leg reads a real file and tests can tell the mixed film from
+// the plain render), and can fail.
+type fakeMixRunner struct {
+	err error
+	mu  sync.Mutex
+	ins []mixCall
+}
+
+type mixCall struct {
+	args []string
+}
+
+func (f *fakeMixRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	f.mu.Lock()
+	f.ins = append(f.ins, mixCall{args: append([]string{name}, args...)})
+	f.mu.Unlock()
+	if f.err != nil {
+		return nil, f.err
+	}
+	// The output path is the last arg; write the MIXED film marker.
+	out := args[len(args)-1]
+	if err := os.WriteFile(out, []byte("mixed-film:"+out), 0o600); err != nil {
+		return nil, err
+	}
+	return []byte("ok"), nil
+}
+
+func (f *fakeMixRunner) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.ins)
+}
+
+func (f *fakeMixRunner) last() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.ins) == 0 {
+		return nil
+	}
+	return f.ins[len(f.ins)-1].args
+}
+
 // fakePDFRenderer is the pdfRenderer seam: it records the Input (title,
 // byline and pages) and returns deterministic PDF bytes.
 type fakePDFRenderer struct {
@@ -363,26 +491,30 @@ func (f *fakePDFRenderer) inputs() []bookpdf.Input {
 // fakeRenderer is the videoRenderer seam: it records the Input (title,
 // byline and the page image/audio bytes the film was built from) and
 // writes the film bytes to in.OutputPath, so the persist leg reads a
-// real file.
+// real file. It returns dur as the render's computed total — the value
+// the music step's mix must anchor to (contract row C3 of
+// t12-round1.md).
 type fakeRenderer struct {
 	order *orderRecorder
 	err   error
+	dur   time.Duration
 	mu    sync.Mutex
 	ins   []bookvideo.Input
 }
 
-func (f *fakeRenderer) Render(ctx context.Context, in bookvideo.Input) error {
+func (f *fakeRenderer) Render(ctx context.Context, in bookvideo.Input) (time.Duration, error) {
 	f.mu.Lock()
 	f.ins = append(f.ins, in)
 	err := f.err
+	dur := f.dur
 	f.mu.Unlock()
 	if f.order != nil {
 		f.order.mark("render")
 	}
 	if err != nil {
-		return err
+		return 0, err
 	}
-	return os.WriteFile(in.OutputPath, []byte("film:"+in.Title+":"+in.Byline), 0o600)
+	return dur, os.WriteFile(in.OutputPath, []byte("film:"+in.Title+":"+in.Byline), 0o600)
 }
 
 func (f *fakeRenderer) inputs() []bookvideo.Input {
