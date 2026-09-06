@@ -21,9 +21,63 @@ var templates embed.FS
 
 var pageTemplates = template.Must(template.ParseFS(templates, "templates/*.html"))
 
-// Shelf serves the first screen. It remains useful when JavaScript is off.
+// shelfStore is the shelf page's narrow view of the persistent store.
+type shelfStore interface {
+	Books(ctx context.Context) ([]store.Book, error)
+}
+
+// ShelfBook is a display model for one book card on the landing shelf.
+type ShelfBook struct {
+	ID     string `json:"id"`
+	Title  string `json:"title"`
+	Byline string `json:"byline,omitempty"`
+}
+
+// ShelfHandler serves the landing shelf screen.
+// Construct it with NewShelfHandler.
+type ShelfHandler struct {
+	store shelfStore
+}
+
+// NewShelfHandler builds the shelf handler from its persistent store.
+func NewShelfHandler(db shelfStore) *ShelfHandler {
+	return &ShelfHandler{store: db}
+}
+
+// Shelf serves the first screen. It lists restored books from the store and
+// remains fully functional when JavaScript is off.
+func (h *ShelfHandler) Shelf(w http.ResponseWriter, r *http.Request) {
+	var books []ShelfBook
+	if h.store != nil {
+		stored, err := h.store.Books(r.Context())
+		if err != nil {
+			stored = nil
+		}
+		for _, b := range stored {
+			books = append(books, ShelfBook{
+				ID:     b.ID,
+				Title:  b.Title,
+				Byline: b.Byline,
+			})
+		}
+	}
+	if books == nil {
+		books = []ShelfBook{}
+	}
+	rawJSON, err := json.Marshal(books)
+	if err != nil {
+		rawJSON = []byte("[]")
+	}
+	render(w, "shelf", pageData{
+		Books:     books,
+		BooksJSON: template.JS(rawJSON),
+	})
+}
+
+// Shelf serves the first screen using an empty shelf store.
+// It remains useful when JavaScript is off and preserves backwards compatibility.
 func Shelf(w http.ResponseWriter, r *http.Request) {
-	render(w, "shelf", pageData{})
+	NewShelfHandler(nil).Shelf(w, r)
 }
 
 // Interview serves the interview and generation screens for one interview.
@@ -205,6 +259,8 @@ func storySlug(title string) string {
 type pageData struct {
 	InterviewID string
 	Book        bookPage
+	Books       []ShelfBook
+	BooksJSON   template.JS
 }
 
 type bookPage struct {

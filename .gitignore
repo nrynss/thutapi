@@ -22,8 +22,10 @@ GMI_API_KEY
 *.db-shm
 
 # Generated media (kept on the box, not in the repo)
-data/
-data/media/
+data/*
+!data/prewarm/
+!data/prewarm/**
+
 
 # Editor
 .vscode/

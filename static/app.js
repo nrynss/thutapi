@@ -89,8 +89,26 @@ async function json(url, init) {
   return body;
 }
 
-function Shelf({ onStart }) {
-  return html`<section class="card shelf-card"><p class="eyebrow">Thutapi picture books</p><h1>Stories made from your ideas.</h1><p>Pick a cozy book from the shelf, or make one with a grown-up.</p><a class="primary" href="/interview/new" data-start onClick=${onStart}>Make your own book</a><p class="warm">One tap starts our story.</p></section>`;
+function readShelfBooks() {
+  const el = document.getElementById("shelf-books");
+  if (el && el.textContent) {
+    try {
+      const parsed = JSON.parse(el.textContent);
+      if (Array.isArray(parsed)) return parsed;
+    } catch (_) {}
+  }
+  const app = document.querySelector("#app");
+  if (app && app.dataset && app.dataset.books) {
+    try {
+      const parsed = JSON.parse(app.dataset.books);
+      if (Array.isArray(parsed)) return parsed;
+    } catch (_) {}
+  }
+  return [];
+}
+
+function Shelf({ onStart, books = readShelfBooks() }) {
+  return html`<section class="card shelf-card"><p class="eyebrow">Thutapi picture books</p><h1>Stories made from your ideas.</h1><p>Pick a cozy book from the shelf, or make one with a grown-up.</p><a class="primary" href="/interview/new" data-start onClick=${onStart}>Make your own book</a><p class="warm">One tap starts our story.</p>${books && books.length > 0 ? html`<section class="shelf-books"><h2>From the shelf</h2><div class="book-list">${books.map(b => html`<a class="book-card" href="/book/${b.id}"><span class="book-title">${b.title}</span>${b.byline ? html`<span class="book-byline warm">By ${b.byline}</span>` : null}</a>`)}</div></section>` : null}</section>`;
 }
 
 function Byline({ onStart }) {

@@ -1,14 +1,19 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"thutapi/internal/bookgen"
+	"thutapi/internal/mediastore"
+	"thutapi/internal/prewarm"
 	"thutapi/internal/store"
 )
 
@@ -368,5 +373,296 @@ func TestBookStateMissingIsJSONNotFound(t *testing.T) {
 	h.Book(pageRes, pageReq)
 	if pageRes.Code != http.StatusNotFound {
 		t.Fatalf("page status = %d, want 404", pageRes.Code)
+	}
+}
+
+type errStore struct{}
+
+func (errStore) Books(context.Context) ([]store.Book, error) {
+	return nil, errors.New("db down")
+}
+
+func TestShelfHandler_EmptyStore(t *testing.T) {
+	h := NewShelfHandler(nil)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	res := httptest.NewRecorder()
+	h.Shelf(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", res.Code)
+	}
+	body := res.Body.String()
+	if !strings.Contains(body, "Make your own book") {
+		t.Fatalf("body lacks CTA: %s", body)
+	}
+	if !strings.Contains(body, `<script type="application/json" id="shelf-books">[]</script>`) {
+		t.Fatalf("body lacks empty json script: %s", body)
+	}
+	if !strings.Contains(body, `data-books="[]"`) {
+		t.Fatalf("body lacks empty data-books: %s", body)
+	}
+	if strings.Contains(body, "class=\"book-card\"") {
+		t.Fatalf("empty shelf should not render book cards: %s", body)
+	}
+}
+
+func TestShelfHandler_StoreError(t *testing.T) {
+	h := NewShelfHandler(errStore{})
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	res := httptest.NewRecorder()
+	h.Shelf(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", res.Code)
+	}
+	body := res.Body.String()
+	if !strings.Contains(body, "Make your own book") {
+		t.Fatalf("body lacks CTA: %s", body)
+	}
+	if !strings.Contains(body, `<script type="application/json" id="shelf-books">[]</script>`) {
+		t.Fatalf("body lacks empty json script on store error: %s", body)
+	}
+}
+
+func TestShelf_PackageLevelFunction(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	res := httptest.NewRecorder()
+	Shelf(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", res.Code)
+	}
+	if ct := res.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Fatalf("content-type = %q, want text/html", ct)
+	}
+	body := res.Body.String()
+	if !strings.Contains(body, "Make your own book") {
+		t.Fatalf("body lacks CTA: %s", body)
+	}
+	if !strings.Contains(body, `data-interview-id="shelf"`) {
+		t.Fatalf("body lacks shelf interview-id: %s", body)
+	}
+	if !strings.Contains(body, `<script type="application/json" id="shelf-books">[]</script>`) {
+		t.Fatalf("body lacks empty json script: %s", body)
+	}
+}
+
+func TestShelfHandler_WithBooks(t *testing.T) {
+	db := openBookStore(t)
+	b1, err := db.CreateBook(t.Context(), "Moon Bear's Honey")
+	if err != nil {
+		t.Fatalf("create book 1: %v", err)
+	}
+	if err := db.UpdateBook(t.Context(), store.Book{ID: b1.ID, Title: b1.Title, Byline: "Little Bear"}); err != nil {
+		t.Fatalf("update book 1 byline: %v", err)
+	}
+	b2, err := db.CreateBook(t.Context(), "Sun River")
+	if err != nil {
+		t.Fatalf("create book 2: %v", err)
+	}
+
+	h := NewShelfHandler(db)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	res := httptest.NewRecorder()
+	h.Shelf(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", res.Code)
+	}
+	body := res.Body.String()
+	if !strings.Contains(body, "Moon Bear&#39;s Honey") && !strings.Contains(body, "Moon Bear's Honey") {
+		t.Fatalf("body lacks book 1 title: %s", body)
+	}
+	if !strings.Contains(body, "By Little Bear") {
+		t.Fatalf("body lacks book 1 byline: %s", body)
+	}
+	if !strings.Contains(body, "Sun River") {
+		t.Fatalf("body lacks book 2 title: %s", body)
+	}
+	if !strings.Contains(body, "/book/"+b1.ID) || !strings.Contains(body, "/book/"+b2.ID) {
+		t.Fatalf("body lacks book links: %s", body)
+	}
+	// Verify JSON script
+	if !strings.Contains(body, `<script type="application/json" id="shelf-books">`) {
+		t.Fatalf("body lacks shelf-books script: %s", body)
+	}
+	var parsed []ShelfBook
+	startIdx := strings.Index(body, `<script type="application/json" id="shelf-books">`) + len(`<script type="application/json" id="shelf-books">`)
+	endIdx := strings.Index(body[startIdx:], `</script>`)
+	if err := json.Unmarshal([]byte(body[startIdx:startIdx+endIdx]), &parsed); err != nil {
+		t.Fatalf("unmarshal shelf-books script: %v", err)
+	}
+	if len(parsed) != 2 {
+		t.Fatalf("len(parsed) = %d, want 2", len(parsed))
+	}
+	byID := make(map[string]ShelfBook)
+	for _, b := range parsed {
+		byID[b.ID] = b
+	}
+	if b, ok := byID[b1.ID]; !ok || b.Title != "Moon Bear's Honey" || b.Byline != "Little Bear" {
+		t.Fatalf("book 1 = %+v, want title 'Moon Bear's Honey' and byline 'Little Bear'", byID[b1.ID])
+	}
+	if b, ok := byID[b2.ID]; !ok || b.Title != "Sun River" || b.Byline != "" {
+		t.Fatalf("book 2 = %+v, want title 'Sun River' and empty byline", byID[b2.ID])
+	}
+}
+
+func TestPrewarmFixtureCompletedAndRestored(t *testing.T) {
+	fixtureDir, err := filepath.Abs(filepath.Join("..", "..", "data", "prewarm", "d625fd608be48227f08c33cf860e5de8"))
+	if err != nil {
+		t.Fatalf("resolve fixture dir: %v", err)
+	}
+	manifestPath := filepath.Join(fixtureDir, "book.json")
+	rawManifest, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+
+	type manifestMedia struct {
+		ID          string          `json:"id"`
+		Kind        store.MediaKind `json:"kind,omitempty"`
+		PageN       int             `json:"page_n,omitempty"`
+		CastName    string          `json:"cast_name,omitempty"`
+		ContentType string          `json:"content_type"`
+		SizeBytes   int64           `json:"size_bytes"`
+	}
+	type manifestDoc struct {
+		ID        string            `json:"id"`
+		Title     string            `json:"title"`
+		Byline    string            `json:"byline,omitempty"`
+		CreatedAt string            `json:"created_at"`
+		Pages     []json.RawMessage `json:"pages"`
+		Cast      []json.RawMessage `json:"cast"`
+		Media     []manifestMedia   `json:"media"`
+	}
+	var manifest manifestDoc
+	if err := json.Unmarshal(rawManifest, &manifest); err != nil {
+		t.Fatalf("unmarshal manifest: %v", err)
+	}
+
+	if len(manifest.Media) != 20 {
+		t.Fatalf("manifest has %d media items, want 20", len(manifest.Media))
+	}
+
+	var hasVideo, hasPDF bool
+	for _, m := range manifest.Media {
+		if m.ContentType == "video/mp4" {
+			hasVideo = true
+		}
+		if m.ContentType == "application/pdf" {
+			hasPDF = true
+		}
+		blobPath := filepath.Join(fixtureDir, "media", m.ID)
+		info, err := os.Stat(blobPath)
+		if err != nil {
+			t.Fatalf("media blob %s missing on disk: %v", m.ID, err)
+		}
+		if info.Size() == 0 {
+			t.Fatalf("media blob %s on disk is empty", m.ID)
+		}
+	}
+	if !hasVideo {
+		t.Fatalf("manifest missing video/mp4 media item")
+	}
+	if !hasPDF {
+		t.Fatalf("manifest missing application/pdf media item")
+	}
+
+	// Now verify restore of the fixture
+	dataDir := t.TempDir()
+	db, err := store.Open(t.Context(), store.Config{Path: filepath.Join(dataDir, "thutapi.db")})
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer db.Close()
+
+	mediaDir := filepath.Join(dataDir, "media")
+	blobs, err := mediastore.Open(t.Context(), mediastore.Config{Dir: mediaDir, DB: db})
+	if err != nil {
+		t.Fatalf("open mediastore: %v", err)
+	}
+
+	fixturesRoot := filepath.Dir(fixtureDir) // data/prewarm
+	restored, err := prewarm.Import(t.Context(), db, blobs, fixturesRoot)
+	if err != nil {
+		t.Fatalf("prewarm.Import: %v", err)
+	}
+	if len(restored) != 1 || restored[0] != "d625fd608be48227f08c33cf860e5de8" {
+		t.Fatalf("restored = %v, want [d625fd608be48227f08c33cf860e5de8]", restored)
+	}
+
+	// Assert 20 media items
+	mediaRows, err := db.BookMedia(t.Context(), "d625fd608be48227f08c33cf860e5de8")
+	if err != nil {
+		t.Fatalf("BookMedia: %v", err)
+	}
+	if len(mediaRows) != 20 {
+		t.Fatalf("len(BookMedia) = %d, want 20", len(mediaRows))
+	}
+
+	// Verify shelf lists it
+	shelfH := NewShelfHandler(db)
+	sReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	sRes := httptest.NewRecorder()
+	shelfH.Shelf(sRes, sReq)
+	if sRes.Code != http.StatusOK {
+		t.Fatalf("shelf status = %d", sRes.Code)
+	}
+	if !strings.Contains(sRes.Body.String(), "Bo and Pip&#39;s Moon Mango Dance") &&
+		!strings.Contains(sRes.Body.String(), "Bo and Pip's Moon Mango Dance") {
+		t.Fatalf("shelf body lacks title: %s", sRes.Body.String())
+	}
+	if !strings.Contains(sRes.Body.String(), "/book/d625fd608be48227f08c33cf860e5de8") {
+		t.Fatalf("shelf body lacks book link: %s", sRes.Body.String())
+	}
+
+	// Verify book page and state
+	bookH := NewBookHandler(db, fixedGeneration{})
+	bReq := httptest.NewRequest(http.MethodGet, "/book/d625fd608be48227f08c33cf860e5de8", nil)
+	bReq.SetPathValue("id", "d625fd608be48227f08c33cf860e5de8")
+	bRes := httptest.NewRecorder()
+	bookH.Book(bRes, bReq)
+	if bRes.Code != http.StatusOK {
+		t.Fatalf("book page status = %d", bRes.Code)
+	}
+
+	stateReq := httptest.NewRequest(http.MethodGet, "/book/d625fd608be48227f08c33cf860e5de8/state", nil)
+	stateReq.SetPathValue("id", "d625fd608be48227f08c33cf860e5de8")
+	stateRes := httptest.NewRecorder()
+	bookH.State(stateRes, stateReq)
+	if stateRes.Code != http.StatusOK {
+		t.Fatalf("state status = %d", stateRes.Code)
+	}
+	var state bookPage
+	if err := json.Unmarshal(stateRes.Body.Bytes(), &state); err != nil {
+		t.Fatalf("unmarshal state: %v", err)
+	}
+	if state.Status != bookgen.GenerationReady {
+		t.Fatalf("state.Status = %v, want ready", state.Status)
+	}
+	if state.PDFURL == "" || state.VideoURL == "" {
+		t.Fatalf("state lacks urls: PDFURL=%q, VideoURL=%q", state.PDFURL, state.VideoURL)
+	}
+
+	// Verify downloads
+	dlH := NewDownloadHandler(db, blobs, fixedGeneration{})
+	dlPDFReq := httptest.NewRequest(http.MethodGet, "/book/d625fd608be48227f08c33cf860e5de8/download/pdf", nil)
+	dlPDFReq.SetPathValue("id", "d625fd608be48227f08c33cf860e5de8")
+	dlPDFReq.SetPathValue("kind", "pdf")
+	dlPDFRes := httptest.NewRecorder()
+	dlH.Download(dlPDFRes, dlPDFReq)
+	if dlPDFRes.Code != http.StatusOK {
+		t.Fatalf("pdf download status = %d", dlPDFRes.Code)
+	}
+	if ct := dlPDFRes.Header().Get("Content-Type"); ct != "application/pdf" {
+		t.Fatalf("pdf download content-type = %q, want application/pdf", ct)
+	}
+
+	dlVidReq := httptest.NewRequest(http.MethodGet, "/book/d625fd608be48227f08c33cf860e5de8/download/video", nil)
+	dlVidReq.SetPathValue("id", "d625fd608be48227f08c33cf860e5de8")
+	dlVidReq.SetPathValue("kind", "video")
+	dlVidRes := httptest.NewRecorder()
+	dlH.Download(dlVidRes, dlVidReq)
+	if dlVidRes.Code != http.StatusOK {
+		t.Fatalf("video download status = %d", dlVidRes.Code)
+	}
+	if ct := dlVidRes.Header().Get("Content-Type"); ct != "video/mp4" {
+		t.Fatalf("video download content-type = %q, want video/mp4", ct)
 	}
 }

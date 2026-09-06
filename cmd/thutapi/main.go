@@ -194,6 +194,7 @@ type server struct {
 	voiceSamples *audio.VoiceSampleHandler
 	interviews   *interview.Handler
 	generate     *bookgen.Handler
+	shelf        *web.ShelfHandler
 	book         *web.BookHandler
 	download     *web.DownloadHandler
 }
@@ -250,12 +251,23 @@ func newServer(log *slog.Logger, media *mediastore.Store, voiceSamples *audio.Vo
 	if guard == nil {
 		return nil, errors.New("newServer: gate must not be nil")
 	}
-	s := &server{mux: http.NewServeMux(), log: log, start: time.Now(), media: media, voiceSamples: voiceSamples, interviews: interviews, generate: generate, book: web.NewBookHandler(db, generate), download: web.NewDownloadHandler(db, media, generate)}
+	s := &server{
+		mux:          http.NewServeMux(),
+		log:          log,
+		start:        time.Now(),
+		media:        media,
+		voiceSamples: voiceSamples,
+		interviews:   interviews,
+		generate:     generate,
+		shelf:        web.NewShelfHandler(db),
+		book:         web.NewBookHandler(db, generate),
+		download:     web.NewDownloadHandler(db, media, generate),
+	}
 	// /healthz is the one route T0 ships. Liveness only — no dependency
 	// checks, no probes. That distinction belongs to a later track.
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	// T9's human page and static-asset routes. API routes remain plural.
-	s.mux.HandleFunc("GET /{$}", web.Shelf)
+	s.mux.HandleFunc("GET /{$}", s.shelf.Shelf)
 	s.mux.HandleFunc("GET /interview/{id}", web.Interview)
 	s.mux.HandleFunc("GET /book/{id}", s.book.Book)
 	s.mux.HandleFunc("GET /book/{id}/state", s.book.State)

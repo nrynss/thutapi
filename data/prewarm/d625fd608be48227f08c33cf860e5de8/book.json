@@ -1,0 +1,346 @@
+{
+  "id": "d625fd608be48227f08c33cf860e5de8",
+  "title": "Bo and Pip's Moon Mango Dance",
+  "created_at": "2026-09-06T03:54:09Z",
+  "pages": [
+    {
+      "BookID": "d625fd608be48227f08c33cf860e5de8",
+      "N": 1,
+      "Text": "Meet Bo, a silly monkey with golden brown fur. His best friend is Pip, a little blue bird. They love adventures together.",
+      "Prompt": "A cheerful jungle clearing at sunrise. A small silly monkey with golden brown fur and a long curly tail stands next to a tiny round bird with bright blue feathers. Both are smiling at the viewer.",
+      "Characters": [
+        "Bo",
+        "Pip"
+      ],
+      "Emotion": "happy",
+      "Lines": [
+        {
+          "character": "Bo",
+          "text": "Hi! I'm Bo! Let's go on an adventure!"
+        },
+        {
+          "character": "Pip",
+          "text": "I'm Pip! I'm ready too!"
+        }
+      ]
+    },
+    {
+      "BookID": "d625fd608be48227f08c33cf860e5de8",
+      "N": 2,
+      "Text": "Bo and Pip look up at the sky. They want to find the magic mango tree that grows on the moon. Its fruits would be the yummiest ever.",
+      "Prompt": "Bo the golden brown monkey and Pip the tiny blue bird standing on a grassy hill, pointing up at a bright full moon in a starry sky. A faint sparkle hints at a tree on the moon.",
+      "Characters": [
+        "Bo",
+        "Pip"
+      ],
+      "Emotion": "surprised",
+      "Lines": [
+        {
+          "character": "Bo",
+          "text": "Look, Pip! The moon is out tonight!"
+        },
+        {
+          "character": "Pip",
+          "text": "I want to find the mango tree that grows up there!"
+        }
+      ]
+    },
+    {
+      "BookID": "d625fd608be48227f08c33cf860e5de8",
+      "N": 3,
+      "Text": "But oh no! A grumpy cloud floats in front of the moon. It hides the sky and makes everything dark. Bo and Pip cannot see the moon.",
+      "Prompt": "A gloomy sky with a large puffy grey cloud with a frowny face and crossed tiny arms blocking the moon. Bo the monkey and Pip the blue bird stand below looking worried.",
+      "Characters": [
+        "Bo",
+        "Pip",
+        "Grumpy Cloud"
+      ],
+      "Emotion": "sad",
+      "Lines": [
+        {
+          "character": "Grumpy Cloud",
+          "text": "Go away! No moon for anyone tonight!"
+        },
+        {
+          "character": "Pip",
+          "text": "We can't see our mango tree!"
+        }
+      ]
+    },
+    {
+      "BookID": "d625fd608be48227f08c33cf860e5de8",
+      "N": 4,
+      "Text": "Pip has a clever idea. She sings a soft lullaby to the grumpy cloud. The song floats up like a gentle breeze.",
+      "Prompt": "Pip the tiny blue bird perched on Bo's shoulder, eyes closed, singing sweetly. The grumpy cloud listens, its frown beginning to soften. Soft musical notes swirl in the air.",
+      "Characters": [
+        "Bo",
+        "Pip",
+        "Grumpy Cloud"
+      ],
+      "Emotion": "calm",
+      "Lines": [
+        {
+          "character": "Pip",
+          "text": "Hush little cloud, the stars are near..."
+        },
+        {
+          "character": "Grumpy Cloud",
+          "text": "Oh... that does sound nice..."
+        }
+      ]
+    },
+    {
+      "BookID": "d625fd608be48227f08c33cf860e5de8",
+      "N": 5,
+      "Text": "Then Bo tickles the grumpy cloud with his fast fingers. Tickle tickle tickle! The cloud starts to giggle. It cannot stay grumpy anymore.",
+      "Prompt": "Bo the golden brown monkey reaching up and tickling the bottom of the grumpy grey cloud with both hands. The cloud's mouth is open in a big laughing grin.",
+      "Characters": [
+        "Bo",
+        "Grumpy Cloud"
+      ],
+      "Emotion": "happy",
+      "Lines": [
+        {
+          "character": "Bo",
+          "text": "Tickle tickle tickle! Giggle, cloud, giggle!"
+        },
+        {
+          "character": "Grumpy Cloud",
+          "text": "Hehehe! Stop! That tickles!"
+        }
+      ]
+    },
+    {
+      "BookID": "d625fd608be48227f08c33cf860e5de8",
+      "N": 6,
+      "Text": "The cloud laughs so hard it cries happy rain. Big drops fall down. Pip shakes her feathers and Bo splashes in the puddles.",
+      "Prompt": "Joyful scene of smiling raindrops falling from a happy cloud. Bo the monkey splashes in a puddle, and Pip the blue bird shakes her wings mid-air, both laughing.",
+      "Characters": [
+        "Bo",
+        "Pip",
+        "Grumpy Cloud"
+      ],
+      "Emotion": "happy",
+      "Lines": [
+        {
+          "character": "Pip",
+          "text": "It's happy rain! Look at the puddles!"
+        },
+        {
+          "character": "Grumpy Cloud",
+          "text": "I'm not grumpy anymore! Tee hee!"
+        }
+      ]
+    },
+    {
+      "BookID": "d625fd608be48227f08c33cf860e5de8",
+      "N": 7,
+      "Text": "The cloud drifts away and the moon shines again. On it grows the mango tree, full of giant golden mangoes.",
+      "Prompt": "The grey cloud has floated to the side, revealing the bright full moon. On the moon sits a leafy tree heavy with huge golden mangoes. Bo and Pip gaze up in wonder.",
+      "Characters": [
+        "Bo",
+        "Pip"
+      ],
+      "Emotion": "surprised",
+      "Lines": [
+        {
+          "character": "Bo",
+          "text": "There it is! The moon mango tree!"
+        },
+        {
+          "character": "Pip",
+          "text": "The mangoes are huge and golden!"
+        }
+      ]
+    },
+    {
+      "BookID": "d625fd608be48227f08c33cf860e5de8",
+      "N": 8,
+      "Text": "Bo and Pip dance together under the glowing moon. Then they share the biggest, juiciest moon mango. It tastes like sweet dreams and starlight.",
+      "Prompt": "Bo the golden brown monkey and Pip the tiny blue bird dancing happily on a grassy hill beneath the glowing full moon. Between them sits a giant sliced golden mango they are sharing.",
+      "Characters": [
+        "Bo",
+        "Pip"
+      ],
+      "Emotion": "happy",
+      "Lines": [
+        {
+          "character": "Bo",
+          "text": "This is the best mango in the whole universe!"
+        },
+        {
+          "character": "Pip",
+          "text": "Let's dance under the moon forever!"
+        }
+      ]
+    }
+  ],
+  "cast": [
+    {
+      "BookID": "d625fd608be48227f08c33cf860e5de8",
+      "Name": "Bo",
+      "Visual": "a small silly monkey with golden brown fur, a long curly tail, big round ears, and a wide toothy grin",
+      "Pitch": 4,
+      "SoundEffects": ""
+    },
+    {
+      "BookID": "d625fd608be48227f08c33cf860e5de8",
+      "Name": "Grumpy Cloud",
+      "Visual": "a puffy grey cloud with a frowny face, droopy eyebrows, and tiny arms that cross tightly",
+      "Pitch": -8,
+      "SoundEffects": "rumble_thunder"
+    },
+    {
+      "BookID": "d625fd608be48227f08c33cf860e5de8",
+      "Name": "Narrator",
+      "Visual": "no visual",
+      "Pitch": 0,
+      "SoundEffects": ""
+    },
+    {
+      "BookID": "d625fd608be48227f08c33cf860e5de8",
+      "Name": "Pip",
+      "Visual": "a tiny round bird with bright blue feathers, a small yellow beak, and shiny black eyes",
+      "Pitch": 10,
+      "SoundEffects": "bird_chirp"
+    }
+  ],
+  "media": [
+    {
+      "id": "8f8c01b6d4ed3818a453d6a020d9f5ca",
+      "kind": "reference",
+      "cast_name": "Bo",
+      "content_type": "image/jpeg",
+      "size_bytes": 353768
+    },
+    {
+      "id": "a03eda6b47f09397756236d66e398a62",
+      "kind": "reference",
+      "cast_name": "Grumpy Cloud",
+      "content_type": "image/jpeg",
+      "size_bytes": 255000
+    },
+    {
+      "id": "1b9d17d0cf65979c38bbb151604ca82c",
+      "kind": "reference",
+      "cast_name": "Pip",
+      "content_type": "image/jpeg",
+      "size_bytes": 200873
+    },
+    {
+      "id": "fbe841abbcc038394af5b6ebec4875ca",
+      "kind": "illustration",
+      "page_n": 1,
+      "content_type": "image/jpeg",
+      "size_bytes": 542955
+    },
+    {
+      "id": "301d7b35aee66a9ffffbfe16f625665c",
+      "kind": "illustration",
+      "page_n": 2,
+      "content_type": "image/jpeg",
+      "size_bytes": 401829
+    },
+    {
+      "id": "663fcaa763c5a36d44fe5e387a1811e3",
+      "kind": "illustration",
+      "page_n": 3,
+      "content_type": "image/jpeg",
+      "size_bytes": 503662
+    },
+    {
+      "id": "9a50afebc71297039fb767a311fcb4a6",
+      "kind": "illustration",
+      "page_n": 5,
+      "content_type": "image/jpeg",
+      "size_bytes": 417462
+    },
+    {
+      "id": "575c01648f94f838e934612ab4c6823e",
+      "kind": "illustration",
+      "page_n": 6,
+      "content_type": "image/jpeg",
+      "size_bytes": 379944
+    },
+    {
+      "id": "d853a321d14cb53abbbdbb8c64e4ed1a",
+      "kind": "illustration",
+      "page_n": 4,
+      "content_type": "image/jpeg",
+      "size_bytes": 392126
+    },
+    {
+      "id": "e60ee60f205b29e55acb39a2bee9d109",
+      "kind": "illustration",
+      "page_n": 7,
+      "content_type": "image/jpeg",
+      "size_bytes": 505653
+    },
+    {
+      "id": "02563f0ce191be61509f679921c5149f",
+      "kind": "illustration",
+      "page_n": 8,
+      "content_type": "image/jpeg",
+      "size_bytes": 370252
+    },
+    {
+      "id": "c9af45092f1baad4e6ba39d83258e139",
+      "kind": "narration",
+      "page_n": 3,
+      "content_type": "audio/mpeg",
+      "size_bytes": 153780
+    },
+    {
+      "id": "e4a1c36b7585cb556ce9af0180d0c287",
+      "kind": "narration",
+      "page_n": 1,
+      "content_type": "audio/mpeg",
+      "size_bytes": 140532
+    },
+    {
+      "id": "87c57e5435bc79da07adba4a12e52f1b",
+      "kind": "narration",
+      "page_n": 2,
+      "content_type": "audio/mpeg",
+      "size_bytes": 152628
+    },
+    {
+      "id": "0965443769edf58330f531f47c4aa3d5",
+      "kind": "narration",
+      "page_n": 5,
+      "content_type": "audio/mpeg",
+      "size_bytes": 151476
+    },
+    {
+      "id": "e87e2b44345a156f84da21df0c56c178",
+      "kind": "narration",
+      "page_n": 7,
+      "content_type": "audio/mpeg",
+      "size_bytes": 120948
+    },
+    {
+      "id": "53d73ddcbe60c78de53a7cec02f964de",
+      "kind": "narration",
+      "page_n": 8,
+      "content_type": "audio/mpeg",
+      "size_bytes": 170484
+    },
+    {
+      "id": "35d5488e6d27213eed93876e82a79ad4",
+      "kind": "narration",
+      "page_n": 6,
+      "content_type": "audio/mpeg",
+      "size_bytes": 130740
+    },
+    {
+      "id": "59a3934071824cebf453e2da868d432c",
+      "content_type": "video/mp4",
+      "size_bytes": 3477486
+    },
+    {
+      "id": "12c186127107e759e93917e2ad5d3b56",
+      "content_type": "application/pdf",
+      "size_bytes": 3533551
+    }
+  ]
+}

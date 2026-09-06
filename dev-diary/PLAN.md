@@ -121,11 +121,11 @@ size as the yardstick:
 | ~~**T11** gate~~ | `internal/gate/**` + route wrap | — | **DONE** `bcc7ceb` | Two-level token bucket (per-client + global) always on, optional `GATE_PASSCODE`. Settles open decision 9. Forwarded headers trusted only from a trusted peer; the global bucket is what a forged client key cannot widen |
 | ~~**T11** sweep~~ | `internal/mediastore/retention.go` | — (T3 closed) | **DONE** `bcc7ceb` | One pass over unplaced rows by age, unreferenced blobs by mtime, and a 6 GiB budget. Cannot touch a row T13 owns — guarded by both age and an explicit `Retain` veto |
 | ~~**T11** prewarm~~ | `internal/prewarm/**` | T10b | **DONE** `bcc7ceb` | Export/restore with every id preserved, so `/book/{id}` and `/media/{id}` survive a redeploy. Fixture built from the 2026-09-06 live run, no paid call. **Screen-1 landing was NOT taken here — that is §T9b** |
-| **T9b** | shelf landing in `internal/web/**` + `static/**`, plus completing the prewarm fixture | T11 prewarm | **M** | Two closed tracks (T9, T10b) and a fixture that must be finished without a paid run |
+| ~~**T9b**~~ | shelf landing in `internal/web/**` + `static/**`, plus completing the prewarm fixture | T11 prewarm | **DONE** | Closed at round-2 APPROVE 0/0/0/0, zero residue (`t9b-round2.md`). Part 1: SSR + Preact shelf with no duplicate cards. Part 2: prewarm fixture completed with video/mp4 and application/pdf |
 | **T1c** | `.github/workflows/deploy.yml`, a redeploy wrapper in `deploy/`, box-side provisioning | T1b, `image.yml` | **M** | Needs an access decision and operator-set secrets; the risk is a root key in a public repo's CI, not the YAML |
 | ~~**T12**~~ | `internal/audio/music.go` | T8, T10a | **DONE** `f933638` | Closed at round-2 APPROVE 0/0/0/0. Narration length measured from MP3 frames in Go, never probed; fade anchored to the deterministic total. The `-shortest` overshoot that made that total wrong by 1.168 s was fixed in `bcc7ceb` |
 | ~~**T13**~~ | `internal/audio/clone.go`, **plus both capture modes in `static/**` and one upload route** | — | **DONE** | Closed at round-5 **APPROVE 0/0/0/0, zero residue**; clone-result/HD handoff is deferred operator verification |
-| **T14** | `README.md`, submission assets | T11 (done), T9b | **M** | Fixed 4-hour box; the demo video is an edit, not a build. **Only T9b and T14 remain open** |
+| **T14** | `README.md`, submission assets | T11 (done), T9b (done) | **M** | Fixed 4-hour box; the demo video is an edit, not a build. **Only T14 remains open** |
 
 #### Order: T8 before T9, and the rework question disappears
 
@@ -1985,7 +1985,7 @@ glance, in the warm palette, is the deliverable — the motion is done.
 
 ---
 
-## T9b — The shelf actually has books on it
+## T9b — The shelf actually has books on it  *(DONE — closed at round-2 APPROVE 0/0/0/0)*
 
 **Owns:** the shelf landing in `internal/web/**` (`web.Shelf`, `shelf.html`) and
 its client-rendered twin in `static/app.js`, plus the completion of the prewarm
@@ -3027,3 +3027,36 @@ Decision 7 is deliberately deferred to evidence rather than argued now: the
 spread across the whole image catalog is about 23 cents a book, so the only
 input that matters is whether the cast holds, which is not knowable until a
 reference sheet exists.
+
+---
+
+## Live bug reports
+
+### Live bug report 1 — 2026-09-06
+
+Reported from real-device run on live deployment. Two defects observed:
+
+1. **Interview ending prompt loop (closing message treated as open question)**
+   - **Symptom:** M3 outputs its closing statement (e.g. *"Thanks for the great story, Leopold is going to be such a special character. I'll go make your book now!"*), but the UI presents an active answer text box (`Or write your own idea` + `Send`) instead of transitioning or providing a single button to proceed to the voice consent screen. The user experienced this prompt twice before the voice screen appeared.
+   - **Investigation:**
+     - In `internal/interview/turn.go`, `replyTurn` tests `ending := rep.End || s.filled.full()`.
+     - When M3's final message omits the exact `; end` token in the control line (or before all 6 checklist slots are marked filled), the server routes to `questionTurn`, persisting the message as a question turn and publishing an SSE `question` event.
+     - The client (`static/app.js`) therefore stays in question-answering mode, forcing the child to type a response to what was clearly a farewell.
+     - Furthermore, even if `s.filled.full()` is satisfied, `questionTurn` publishes `question` before `closeTurn` publishes `ended`, creating a race/flicker where the text input is briefly rendered.
+   - **Fix direction:**
+     - In `internal/interview/turn.go` / `prompt.go`: Detect closing phrasing or enforce that when `s.filled.full()` or closing intent is detected, transition immediately to `closeTurn` without presenting an input box.
+     - In `static/app.js`: When an interview ending message is received or the session indicates completion, suppress the text input and render a single clear action button (e.g. *"Make my book"* / *"Go to voice step"*).
+
+2. **Microphone recording silently fails without browser permission prompt**
+   - **Symptom:** In the grown-up corner, clicking "Record a sample" immediately displays: *"We couldn’t prepare that sample. Try recording again or choose a webm, mp4, mp3, or wav file."* The browser never shows a microphone permission prompt.
+   - **Investigation:**
+     - `static/app.js:219`: `if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") throw new Error("recorder unavailable");`
+     - Modern browsers (Chrome, Safari, Firefox) restrict `navigator.mediaDevices` strictly to **Secure Contexts** (`https://` or `http://localhost`).
+     - When tested over plain HTTP on a remote origin or LAN IP (e.g. `http://<IP>:8080`), `navigator.mediaDevices` is `undefined`.
+     - `startRecording()` immediately throws `"recorder unavailable"`, never reaching `getUserMedia()`, so no browser permission dialog can appear.
+     - Line 243/254 catches this error and maps any message other than `"consent required"` to the generic notice: *"We couldn’t prepare that sample. Try recording again or choose a webm, mp4, mp3, or wav file."*
+     - The same generic message also masks previously-denied mic permissions (`NotAllowedError`), missing voice-sample access code (`uploadToken`), and failed upload responses.
+   - **Fix direction:**
+     - Detect insecure context via `window.isSecureContext` and `navigator.mediaDevices?.getUserMedia`. Display an explicit, actionable message: *"Microphone recording requires a secure HTTPS connection or localhost. Please use the file upload below or open via HTTPS."*
+     - Disambiguate error messages in `static/app.js` for permission denied, insecure context, and missing access code.
+

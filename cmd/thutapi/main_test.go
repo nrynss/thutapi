@@ -28,6 +28,7 @@ import (
 	"thutapi/internal/interview"
 	"thutapi/internal/job"
 	"thutapi/internal/mediastore"
+	"thutapi/internal/prewarm"
 	"thutapi/internal/store"
 	"thutapi/internal/stream"
 )
@@ -793,5 +794,293 @@ func TestRunRejectsMissingVoiceSampleConfiguration(t *testing.T) {
 	err := run(slog.New(slog.NewTextHandler(io.Discard, nil)), []string{"-data-dir=" + t.TempDir()}, make(chan os.Signal))
 	if err == nil || !strings.Contains(err.Error(), "no public voice sample origin") {
 		t.Fatalf("run without PUBLIC_ORIGIN = %v, want startup configuration error", err)
+	}
+}
+
+func TestShelfRouteServesLandingAndBooks(t *testing.T) {
+	defaultGuard, err := gate.New(gate.Config{})
+	if err != nil {
+		t.Fatalf("build gate: %v", err)
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	db, err := store.Open(t.Context(), store.Config{
+		Path: filepath.Join(t.TempDir(), "thutapi.db"),
+	})
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	mediaDir := filepath.Join(t.TempDir(), "media")
+	media, err := mediastore.Open(t.Context(), mediastore.Config{
+		Dir: mediaDir,
+		DB:  db,
+	})
+	if err != nil {
+		t.Fatalf("open media store: %v", err)
+	}
+	voiceSamples, err := audio.NewVoiceSampleHandler(audio.VoiceSampleConfig{Store: media, PublicOrigin: "https://thutapi.nryn.dev", TempDir: t.TempDir(), UploadToken: "test-upload-token", Cloner: failVoiceCloner{}})
+	if err != nil {
+		t.Fatalf("build voice sample handler: %v", err)
+	}
+	broker := stream.New(stream.Config{})
+	interviews, err := interview.New(interview.Config{
+		Chat:   echoChatter{},
+		Store:  db,
+		Broker: broker,
+		Jobs:   job.New(broker),
+	})
+	if err != nil {
+		t.Fatalf("build interview handler: %v", err)
+	}
+	generate, err := bookgen.New(bookgen.Config{
+		DB:       db,
+		Blobs:    media,
+		MediaDir: mediaDir,
+		Chat:     echoChatter{},
+		Judge:    echoChatter{},
+		Imager:   failImager{},
+		TTS:      failTTS{},
+		Broker:   broker,
+		Jobs:     job.New(broker),
+		PDF:      bookpdf.NewRenderer(),
+		Video:    failRenderer{},
+		Film:     failFilmStore{},
+		Log:      log,
+	})
+	if err != nil {
+		t.Fatalf("build generation handler: %v", err)
+	}
+	srv, err := newServer(log, media, voiceSamples, interviews, generate, db, defaultGuard)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	// 1. Initially empty
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "Make your own book") {
+		t.Fatalf("body lacks CTA: %s", body)
+	}
+	if !strings.Contains(body, `<script type="application/json" id="shelf-books">[]</script>`) {
+		t.Fatalf("body lacks empty json: %s", body)
+	}
+
+	// 2. Add books
+	b1, err := db.CreateBook(t.Context(), "The Magic Fox")
+	if err != nil {
+		t.Fatalf("create book 1: %v", err)
+	}
+	if err := db.UpdateBook(t.Context(), store.Book{ID: b1.ID, Title: b1.Title, Byline: "Pip"}); err != nil {
+		t.Fatalf("update book 1: %v", err)
+	}
+	b2, err := db.CreateBook(t.Context(), "The Cloud Dance")
+	if err != nil {
+		t.Fatalf("create book 2: %v", err)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body = rec.Body.String()
+	if !strings.Contains(body, "The Magic Fox") || !strings.Contains(body, "By Pip") {
+		t.Fatalf("body lacks book 1 details: %s", body)
+	}
+	if !strings.Contains(body, "The Cloud Dance") {
+		t.Fatalf("body lacks book 2 title: %s", body)
+	}
+	if !strings.Contains(body, "/book/"+b1.ID) || !strings.Contains(body, "/book/"+b2.ID) {
+		t.Fatalf("body lacks book links: %s", body)
+	}
+
+	// 3. Verify ungated: even if gate has passcode, shelf is public
+	gatedPassGuard, err := gate.New(gate.Config{Passcode: "secret"})
+	if err != nil {
+		t.Fatalf("build gated passcode guard: %v", err)
+	}
+	srvGated, err := newServer(log, media, voiceSamples, interviews, generate, db, gatedPassGuard)
+	if err != nil {
+		t.Fatalf("new gated server: %v", err)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	rec = httptest.NewRecorder()
+	srvGated.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("shelf status with passcode gate = %d, want 200 (ungated)", rec.Code)
+	}
+}
+
+func TestColdBootRestoresFixtureAndServesShelfBookAndDownloads(t *testing.T) {
+	dataDir := t.TempDir()
+	prewarmDir, err := filepath.Abs(filepath.Join("..", "..", "data", "prewarm"))
+	if err != nil {
+		t.Fatalf("resolve prewarm dir: %v", err)
+	}
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	db, err := store.Open(t.Context(), store.Config{Path: filepath.Join(dataDir, "thutapi.db")})
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	mediaDir := filepath.Join(dataDir, "media")
+	blobs, err := mediastore.Open(t.Context(), mediastore.Config{Dir: mediaDir, DB: db})
+	if err != nil {
+		t.Fatalf("open media store: %v", err)
+	}
+
+	// Cold boot restore of prewarm fixtures
+	restored, err := prewarm.Import(t.Context(), db, blobs, prewarmDir)
+	if err != nil {
+		t.Fatalf("prewarm.Import: %v", err)
+	}
+	if len(restored) != 1 || restored[0] != "d625fd608be48227f08c33cf860e5de8" {
+		t.Fatalf("restored = %v, want [d625fd608be48227f08c33cf860e5de8]", restored)
+	}
+
+	voiceSamples, err := audio.NewVoiceSampleHandler(audio.VoiceSampleConfig{
+		Store:        blobs,
+		PublicOrigin: "https://thutapi.nryn.dev",
+		TempDir:      t.TempDir(),
+		UploadToken:  "test-upload-token",
+		Cloner:       failVoiceCloner{},
+	})
+	if err != nil {
+		t.Fatalf("build voice sample handler: %v", err)
+	}
+	broker := stream.New(stream.Config{})
+	interviews, err := interview.New(interview.Config{
+		Chat:   echoChatter{},
+		Store:  db,
+		Broker: broker,
+		Jobs:   job.New(broker),
+	})
+	if err != nil {
+		t.Fatalf("build interview handler: %v", err)
+	}
+	generate, err := bookgen.New(bookgen.Config{
+		DB:       db,
+		Blobs:    blobs,
+		MediaDir: mediaDir,
+		Chat:     echoChatter{},
+		Judge:    echoChatter{},
+		Imager:   failImager{},
+		TTS:      failTTS{},
+		Broker:   broker,
+		Jobs:     job.New(broker),
+		PDF:      bookpdf.NewRenderer(),
+		Video:    failRenderer{},
+		Film:     failFilmStore{},
+		Log:      log,
+	})
+	if err != nil {
+		t.Fatalf("build generation handler: %v", err)
+	}
+	guard, err := gate.New(gate.Config{})
+	if err != nil {
+		t.Fatalf("build gate: %v", err)
+	}
+	srv, err := newServer(log, blobs, voiceSamples, interviews, generate, db, guard)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	// 1. GET / lists the prewarmed book
+	shelfReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	shelfRec := httptest.NewRecorder()
+	srv.ServeHTTP(shelfRec, shelfReq)
+	if shelfRec.Code != http.StatusOK {
+		t.Fatalf("GET / status = %d, want 200", shelfRec.Code)
+	}
+	shelfBody := shelfRec.Body.String()
+	if !strings.Contains(shelfBody, "Bo and Pip&#39;s Moon Mango Dance") &&
+		!strings.Contains(shelfBody, "Bo and Pip's Moon Mango Dance") {
+		t.Fatalf("GET / lacks restored book title: %s", shelfBody)
+	}
+	if !strings.Contains(shelfBody, "/book/d625fd608be48227f08c33cf860e5de8") {
+		t.Fatalf("GET / lacks link to restored book: %s", shelfBody)
+	}
+	if !strings.Contains(shelfBody, "d625fd608be48227f08c33cf860e5de8") {
+		t.Fatalf("GET / lacks book id in JSON: %s", shelfBody)
+	}
+
+	// 2. GET /book/{id} serves the book page
+	bookReq := httptest.NewRequest(http.MethodGet, "/book/d625fd608be48227f08c33cf860e5de8", nil)
+	bookRec := httptest.NewRecorder()
+	srv.ServeHTTP(bookRec, bookReq)
+	if bookRec.Code != http.StatusOK {
+		t.Fatalf("GET /book/{id} status = %d, want 200", bookRec.Code)
+	}
+
+	// 3. GET /book/{id}/state returns ready state with PDF and Video URLs
+	stateReq := httptest.NewRequest(http.MethodGet, "/book/d625fd608be48227f08c33cf860e5de8/state", nil)
+	stateRec := httptest.NewRecorder()
+	srv.ServeHTTP(stateRec, stateReq)
+	if stateRec.Code != http.StatusOK {
+		t.Fatalf("GET /book/{id}/state status = %d, want 200", stateRec.Code)
+	}
+	var state struct {
+		Status   string `json:"status"`
+		PDFURL   string `json:"pdf_url"`
+		VideoURL string `json:"video_url"`
+	}
+	if err := json.Unmarshal(stateRec.Body.Bytes(), &state); err != nil {
+		t.Fatalf("unmarshal state: %v", err)
+	}
+	if state.Status != "ready" {
+		t.Fatalf("state.Status = %q, want ready", state.Status)
+	}
+	if state.PDFURL == "" || state.VideoURL == "" {
+		t.Fatalf("state lacks URLs: pdf=%q, video=%q", state.PDFURL, state.VideoURL)
+	}
+
+	// 4. Download PDF
+	pdfReq := httptest.NewRequest(http.MethodGet, "/book/d625fd608be48227f08c33cf860e5de8/download/pdf", nil)
+	pdfRec := httptest.NewRecorder()
+	srv.ServeHTTP(pdfRec, pdfReq)
+	if pdfRec.Code != http.StatusOK {
+		t.Fatalf("download pdf status = %d, want 200", pdfRec.Code)
+	}
+	if ct := pdfRec.Header().Get("Content-Type"); ct != "application/pdf" {
+		t.Fatalf("download pdf content type = %q, want application/pdf", ct)
+	}
+	if cd := pdfRec.Header().Get("Content-Disposition"); !strings.Contains(cd, "bo-and-pips-moon-mango-dance.pdf") {
+		t.Fatalf("download pdf content disposition = %q, want filename with slug", cd)
+	}
+
+	// 5. Download Video
+	videoReq := httptest.NewRequest(http.MethodGet, "/book/d625fd608be48227f08c33cf860e5de8/download/video", nil)
+	videoRec := httptest.NewRecorder()
+	srv.ServeHTTP(videoRec, videoReq)
+	if videoRec.Code != http.StatusOK {
+		t.Fatalf("download video status = %d, want 200", videoRec.Code)
+	}
+	if ct := videoRec.Header().Get("Content-Type"); ct != "video/mp4" {
+		t.Fatalf("download video content type = %q, want video/mp4", ct)
+	}
+	if cd := videoRec.Header().Get("Content-Disposition"); !strings.Contains(cd, "bo-and-pips-moon-mango-dance.mp4") {
+		t.Fatalf("download video content disposition = %q, want filename with slug", cd)
+	}
+
+	// 6. Play film: GET /media/{id} directly
+	mediaReq := httptest.NewRequest(http.MethodGet, state.VideoURL, nil)
+	mediaRec := httptest.NewRecorder()
+	srv.ServeHTTP(mediaRec, mediaReq)
+	if mediaRec.Code != http.StatusOK {
+		t.Fatalf("play video %s status = %d, want 200", state.VideoURL, mediaRec.Code)
+	}
+	if ct := mediaRec.Header().Get("Content-Type"); ct != "video/mp4" {
+		t.Fatalf("video content type = %q, want video/mp4", ct)
+	}
+	if mediaRec.Body.Len() != 3477486 {
+		t.Fatalf("video bytes = %d, want 3477486", mediaRec.Body.Len())
 	}
 }
