@@ -260,6 +260,12 @@ type Config struct {
 
 	// Model is the narration model. Empty means DefaultNarrationModel.
 	Model string
+
+	// Throttle paces the retry a speech call gets when the provider
+	// says it is over its per-minute cap. The zero value is the
+	// package default; see throttle.go for why narration retries at
+	// all.
+	Throttle ThrottleConfig
 }
 
 // Clip is one page's persisted narration: which page it speaks (N),
@@ -294,11 +300,12 @@ func (c Clip) Spoken() bool { return c.Media.ID != "" }
 // no code below re-reads Config and no default can be applied twice
 // or in two ways.
 type speaker struct {
-	tts   TTS
-	http  *http.Client
-	limit int
-	voice string
-	model string
+	tts      TTS
+	http     *http.Client
+	limit    int
+	voice    string
+	model    string
+	throttle ThrottleConfig
 }
 
 // resolve substitutes Config's defaults and rejects a Config that
@@ -324,7 +331,7 @@ func (cfg Config) resolve() (*speaker, error) {
 	if model == "" {
 		model = DefaultNarrationModel
 	}
-	return &speaker{tts: cfg.TTS, http: hc, limit: limit, voice: voice, model: model}, nil
+	return &speaker{tts: cfg.TTS, http: hc, limit: limit, voice: voice, model: model, throttle: cfg.Throttle.withDefaults()}, nil
 }
 
 // NarrateBook speaks one clip per page of book bookID, in page order,
@@ -413,10 +420,20 @@ func NarrateBook(ctx context.Context, cfg Config, bookID string, pages []story.P
 // duration the film total needs — ErrClipDuration when the bytes are
 // not a readable MP3/WAV), and persist the clip at (book, narration,
 // page N).
+//
+// The synthesis call is the one step that is retried: eight pages fanning
+// out at once is exactly what trips GMI's per-minute cap, and a capped page
+// is a page the child cannot hear. See throttle.go for why the wait lives
+// here and not in the client.
 func (sp *speaker) narratePage(ctx context.Context, w *narrationWriter, p story.Page) (store.Media, time.Duration, error) {
-	raw, err := sp.tts.SynthesizeSpeech(ctx, p.Text, p.Emotion, sp.voice, sp.model)
+	var raw []byte
+	err := retryThrottled(ctx, sp.throttle, func() error {
+		var callErr error
+		raw, callErr = sp.tts.SynthesizeSpeech(ctx, p.Text, p.Emotion, sp.voice, sp.model)
+		return callErr
+	})
 	if err != nil {
-		return store.Media{}, 0, err
+		return store.Media{}, 0, throttleNote(err, sp.throttle)
 	}
 	audioURL, err := decodeAudioURL(raw)
 	if err != nil {

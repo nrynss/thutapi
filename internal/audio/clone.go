@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime"
 	"net/http"
 	"net/netip"
@@ -82,10 +83,9 @@ var (
 	ErrVoiceCloneUnverified = errors.New("audio: unverified voice clone response")
 )
 
-// VoiceCloneRequest is the confirmed input half of GMI's clone model. The
-// provider has not yet been observed returning a clone result, so callers keep
-// that response raw until an operator verifies the source_audio-to-voice_id
-// handoff against a deployed HTTPS sample URL.
+// VoiceCloneRequest is the input half of GMI's clone model. VoiceID is the
+// BASE voice the clone is seeded from, not the cloned identity — that comes
+// back in the response and is read by DecodeVoiceCloneResponse.
 type VoiceCloneRequest struct {
 	SourceAudio             string `json:"source_audio"`
 	Text                    string `json:"text"`
@@ -94,10 +94,9 @@ type VoiceCloneRequest struct {
 	NeedVolumnNormalization bool   `json:"need_volumn_normalization"`
 }
 
-// NewVoiceCloneRequest builds the confirmed request half of the clone
-// boundary. It validates the public source URL and requires the provider's
-// required text and voice_id fields, while leaving the unverified response and
-// clone-to-HD voice-id workflow to the live probe.
+// NewVoiceCloneRequest builds the request half of the clone boundary. It
+// validates the public source URL and requires the provider's required text
+// and base voice_id fields.
 func NewVoiceCloneRequest(sourceAudio, text, voiceID string) (VoiceCloneRequest, error) {
 	if !isPublicHTTPSURL(sourceAudio) {
 		return VoiceCloneRequest{}, fmt.Errorf("%w: source_audio must be an absolute HTTPS URL", ErrInvalidVoiceCloneSource)
@@ -114,14 +113,14 @@ func NewVoiceCloneRequest(sourceAudio, text, voiceID string) (VoiceCloneRequest,
 	}, nil
 }
 
-// VoiceCloneResult is reserved for the verified provider contract. No clone
-// response contract has been observed yet, so the live handler never emits a
-// result from this type.
+// VoiceCloneResult carries the cloned voice identity read out of a terminal
+// clone record. An empty VoiceID never reaches a caller: every path that
+// builds one has already rejected the response it could not read.
 type VoiceCloneResult struct {
 	VoiceID string
 }
 
-// VoiceCloner submits the confirmed clone request and returns a verified voice
+// VoiceCloner submits the clone request and returns the cloned voice
 // identifier. The consumer owns this narrow interface.
 type VoiceCloner interface {
 	CloneVoice(ctx context.Context, request VoiceCloneRequest) (VoiceCloneResult, error)
@@ -165,6 +164,12 @@ type VoiceSampleConfig struct {
 	MaxInput     int64
 	MaxOutput    int64
 	Runner       FFmpegRunner
+
+	// Log records a clone the provider would not verify. That path answers
+	// the parent with a complete, successful response naming the library
+	// narrator, so this log line is the only place the reason survives.
+	// Nil means slog.Default().
+	Log *slog.Logger
 }
 
 // VoiceSampleHandler receives a short source recording, transcodes it to a
@@ -180,6 +185,7 @@ type VoiceSampleHandler struct {
 	uploadToken  string
 	cloner       VoiceCloner
 	cloneVoiceID string
+	log          *slog.Logger
 	lifetime     time.Duration
 	now          func() time.Time
 	expiryFile   string
@@ -241,7 +247,11 @@ func NewVoiceSampleHandler(cfg VoiceSampleConfig) (*VoiceSampleHandler, error) {
 	if cloneVoiceID == "" {
 		cloneVoiceID = cloneBaseVoiceID
 	}
-	h := &VoiceSampleHandler{store: cfg.Store, publicOrigin: publicOrigin, ffmpeg: ffmpeg, tempDir: cfg.TempDir, maxInput: maxInput, maxOutput: maxOutput, runner: runner, uploadToken: cfg.UploadToken, cloner: cfg.Cloner, cloneVoiceID: cloneVoiceID, lifetime: lifetime, now: now, expiryFile: expiryFile, expires: expires, stopSweep: make(chan struct{}), sweepDone: make(chan struct{})}
+	log := cfg.Log
+	if log == nil {
+		log = slog.Default()
+	}
+	h := &VoiceSampleHandler{store: cfg.Store, publicOrigin: publicOrigin, ffmpeg: ffmpeg, tempDir: cfg.TempDir, maxInput: maxInput, maxOutput: maxOutput, runner: runner, uploadToken: cfg.UploadToken, cloner: cfg.Cloner, cloneVoiceID: cloneVoiceID, log: log, lifetime: lifetime, now: now, expiryFile: expiryFile, expires: expires, stopSweep: make(chan struct{}), sweepDone: make(chan struct{})}
 	if err := h.sweepExpired(context.Background()); err != nil {
 		return nil, fmt.Errorf("audio: new voice sample handler: sweep expired samples: %w", err)
 	}
@@ -306,42 +316,99 @@ func (h *VoiceSampleHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// is still capped in writeInput, while this outer cap bounds that overhead.
 	r.Body = http.MaxBytesReader(w, r.Body, h.maxInput+64<<10)
 	input, _, err := h.receive(r)
-	if err == nil {
-		defer os.Remove(input)
-		id, transcodeErr := h.transcodeAndPersist(r.Context(), input)
-		if transcodeErr != nil {
-			err = transcodeErr
-		} else {
-			mediaURL := h.mediaURL(id)
-			request, requestErr := NewVoiceCloneRequest(mediaURL, cloneSampleText, h.cloneVoiceID)
-			if requestErr != nil {
-				err = requestErr
-			} else {
-				result, cloneErr := h.cloner.CloneVoice(r.Context(), request)
-				if cloneErr != nil {
-					err = fmt.Errorf("%w: %w", ErrVoiceCloneUnverified, cloneErr)
-				} else if strings.TrimSpace(result.VoiceID) == "" {
-					err = ErrVoiceCloneUnverified
-				} else {
-					w.Header().Set("Content-Type", "application/json")
-					w.Header().Set("Cache-Control", "no-store")
-					w.WriteHeader(http.StatusCreated)
-					_ = json.NewEncoder(w).Encode(VoiceSampleResponse{MediaURL: mediaURL, SourceAudio: mediaURL, VoiceID: result.VoiceID}) // encoding a tiny fixed response cannot fail meaningfully
-					return
-				}
-			}
-		}
+	if err != nil {
+		h.writeError(w, err)
+		return
 	}
-	h.writeError(w, err)
+	defer os.Remove(input)
+
+	// The recording is transcoded and persisted BEFORE the provider is asked
+	// for anything. The sample has to exist at its public URL for GMI to
+	// fetch it at all, and putting it there first also means everything
+	// downstream can fail without costing the parent the recording they just
+	// made — the whole point of the two-step order.
+	id, err := h.transcodeAndPersist(r.Context(), input)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	mediaURL := h.mediaURL(id)
+
+	voiceID, cloneErr := h.clone(r.Context(), mediaURL)
+	if cloneErr != nil {
+		// A clone the provider would not give back is NOT a failed upload.
+		// The book is narrated by the library voice instead — the documented
+		// default, and a complete book either way — so the parent is told
+		// which voice they are getting rather than shown an error for a
+		// recording that was fine. The sample has no remaining purpose, so
+		// it goes now instead of sitting at a public URL for the rest of its
+		// fifteen minutes; a failed delete is left to the expiry sweep.
+		h.log.Warn("audio: voice clone unavailable; the book will use the library narrator", "err", cloneErr)
+		if deleteErr := h.deleteExpired(r.Context(), id); deleteErr != nil {
+			h.log.Warn("audio: could not delete the unused voice sample; the expiry sweep will", "sample", id, "err", deleteErr)
+		}
+		writeVoiceSampleJSON(w, http.StatusOK, VoiceSampleResponse{Narrator: NarratorLibrary})
+		return
+	}
+	writeVoiceSampleJSON(w, http.StatusCreated, VoiceSampleResponse{MediaURL: mediaURL, SourceAudio: mediaURL, VoiceID: voiceID, Narrator: NarratorClone})
 }
 
-// VoiceSampleResponse is the typed handoff from capture to the confirmed
-// clone request boundary. Both fields are absolute public HTTPS URLs; the
-// provider response and voice-id handoff remain an explicit live-probe task.
+// clone asks the provider to make a voice identity out of the persisted
+// sample at mediaURL. Every failure class is one error to the caller: the
+// upload route treats them all the same way, by narrating with the library
+// voice, so distinguishing them here would only invite a caller to act on a
+// difference that has no consequence.
+func (h *VoiceSampleHandler) clone(ctx context.Context, mediaURL string) (string, error) {
+	request, err := NewVoiceCloneRequest(mediaURL, cloneSampleText, h.cloneVoiceID)
+	if err != nil {
+		return "", err
+	}
+	result, err := h.cloner.CloneVoice(ctx, request)
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", ErrVoiceCloneUnverified, err)
+	}
+	voiceID := strings.TrimSpace(result.VoiceID)
+	if !ValidVoiceID(voiceID) || voiceID == h.cloneVoiceID {
+		// The base voice echoed back is the seed this request sent, not a
+		// clone of the parent. Accepting it would narrate the book in the
+		// library voice while telling the parent it was theirs.
+		return "", fmt.Errorf("%w: the provider returned no cloned voice identity", ErrVoiceCloneUnverified)
+	}
+	return voiceID, nil
+}
+
+// writeVoiceSampleJSON writes one voice-sample outcome. The body is never
+// shared-cacheable: it names a short-lived sample URL on the clone path.
+func writeVoiceSampleJSON(w http.ResponseWriter, status int, body VoiceSampleResponse) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body) // encoding a tiny fixed response cannot fail meaningfully
+}
+
+// Narrator names which voice a book will be read in. It is the field the
+// browser reads to tell a parent what they are getting, and it is present on
+// every successful voice-sample response.
+const (
+	// NarratorClone means the provider verified a cloned voice identity and
+	// VoiceID names it.
+	NarratorClone = "clone"
+	// NarratorLibrary means the sample was received and readable but no
+	// cloned identity came back, so the book is narrated by DefaultVoice.
+	// MediaURL, SourceAudio and VoiceID are all empty: the sample has been
+	// deleted, because nothing will fetch it.
+	NarratorLibrary = "library"
+)
+
+// VoiceSampleResponse is the typed handoff from capture to narration.
+// Narrator is always set and says which voice the book will be read in;
+// the three URL and identity fields are present only on the clone path,
+// where MediaURL and SourceAudio are absolute public HTTPS URLs.
 type VoiceSampleResponse struct {
-	MediaURL    string `json:"media_url"`
-	SourceAudio string `json:"source_audio"`
-	VoiceID     string `json:"voice_id"`
+	MediaURL    string `json:"media_url,omitempty"`
+	SourceAudio string `json:"source_audio,omitempty"`
+	VoiceID     string `json:"voice_id,omitempty"`
+	Narrator    string `json:"narrator"`
 }
 
 func hasVoiceSampleConsent(r *http.Request) bool {
@@ -515,14 +582,67 @@ func writeVoiceSampleExpiries(path string, expires map[string]time.Time) error {
 	return os.Rename(tmpName, path)
 }
 
-// DecodeVoiceCloneResponse fails closed until T13b records the provider's
-// actual clone response and the clone-to-HD narration handoff. Synthetic JSON
-// fields are not evidence of a usable voice identity.
+// voiceCloneOutcome is the outcome subtree of a terminal request-queue clone
+// record, read exactly as narrowly as outcomeAudio reads a TTS one: the clone
+// is a request-queue call like every other in this package, so it answers the
+// same envelope, and only the cloned identity is taken out of it.
+type voiceCloneOutcome struct {
+	VoiceID string `json:"voice_id"`
+}
+
+// DecodeVoiceCloneResponse reads the cloned voice identity out of a terminal
+// request-queue clone record: outcome.voice_id.
+//
+// Only the outcome subtree is read. The payload beside it is this package's
+// own request echoed back — the same echo the live TTS probe recorded
+// (t2b-t5b-live-record.md) — and its voice_id is the BASE voice the clone was
+// seeded from, never the cloned one. A walker that took "the first voice_id
+// in the body" would therefore hand back the library narrator every time and
+// call it the parent's voice.
+//
+// A body this package does not recognise is ErrVoiceCloneUnverified. That is
+// no longer fatal to an upload: ServeHTTP degrades it to the library narrator
+// and says so, so this stays strict about what counts as a cloned identity
+// without that strictness costing anyone their recording.
 func DecodeVoiceCloneResponse(raw []byte) (VoiceCloneResult, error) {
-	if !json.Valid(raw) {
-		return VoiceCloneResult{}, fmt.Errorf("%w: provider response is not valid JSON", ErrVoiceCloneUnverified)
+	if len(raw) == 0 {
+		return VoiceCloneResult{}, fmt.Errorf("%w: the response body was empty", ErrVoiceCloneUnverified)
 	}
-	return VoiceCloneResult{}, fmt.Errorf("%w: provider clone response contract is unverified", ErrVoiceCloneUnverified)
+	var env queueRecord
+	if err := json.Unmarshal(raw, &env); err != nil || !hasOutcome(env.Outcome) {
+		return VoiceCloneResult{}, fmt.Errorf("%w: the response is not a request-queue clone envelope: %s", ErrVoiceCloneUnverified, excerpt(raw))
+	}
+	var out voiceCloneOutcome
+	if err := json.Unmarshal(env.Outcome, &out); err != nil {
+		return VoiceCloneResult{}, fmt.Errorf("%w: the outcome subtree is not a clone record: %s", ErrVoiceCloneUnverified, excerpt(env.Outcome))
+	}
+	voiceID := strings.TrimSpace(out.VoiceID)
+	if !ValidVoiceID(voiceID) {
+		return VoiceCloneResult{}, fmt.Errorf("%w: outcome.voice_id is not a usable voice identity: %s", ErrVoiceCloneUnverified, excerpt([]byte(out.VoiceID)))
+	}
+	return VoiceCloneResult{VoiceID: voiceID}, nil
+}
+
+// MaxVoiceIDBytes bounds a voice identity. GMI's own library names are well
+// under this ("English_expressive_narrator" is 27 bytes) and so is every
+// generated id shape; the cap is what stops an untrusted voice_id — one the
+// browser hands back to POST /interviews/{id}/generate — becoming an
+// arbitrary-length string forwarded to the provider.
+const MaxVoiceIDBytes = 128
+
+// voiceIDPattern is the closed character set a voice identity may use:
+// letters, digits, underscore and hyphen. It is deliberately narrower than
+// anything a provider is likely to mint, because this value is echoed into a
+// provider request body from an untrusted client and nothing is gained by
+// accepting punctuation no known voice id contains.
+var voiceIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+// ValidVoiceID reports whether id is shaped like a voice identity this app
+// will send to the provider. It is the one check for both directions: a
+// voice_id decoded out of a clone response, and a voice_id a browser asks a
+// book to be narrated in.
+func ValidVoiceID(id string) bool {
+	return len(id) > 0 && len(id) <= MaxVoiceIDBytes && voiceIDPattern.MatchString(id)
 }
 
 func (h *VoiceSampleHandler) receive(r *http.Request) (string, string, error) {

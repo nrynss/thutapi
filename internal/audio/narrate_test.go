@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"thutapi/internal/gmi"
 	"thutapi/internal/store"
 	"thutapi/internal/story"
 )
@@ -431,5 +432,98 @@ func TestNarrate_PersistFailureFailsThePage(t *testing.T) {
 	// the captioned-silent tier instead of discarding the book.
 	if len(clips) != 1 || clips[0].Spoken() {
 		t.Fatalf("clips = %v, want one unspoken clip", clips)
+	}
+}
+
+// throttlingTTS rate-limits the first failFirst attempts of every page's
+// text before answering it, which is exactly the shape of a per-minute cap
+// against an eight-page fan-out: the first wave is served, the rest are
+// refused until the minute rolls over.
+type throttlingTTS struct {
+	base      string
+	failFirst int
+
+	mu       sync.Mutex
+	attempts map[string]int
+}
+
+func (s *throttlingTTS) SynthesizeSpeech(ctx context.Context, text, emotion, voice, model string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	if s.attempts == nil {
+		s.attempts = map[string]int{}
+	}
+	s.attempts[text]++
+	n := s.attempts[text]
+	s.mu.Unlock()
+	if n <= s.failFirst {
+		return nil, fmt.Errorf("%w: rate limit exceeded(RPM). Please try again", gmi.ErrRateLimited)
+	}
+	return successEnvelope(s.base + "/clip/" + url.PathEscape(text)), nil
+}
+
+func (s *throttlingTTS) attemptsFor(text string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.attempts[text]
+}
+
+// TestNarrateBook_WaitsOutAPerMinuteCap is the regression for the silent
+// book of 2026-09-06: every page was rate-limited, nothing waited, and the
+// child was handed a film with no voices on it. A cap that clears must
+// leave every page spoken.
+func TestNarrateBook_WaitsOutAPerMinuteCap(t *testing.T) {
+	h := newNarrationHarness(t, 3)
+	pages := threePages()
+	cfg := h.cfg(&fakeTTS{})
+	tts := &throttlingTTS{base: h.clips.URL, failFirst: 2}
+	cfg.TTS = tts
+	cfg.Throttle = ThrottleConfig{Backoff: time.Microsecond}
+
+	clips, err := NarrateBook(t.Context(), cfg, h.bookID, pages)
+	if err != nil {
+		t.Fatalf("NarrateBook = %v, want every page to survive a cap that cleared", err)
+	}
+	for i, c := range clips {
+		if !c.Spoken() {
+			t.Errorf("page %d is silent, want it spoken after the cap cleared", pages[i].N)
+		}
+		if got := tts.attemptsFor(pages[i].Text); got != 3 {
+			t.Errorf("page %d attempts = %d, want 3 (two refusals then the answer)", pages[i].N, got)
+		}
+		if _, err := h.db.PageMedia(t.Context(), h.bookID, pages[i].N, store.MediaNarration); err != nil {
+			t.Errorf("page %d narration missing: %v", pages[i].N, err)
+		}
+	}
+}
+
+// TestNarrateBook_CapThatNeverClearsStillDegrades pins the other end: the
+// retry is bounded, the run does not hang on it, and the surviving error
+// still carries the provider's sentinel so bookgen can publish
+// narration_unavailable rather than failing the book.
+func TestNarrateBook_CapThatNeverClearsStillDegrades(t *testing.T) {
+	h := newNarrationHarness(t, 3)
+	pages := threePages()
+	cfg := h.cfg(&fakeTTS{})
+	tts := &throttlingTTS{base: h.clips.URL, failFirst: 1000}
+	cfg.TTS = tts
+	cfg.Throttle = ThrottleConfig{Backoff: time.Microsecond}
+
+	clips, err := NarrateBook(t.Context(), cfg, h.bookID, pages)
+	if !errors.Is(err, gmi.ErrRateLimited) {
+		t.Fatalf("err = %v, want the provider's rate-limit sentinel to survive", err)
+	}
+	if !strings.Contains(err.Error(), "still throttled after") {
+		t.Errorf("err = %v, want it to say the cap was waited out", err)
+	}
+	for i, c := range clips {
+		if c.Spoken() {
+			t.Errorf("page %d spoke despite a cap that never cleared", pages[i].N)
+		}
+		if got := tts.attemptsFor(pages[i].Text); got != DefaultThrottleAttempts {
+			t.Errorf("page %d attempts = %d, want the bounded %d", pages[i].N, got, DefaultThrottleAttempts)
+		}
 	}
 }

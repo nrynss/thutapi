@@ -122,6 +122,9 @@ func TestEventsRouteStreamsSSEOverHTTP(t *testing.T) {
 			}
 		case "failed":
 			failed++
+		case "stage":
+			// One per pipeline stage; the stage ordering is pinned by
+			// TestPipeline_StagesAnnounceEveryStepInOrder, not here.
 		default:
 			t.Fatalf("unexpected event %q on the book topic", f.event)
 		}

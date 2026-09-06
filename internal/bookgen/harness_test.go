@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"thutapi/internal/audio"
 	"thutapi/internal/bookpdf"
 	"thutapi/internal/bookvideo"
 	"thutapi/internal/gmi/media"
@@ -281,6 +282,14 @@ func (f *fakeImager) mark(kind, prompt string) {
 	if f.order != nil {
 		f.order.mark(kind)
 	}
+}
+
+// count is how many image calls this fake has taken: the number a repair
+// must not increase.
+func (f *fakeImager) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.calls)
 }
 
 func (f *fakeImager) GenerateImage(ctx context.Context, prompt, model string, opts media.ImageOptions) ([]byte, error) {
@@ -622,6 +631,11 @@ type pipelineHarness struct {
 	order    *orderRecorder
 	clips    *clipServer
 	logs     *syncBuffer
+
+	// stages collects the stage events waitEvent stepped over, in the
+	// order they arrived, so a test can assert the pipeline announced
+	// itself without every other test having to expect them.
+	stages []string
 }
 
 // syncBuffer is a slog sink safe to write from the job goroutine and
@@ -690,6 +704,10 @@ func newPipelineHarness(t *testing.T) *pipelineHarness {
 		Video:    render,
 		Film:     film,
 		Log:      log,
+		// The retry is real behaviour and the degrade tests must still
+		// pass THROUGH it, so it is shrunk rather than switched off:
+		// three attempts, microseconds apart.
+		Throttle: audio.ThrottleConfig{Backoff: time.Microsecond},
 	})
 	if err != nil {
 		t.Fatalf("new bookgen handler: %v", err)
@@ -749,24 +767,39 @@ func (ph *pipelineHarness) subscribe(bookID string) *stream.Subscription {
 
 // waitEvent reads the next event and requires it to be name, returning
 // its decoded payload (the interview suite's waitEvent shape).
+// waitEvent returns the next event named name, and fails on any other
+// product event before it. stage events are the one exception: they
+// interleave with the product events by design (one per pipeline stage,
+// published as the run enters it), and every assertion here but the stage
+// ordering test itself is about what the book did, not how far along it
+// was. They are collected into ph.stages instead, where a test that does
+// care can assert their order — asking for "stage" by name still returns
+// the next one, so nothing is hidden from a test that wants it.
 func (ph *pipelineHarness) waitEvent(s *stream.Subscription, name string) map[string]any {
 	ph.t.Helper()
-	select {
-	case ev, ok := <-s.Events:
-		if !ok {
-			ph.t.Fatalf("subscription closed while waiting for %q", name)
+	deadline := time.After(15 * time.Second)
+	for {
+		select {
+		case ev, ok := <-s.Events:
+			if !ok {
+				ph.t.Fatalf("subscription closed while waiting for %q", name)
+			}
+			if ev.Name == "stage" && name != "stage" {
+				ph.stages = append(ph.stages, ev.Data)
+				continue
+			}
+			if ev.Name != name {
+				ph.t.Fatalf("event = %q (%s), want %q", ev.Name, ev.Data, name)
+			}
+			var payload map[string]any
+			if err := json.Unmarshal([]byte(ev.Data), &payload); err != nil {
+				ph.t.Fatalf("decode %s event %q: %v", name, ev.Data, err)
+			}
+			return payload
+		case <-deadline:
+			ph.t.Fatalf("timed out waiting for %q event", name)
+			return nil
 		}
-		if ev.Name != name {
-			ph.t.Fatalf("event = %q (%s), want %q", ev.Name, ev.Data, name)
-		}
-		var payload map[string]any
-		if err := json.Unmarshal([]byte(ev.Data), &payload); err != nil {
-			ph.t.Fatalf("decode %s event %q: %v", name, ev.Data, err)
-		}
-		return payload
-	case <-time.After(15 * time.Second):
-		ph.t.Fatalf("timed out waiting for %q event", name)
-		return nil
 	}
 }
 

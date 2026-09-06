@@ -1,3 +1,15 @@
+// bookPayload reads one book-stream frame's JSON, treating anything it
+// cannot parse as absent. These handlers run inside the app's effects, and
+// an exception thrown out of one abandons the rest of that effect — a
+// malformed frame must cost this app a progress reading, never the screen.
+function bookPayload(event) {
+  try {
+    return JSON.parse(event?.data ?? "null");
+  } catch (_) {
+    return null;
+  }
+}
+
 // subscribeBook establishes the C4 book-event subscription. Callers must wait
 // for opened before reading the authoritative state: EventSource construction
 // only starts a connection, while open follows the server's subscription.
@@ -21,7 +33,15 @@ export function subscribeBook(eventsURL, handlers) {
     openedOnce = true;
   });
   source.addEventListener("page_approved", event => {
-    if (!terminal) handlers.pageApproved(JSON.parse(event.data));
+    const page = bookPayload(event);
+    if (!terminal && page) handlers.pageApproved(page);
+  });
+  // stage is optional to a handler set: it is the only event a caller can
+  // ignore and still be correct, because it changes the progress reading and
+  // nothing else.
+  source.addEventListener("stage", event => {
+    const stage = bookPayload(event);
+    if (!terminal && stage) handlers.stage?.(stage);
   });
   source.addEventListener("narration_unavailable", () => {
     if (!terminal) handlers.narrationUnavailable();
@@ -29,7 +49,7 @@ export function subscribeBook(eventsURL, handlers) {
   source.addEventListener("book_ready", event => {
     if (terminal) return;
     terminal = true;
-    handlers.bookReady(JSON.parse(event.data));
+    handlers.bookReady(bookPayload(event) || {});
     source.close();
   });
   source.addEventListener("failed", () => {

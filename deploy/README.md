@@ -221,6 +221,47 @@ publicly-fetchable URLs that GMI's `source_audio` needs (T8/T13) live under
 `/media/...` and are served by the Go binary through `http.ServeContent`
 so Range requests work (`<audio>` scrubbing depends on it).
 
+## Completing a book that came out silent
+
+A generation run keeps a book whose sound failed: narration degrades to
+captioned-silent rather than binning eight paid-for illustrations, and the
+music bed degrades to a plain film. That is the right call during a run —
+but it leaves a child holding a silent film of their own story, which is
+what happened on 2026-09-06 when GMI's per-minute cap refused four of eight
+speech calls and the whole music bed at once.
+
+`-complete` finishes such a book from the pages already in the store. It
+re-runs **only** narration, the PDF and the film. It never calls M3 or the
+image model, so it cannot hand the child a different book than the one they
+already have, and it costs nothing but the speech and music calls.
+
+Complete one book:
+
+```bash
+docker exec thutapi thutapi -data-dir /data -complete <book-id>
+```
+
+Complete every book that has no film at all:
+
+```bash
+docker exec thutapi thutapi -data-dir /data -complete all
+```
+
+Add `-complete-no-music` for a speech-only film. A book that already has a
+film is never in the `all` set — nothing in the store records whether a
+film has a voice on it, so a book that finished captioned-silent has to be
+named explicitly by its id.
+
+The command publishes the same `stage`, `book_ready` and `failed` events on
+the book's topic that a run does, so a browser sitting on `/book/<id>`
+picks the finished book up on its next poll. It exits when it is done; one
+book's failure does not stop the rest, and every failure is named on the
+way out.
+
+Note that this runs a second process against the same `/data`. SQLite is
+opened in WAL mode with a 5-second busy timeout, so it coexists with the
+serving container; run one `-complete` at a time.
+
 ## DNS
 
 A single record, **proxied** through Cloudflare (matching `auteur`,

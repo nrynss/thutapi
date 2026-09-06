@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -28,6 +29,11 @@ type sampleStoreFake struct {
 	deleteCh    chan string
 	expiryPath  string
 	sawExpiry   bool
+	// persisted keeps what reached the store even after a Delete, so a
+	// test can assert the transcode landed BEFORE the clone was tried
+	// on a path whose whole point is that the sample is then removed.
+	persisted []byte
+	deleted   bool
 }
 
 func (s *sampleStoreFake) Delete(_ context.Context, id string) error {
@@ -35,6 +41,7 @@ func (s *sampleStoreFake) Delete(_ context.Context, id string) error {
 		return errors.New("unknown sample")
 	}
 	s.bytes = nil
+	s.deleted = true
 	if s.deleteCh != nil {
 		s.deleteCh <- id
 	}
@@ -76,6 +83,7 @@ func (s *sampleStoreFake) Persist(_ context.Context, src io.Reader, contentType 
 	}
 	s.contentType = contentType
 	s.bytes = b
+	s.persisted = b
 	if s.err != nil {
 		return "", s.err
 	}
@@ -90,6 +98,7 @@ func (s *sampleStoreFake) PersistWithID(_ context.Context, id string, src io.Rea
 	s.id = id
 	s.contentType = contentType
 	s.bytes = b
+	s.persisted = b
 	if s.expiryPath != "" {
 		_, err := os.Stat(s.expiryPath)
 		s.sawExpiry = err == nil
@@ -342,10 +351,88 @@ func TestVoiceSampleHandler_MethodAndConfigErrors(t *testing.T) {
 	}
 }
 
-func TestDecodeVoiceCloneResponse_FailsClosed(t *testing.T) {
-	for _, raw := range [][]byte{[]byte(`{"outcome":{"voice_id":"provider-voice"}}`), []byte(`{"status":"completed"}`), []byte(`not-json`)} {
-		if _, err := DecodeVoiceCloneResponse(raw); !errors.Is(err, ErrVoiceCloneUnverified) {
-			t.Errorf("DecodeVoiceCloneResponse(%q) = %v, want ErrVoiceCloneUnverified", raw, err)
+// TestDecodeVoiceCloneResponse_ReadsOnlyTheOutcome pins the one decision
+// this decoder exists to make: the cloned identity comes out of the outcome
+// subtree and nothing else. The payload beside it is this package's own
+// request echoed back, and its voice_id is the BASE voice the clone was
+// seeded from — a decoder that reached for it would narrate every book in
+// the library voice while telling the parent it was theirs.
+func TestDecodeVoiceCloneResponse_ReadsOnlyTheOutcome(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "outcome voice id",
+			raw:  `{"request_id":"req-1","status":"success","payload":{"voice_id":"English_expressive_narrator"},"outcome":{"voice_id":"cloned-voice-abc"}}`,
+			want: "cloned-voice-abc",
+		},
+		{
+			name: "surrounding fields ignored",
+			raw:  `{"outcome":{"voice_id":"cloned-voice-abc","audio_url":"https://example.com/a.mp3"},"model":"x"}`,
+			want: "cloned-voice-abc",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := DecodeVoiceCloneResponse([]byte(tc.raw))
+			if err != nil || got.VoiceID != tc.want {
+				t.Fatalf("DecodeVoiceCloneResponse = %+v, %v; want voice id %q", got, err, tc.want)
+			}
+		})
+	}
+}
+
+// TestDecodeVoiceCloneResponse_RejectsEveryOtherShape covers the branches
+// that must never produce a voice id, including the echoed payload on its
+// own — the exact body that would fool a "first voice_id in the body"
+// walker.
+func TestDecodeVoiceCloneResponse_RejectsEveryOtherShape(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{name: "empty", raw: ``},
+		{name: "not json", raw: `not-json`},
+		{name: "no outcome", raw: `{"status":"completed"}`},
+		{name: "null outcome", raw: `{"outcome":null,"status":"processing"}`},
+		{name: "payload echo only", raw: `{"payload":{"voice_id":"English_expressive_narrator"},"outcome":{}}`},
+		{name: "outcome is not an object", raw: `{"outcome":"cloned-voice-abc"}`},
+		{name: "blank voice id", raw: `{"outcome":{"voice_id":"   "}}`},
+		{name: "voice id is not a voice id", raw: `{"outcome":{"voice_id":"../../etc/passwd"}}`},
+		{name: "voice id too long", raw: `{"outcome":{"voice_id":"` + strings.Repeat("a", MaxVoiceIDBytes+1) + `"}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := DecodeVoiceCloneResponse([]byte(tc.raw))
+			if !errors.Is(err, ErrVoiceCloneUnverified) {
+				t.Fatalf("DecodeVoiceCloneResponse(%q) = %+v, %v; want ErrVoiceCloneUnverified", tc.raw, got, err)
+			}
+			if got.VoiceID != "" {
+				t.Fatalf("a rejected response returned voice id %q; a non-nil error must mean the rest is meaningless", got.VoiceID)
+			}
+		})
+	}
+}
+
+func TestValidVoiceID(t *testing.T) {
+	cases := []struct {
+		id   string
+		want bool
+	}{
+		{id: "English_expressive_narrator", want: true},
+		{id: "cloned-voice-abc123", want: true},
+		{id: "", want: false},
+		{id: "has space", want: false},
+		{id: "../escape", want: false},
+		{id: "quote\"drop", want: false},
+		{id: strings.Repeat("a", MaxVoiceIDBytes), want: true},
+		{id: strings.Repeat("a", MaxVoiceIDBytes+1), want: false},
+	}
+	for _, tc := range cases {
+		if got := ValidVoiceID(tc.id); got != tc.want {
+			t.Errorf("ValidVoiceID(%q) = %v, want %v", tc.id, got, tc.want)
 		}
 	}
 }
@@ -395,20 +482,94 @@ func TestVoiceSampleHandler_BearerAuthorizationRequired(t *testing.T) {
 	}
 }
 
-func TestVoiceSampleHandler_CloneRequestAndUnverifiedResponse(t *testing.T) {
+// TestVoiceSampleHandler_CloneFailureKeepsTheUploadAndFallsBack is the
+// record-first order this route exists in: the recording is transcoded and
+// persisted BEFORE the provider is asked for anything, so a provider that
+// gives nothing back costs the parent an explanation, not their recording.
+// The answer is a success naming the library narrator — never the 502 that
+// told a parent their fine recording had failed.
+func TestVoiceSampleHandler_CloneFailureKeepsTheUploadAndFallsBack(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		cloner *voiceClonerFake
+	}{
+		{name: "provider error", cloner: &voiceClonerFake{err: ErrVoiceCloneUnverified}},
+		{name: "no voice id", cloner: &voiceClonerFake{empty: true}},
+		{name: "base voice echoed back", cloner: &voiceClonerFake{result: VoiceCloneResult{VoiceID: cloneBaseVoiceID}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &sampleStoreFake{id: "id"}
+			dir := t.TempDir()
+			h, err := NewVoiceSampleHandler(VoiceSampleConfig{Store: store, PublicOrigin: "https://thutapi.nryn.dev", TempDir: dir, ExpiryFile: filepath.Join(dir, "expiry.json"), Runner: &ffmpegFake{output: []byte("ID3")}, UploadToken: "test-upload-token", Cloner: tc.cloner, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+			if err != nil {
+				t.Fatalf("NewVoiceSampleHandler: %v", err)
+			}
+			t.Cleanup(h.Close)
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, sampleRequest(t, []byte("webm"), "audio/webm"))
+
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body.String())
+			}
+			// The sample was persisted before the clone was attempted:
+			// the clone request names it at its public URL.
+			if !strings.HasPrefix(tc.cloner.request.SourceAudio, "https://thutapi.nryn.dev/media/") || tc.cloner.request.VoiceID != cloneBaseVoiceID {
+				t.Fatalf("clone request = %+v, want the persisted sample URL seeded from the base voice", tc.cloner.request)
+			}
+			if string(store.persisted) != "ID3" {
+				t.Fatalf("persisted bytes = %q, want the transcoded sample written before the clone call", store.bytes)
+			}
+			var body VoiceSampleResponse
+			if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode response %q: %v", rr.Body.String(), err)
+			}
+			if body.Narrator != NarratorLibrary {
+				t.Fatalf("narrator = %q, want %q", body.Narrator, NarratorLibrary)
+			}
+			if body.VoiceID != "" || body.MediaURL != "" || body.SourceAudio != "" {
+				t.Fatalf("response = %+v, want no voice id and no sample URL on the library path", body)
+			}
+			// Nothing will fetch the sample now, so it does not linger at
+			// a public URL for the rest of its fifteen minutes.
+			if !store.deleted {
+				t.Fatalf("the unused voice sample was left in the store")
+			}
+			if h.Tracked("id") {
+				t.Fatalf("the deleted voice sample is still tracked for expiry")
+			}
+		})
+	}
+}
+
+// TestVoiceSampleHandler_CloneSuccessNamesTheVoice is the other half: a
+// provider that DID return a cloned identity answers 201 with the voice the
+// book will be read in.
+func TestVoiceSampleHandler_CloneSuccessNamesTheVoice(t *testing.T) {
 	store := &sampleStoreFake{id: "id"}
-	cloner := &voiceClonerFake{err: ErrVoiceCloneUnverified}
-	h, err := NewVoiceSampleHandler(VoiceSampleConfig{Store: store, PublicOrigin: "https://thutapi.nryn.dev", TempDir: t.TempDir(), Runner: &ffmpegFake{output: []byte("ID3")}, UploadToken: "test-upload-token", Cloner: cloner})
+	dir := t.TempDir()
+	h, err := NewVoiceSampleHandler(VoiceSampleConfig{Store: store, PublicOrigin: "https://thutapi.nryn.dev", TempDir: dir, ExpiryFile: filepath.Join(dir, "expiry.json"), Runner: &ffmpegFake{output: []byte("ID3")}, UploadToken: "test-upload-token", Cloner: &voiceClonerFake{result: VoiceCloneResult{VoiceID: "cloned-voice-abc"}}})
 	if err != nil {
 		t.Fatalf("NewVoiceSampleHandler: %v", err)
 	}
+	t.Cleanup(h.Close)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, sampleRequest(t, []byte("webm"), "audio/webm"))
-	if rr.Code != http.StatusBadGateway || !strings.HasPrefix(cloner.request.SourceAudio, "https://thutapi.nryn.dev/media/") || cloner.request.VoiceID != cloneBaseVoiceID {
-		t.Fatalf("status=%d request=%+v, want loud failure after confirmed clone request", rr.Code, cloner.request)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201: %s", rr.Code, rr.Body.String())
 	}
-	if strings.Contains(rr.Body.String(), `voice_id`) {
-		t.Fatalf("response = %s, must not expose an unverified voice id", rr.Body.String())
+	var body VoiceSampleResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response %q: %v", rr.Body.String(), err)
+	}
+	if body.Narrator != NarratorClone || body.VoiceID != "cloned-voice-abc" {
+		t.Fatalf("response = %+v, want the cloned narrator and its voice id", body)
+	}
+	if !strings.HasPrefix(body.SourceAudio, "https://thutapi.nryn.dev/media/") || body.MediaURL != body.SourceAudio {
+		t.Fatalf("response = %+v, want both URLs naming the persisted sample", body)
+	}
+	// The sample stays for its fifteen minutes here: the provider fetches it.
+	if store.deleted {
+		t.Fatalf("the sample the provider still needs was deleted")
 	}
 }
 

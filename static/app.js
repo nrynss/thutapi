@@ -36,9 +36,31 @@ function subscribeInterview(eventsURL) {
     source,
     adopt(handler) {
       deliver = handler;
-      for (const event of queued.splice(0)) deliver(event.name, event);
+      // Each queued entry is a {name, event} WRAPPER, so the event handed
+      // on is entry.event — not the entry. Passing the wrapper gave the
+      // handler an object with no .data, so its JSON.parse threw
+      // SyntaxError: "undefined" is not valid JSON, out of a preact effect
+      // — which killed the rest of that effect, including the catch-up read
+      // that follows it. The child was left on "I'm thinking of a good
+      // question…" with a spinner and no way forward, every time the
+      // opening question arrived during the route hand-off.
+      for (const entry of queued.splice(0)) deliver(entry.name, entry.event);
     }
   };
+}
+
+// eventPayload reads one SSE frame's JSON. A frame this app cannot parse is
+// ignored rather than thrown out of: these handlers run inside a preact
+// effect, and an exception there abandons the REST of that effect — which is
+// how one malformed frame used to cost the interview its catch-up read and
+// leave the child on "I'm thinking of a good question…" forever. A frame
+// that carries nothing readable is not worth a dead screen.
+function eventPayload(event) {
+  try {
+    return JSON.parse(event?.data ?? "null");
+  } catch (_) {
+    return null;
+  }
 }
 
 function unlockAudio() {
@@ -149,6 +171,22 @@ function Race({ done, sitting }) {
   return html`<section class=${sitting ? "race-wrap sitting" : "race-wrap"}><iframe ref=${frame} class="race-frame" src="/static/race/race.html?embed=1" title="${done} of 8 pages finished" onLoad=${sendProgress}></iframe></section>`;
 }
 
+// leaveForBook is the ONE place the app leaves its own single-page flow for
+// the server-rendered /book/{id} page. It is a mutable binding behind a
+// setter rather than an inline window.location.assign for one reason:
+// location.assign cannot be redefined ("Cannot redefine property: assign"),
+// so an inline call leaves book_ready unexercisable — the first one
+// navigates the browser-contract page away and the whole run ends silently,
+// mid-suite, reporting neither pass nor failure. Production never calls the
+// setter and always takes the default.
+let leaveForBook = url => window.location.assign(url);
+
+// setBookExit replaces where a finished book sends the reader. It exists for
+// static/browser-test.js; passing nothing restores the real navigation.
+export function setBookExit(exit) {
+  leaveForBook = exit || (url => window.location.assign(url));
+}
+
 function cacheKey(id) {
   return `thutapi:question:${id}`;
 }
@@ -171,9 +209,88 @@ function recoverQuestion(id, turn, text) {
   return { turn, text, chips: [], audioURL: "" };
 }
 
+// The cloned voice survives a reload and a retry tap in session storage,
+// the same place and with the same tolerance for storage being switched off
+// as the question cache above: no voice id simply means the library voice.
+const voiceKey = "thutapi:voice-id";
+
+function rememberVoiceID(voiceID) {
+  try {
+    sessionStorage.setItem(voiceKey, voiceID);
+  } catch (_) {
+    // Storage can be disabled; the book is narrated by the library voice.
+  }
+}
+
+function savedVoiceID() {
+  try {
+    return sessionStorage.getItem(voiceKey) || "";
+  } catch (_) {
+    return "";
+  }
+}
+
+// STAGE_CEILINGS is how much of the run each stage has finished by the time
+// it ENDS, as a fraction. The weights are the shape of a real run: drawing
+// eight pages is about half of it, narration is the next largest piece, and
+// the PDF and the film close it out. Nothing here ever reaches 1 — the
+// hundred belongs to book_ready, which navigates away.
+const STAGE_CEILINGS = { structuring: 0.08, illustrating: 0.58, narrating: 0.85, binding: 0.9, filming: 0.99 };
+const STAGE_FLOORS = { structuring: 0, illustrating: 0.08, narrating: 0.58, binding: 0.85, filming: 0.9 };
+
+// progressPercent turns the run's real signals into a whole-number reading.
+// Only the illustrating stage has per-page progress, so it interpolates
+// across its band on the approved count; every other stage reports its own
+// floor, which is a true statement — "at least this much is finished" — and
+// moves the moment the next stage event lands. The pre-stage reading falls
+// back to the page count alone so a client that reconnects to a run whose
+// stage event it missed still shows something honest.
+function progressPercent(stage, done) {
+  const pages = Math.max(0, Math.min(8, done)) / 8;
+  if (!stage) return Math.round(STAGE_FLOORS.illustrating * 100 + (STAGE_CEILINGS.illustrating - STAGE_FLOORS.illustrating) * pages * 100);
+  const floor = STAGE_FLOORS[stage];
+  const ceiling = STAGE_CEILINGS[stage];
+  if (floor === undefined) return 0;
+  if (stage !== "illustrating") return Math.round(floor * 100);
+  return Math.round((floor + (ceiling - floor) * pages) * 100);
+}
+
+// waitHeadline says what the animals are doing right now. It reads the run's
+// real stage rather than inferring one from the page count, which is how a
+// run four minutes into narration used to still say it was drawing.
+function waitHeadline(bookState, stage, done) {
+  if (bookState === "failed") return "The animals need a little rest.";
+  if (bookState === "checking") return "We’re checking on your book.";
+  if (stage === "narrating") return "The animals are giving your characters voices.";
+  if (stage === "binding") return "The animals are folding your pages together.";
+  if (stage === "filming") return "The animals are making your story film.";
+  if (stage === "structuring") return "The animals are thinking up your pages.";
+  if (stage === "illustrating") return "The animals are drawing your story.";
+  return done === 8 ? "The animals are giving your characters voices." : "The animals are drawing your story.";
+}
+
 function warmError(kind) {
   if (kind === "not_found") return "That story wandered away. Start a new one below.";
   return "That question took a tiny tumble. Share your idea again and we’ll keep going.";
+}
+
+// RECORDING_SECONDS is how long a sample records before it stops itself. The
+// server caps a decoded sample at 15 seconds, so this leaves headroom for a
+// browser that mixes a slightly longer container than it was asked for.
+const RECORDING_SECONDS = 12;
+
+// uploadNotice turns a voice-sample response into the one sentence the adult
+// reads. Every failure used to arrive as the same "we couldn't prepare that
+// sample", which said "your recording was bad" for a bad access code, a long
+// file, and a voice service that simply had nothing to give back — three
+// problems with three different things to do about them (Live bug report 1).
+function uploadNotice(status) {
+  if (status === 401 || status === 403) return "That voice-sample access code wasn’t right. Check it with the grown-up who set this up and try again.";
+  if (status === 413) return "That sample is a little too long. About 8–15 seconds is perfect.";
+  if (status === 415) return "We couldn’t read that file. Choose a webm, mp4, mp3, or wav sample.";
+  if (status === 429) return "The voice service is busy right now. Wait a moment and try again, or continue with our library narrator.";
+  if (status >= 500) return "The voice service isn’t answering just now. You can try again, or continue with our warm library narrator.";
+  return "We couldn’t prepare that sample. Try recording again or choose a webm, mp4, mp3, or wav file.";
 }
 
 function VoiceSample({ onContinue }) {
@@ -184,13 +301,21 @@ function VoiceSample({ onContinue }) {
   const [consent, setConsent] = useState(false);
   const [uploadToken, setUploadToken] = useState("");
   const [music, setMusic] = useState(true);
+  const [countdown, setCountdown] = useState(0);
   const recorder = useRef(null);
   const stream = useRef(null);
+  const ticker = useRef(null);
   const timer = useRef(null);
 
   function stopTracks() {
     stream.current?.getTracks().forEach(track => track.stop());
     stream.current = null;
+  }
+
+  function stopCountdown() {
+    clearInterval(ticker.current);
+    ticker.current = null;
+    setCountdown(0);
   }
 
   async function upload(blob) {
@@ -203,13 +328,26 @@ function VoiceSample({ onContinue }) {
     const form = new FormData();
     form.append("sample", blob, "voice-sample" + (blob.type.includes("mp4") ? ".mp4" : ".webm"));
     const response = await fetch("/voice-sample", { method: "POST", headers: { "X-Voice-Sample-Consent": "yes", "Authorization": "Bearer " + uploadToken.trim() }, body: form });
-    if (!response.ok) throw new Error("upload failed");
+    if (!response.ok) {
+      const failure = new Error("upload failed");
+      failure.status = response.status;
+      throw failure;
+    }
     const saved = await response.json();
-    if (!saved.media_url || !saved.source_audio || !saved.voice_id) throw new Error("voice service did not verify a voice id");
-    setSampleURL(saved.source_audio);
-    setVoiceID(saved.voice_id);
+    // The server keeps the recording whatever the voice service does, so a
+    // response with no cloned voice is a SUCCESS with a different narrator —
+    // not a failure to hand back to the adult as one. Either way this step
+    // is finished and the Continue door opens.
     setState("saved");
-    setNotice("Your sample is ready as clone input. The library narrator stays selected until the adult completes the live GMI voice-clone check.");
+    if (saved.narrator === "library" || !saved.voice_id) {
+      setSampleURL("");
+      setVoiceID("");
+      setNotice("We recorded that beautifully, but the voice service couldn’t make a copy of it this time. Your book will be read in our warm library narrator instead.");
+      return;
+    }
+    setSampleURL(saved.source_audio || "");
+    setVoiceID(saved.voice_id);
+    setNotice("That voice is ready — your book will be read in it.");
   }
 
   async function startRecording() {
@@ -235,25 +373,34 @@ function VoiceSample({ onContinue }) {
       next.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
       next.onerror = () => {
         stopTracks();
+        stopCountdown();
         setState("ready");
         setNotice("The microphone recording stopped early. You can try again or choose a file.");
       };
       next.onstop = async () => {
         clearTimeout(timer.current);
         stopTracks();
+        stopCountdown();
         try {
           await upload(new Blob(chunks, { type: next.mimeType || "audio/webm" }));
         } catch (error) {
           setState("ready");
-          setNotice(error.message === "too large" ? "That recording is too large. Please keep it to a short 8–15 second sample." : "We couldn’t prepare that sample. Try recording again or choose a webm, mp4, mp3, or wav file.");
+          setNotice(error.message === "too large" ? "That recording is too large. Please keep it to a short 8–15 second sample." : uploadNotice(error.status || 0));
         }
       };
       recorder.current = next;
       next.start();
       setState("recording");
-      setNotice("Recording now. We’ll stop after 12 seconds.");
-      timer.current = setTimeout(() => { if (next.state === "recording") next.stop(); }, 12000);
+      setNotice("");
+      // The countdown is the whole feedback for this step: the adult is
+      // talking at a screen that otherwise does not move, and has no other
+      // way to know how much of the sample is left.
+      setCountdown(RECORDING_SECONDS);
+      clearInterval(ticker.current);
+      ticker.current = setInterval(() => setCountdown(left => (left > 0 ? left - 1 : 0)), 1000);
+      timer.current = setTimeout(() => { if (next.state === "recording") next.stop(); }, RECORDING_SECONDS * 1000);
     } catch (error) {
+      stopCountdown();
       setState("ready");
       setNotice(
         error.name === "NotAllowedError"
@@ -286,15 +433,24 @@ function VoiceSample({ onContinue }) {
       await upload(file);
     } catch (error) {
       setState("ready");
-      setNotice(error.message === "too large" ? "That file is too large. Please choose a short 8–15 second sample." : "We couldn’t prepare that file. Choose a webm, mp4, mp3, or wav sample.");
+      setNotice(error.message === "too large" ? "That file is too large. Please choose a short 8–15 second sample." : uploadNotice(error.status || 0));
     } finally {
       event.currentTarget.value = "";
     }
   }
 
-  useEffect(() => () => { clearTimeout(timer.current); if (recorder.current?.state === "recording") recorder.current.stop(); stopTracks(); }, []);
+  useEffect(() => () => { clearTimeout(timer.current); clearInterval(ticker.current); if (recorder.current?.state === "recording") recorder.current.stop(); stopTracks(); }, []);
 
-  return html`<section class="card voice-sample"><p class="eyebrow">Grown-up corner</p><h1>Would you like to add a short voice sample?</h1><p>With adult permission, record about 8–15 seconds or choose a prepared file. This is optional; your book can use our warm library narrator.</p><label class="consent"><input data-voice-consent type="checkbox" checked=${consent} onChange=${event => setConsent(event.currentTarget.checked)} /> I’m an adult and I understand this sample is uploaded to this app’s public media URL so GMI can fetch it for voice cloning. The app deletes it after 15 minutes and it is never shared-cacheable. GMI may return generated voice audio at a public provider URL that we cannot delete.</label><label>Voice-sample access code<input data-voice-upload-token type="password" value=${uploadToken} onInput=${event => setUploadToken(event.currentTarget.value)} autocomplete="one-time-code" /></label><div class="doors"><button class="primary" data-voice-record onClick=${startRecording} disabled=${!consent || !uploadToken.trim() || state === "recording" || state === "uploading"}>${state === "recording" ? "Recording…" : "Record a sample"}</button><button class="secondary" data-voice-stop onClick=${stopRecording} disabled=${state !== "recording"}>Stop recording</button></div><label class="voice-upload">Choose a sample file<input data-voice-upload type="file" accept="audio/webm,video/webm,audio/mp4,video/mp4,audio/mpeg,audio/wav,.webm,.mp4,.m4a,.mp3,.wav" onChange=${chooseFile} disabled=${!consent || !uploadToken.trim() || state === "recording" || state === "uploading"} /></label><label class="music-option"><input type="checkbox" checked=${music} onChange=${e => setMusic(e.currentTarget.checked)} /> Add gentle background music to my story film</label>${notice ? html`<p class="warm" role="status">${notice}</p>` : null}${sampleURL ? html`<p class="warm">Sample is ready briefly while the voice service verifies it.</p>` : null}<div class="doors"><button class="secondary" data-voice-skip onClick=${() => onContinue(undefined, music)} disabled=${state === "recording" || state === "uploading"}>Skip for now</button>${sampleURL ? html`<button class="primary" data-voice-continue onClick=${() => onContinue(voiceID, music)}>Continue to my book</button>` : null}</div></section>`;
+  // Both doors carry the music choice. The old single "Skip for now" made
+  // one decision look like three: it read as skipping the music too, and it
+  // was the only way forward when a clone did not come back, so declining a
+  // voice and losing a voice were the same button. Now the music checkbox is
+  // its own choice above them, and the two doors differ only in which voice
+  // reads the book — with the cloned one enabled solely when there is a
+  // cloned voice to offer.
+  const busy = state === "recording" || state === "uploading";
+  const blocked = !consent || !uploadToken.trim() || busy;
+  return html`<section class="card voice-sample"><p class="eyebrow">Grown-up corner</p><h1>Would you like to add a short voice sample?</h1><p>With adult permission, record about 8–15 seconds or choose a prepared file. This is optional; your book can use our warm library narrator.</p><label class="consent"><input data-voice-consent type="checkbox" checked=${consent} onChange=${event => setConsent(event.currentTarget.checked)} /> I’m an adult and I understand this sample is uploaded to this app’s public media URL so GMI can fetch it for voice cloning. The app deletes it after 15 minutes and it is never shared-cacheable. GMI may return generated voice audio at a public provider URL that we cannot delete.</label><label>Voice-sample access code<input data-voice-upload-token type="password" value=${uploadToken} onInput=${event => setUploadToken(event.currentTarget.value)} autocomplete="one-time-code" /></label><div class="doors"><button class="primary" data-voice-record onClick=${startRecording} disabled=${blocked}>${state === "recording" ? `Recording… ${countdown}s` : "Record a sample"}</button><button class="secondary" data-voice-stop onClick=${stopRecording} disabled=${state !== "recording"}>Stop recording</button></div>${state === "recording" ? html`<p class="warm countdown" role="status" data-voice-countdown>Recording — ${countdown} second${countdown === 1 ? "" : "s"} left. Say something warm and ordinary, like a line from a favourite book.</p>` : null}<label class="voice-upload">Choose a sample file<input data-voice-upload type="file" accept="audio/webm,video/webm,audio/mp4,video/mp4,audio/mpeg,audio/wav,.webm,.mp4,.m4a,.mp3,.wav" onChange=${chooseFile} disabled=${blocked} /></label><label class="music-option"><input data-voice-music type="checkbox" checked=${music} onChange=${e => setMusic(e.currentTarget.checked)} /> Add gentle background music to my story film</label>${notice ? html`<p class="warm" role="status">${notice}</p>` : null}${sampleURL ? html`<p class="warm">Your sample stays only while the voice service reads it, then it is deleted.</p>` : null}<div class="doors"><button class="secondary" data-voice-library onClick=${() => onContinue(undefined, music)} disabled=${busy}>Continue with our library voice</button><button class="primary" data-voice-continue onClick=${() => onContinue(voiceID, music)} disabled=${busy || !voiceID}>Continue with your voice</button></div>${voiceID ? null : html`<p class="warm">“Continue with your voice” opens once a sample has been recorded and the voice service has copied it.</p>`}</section>`;
 }
 
 function isFarewell(text) {
@@ -338,6 +494,7 @@ function Interview({ id }) {
   const [needsTap, setNeedsTap] = useState(false);
   const [notice, setNotice] = useState("");
   const [done, setDone] = useState(0);
+  const [stage, setStage] = useState("");
   const [bookState, setBookState] = useState("");
   const stream = useRef(null);
   const bookStream = useRef(null);
@@ -387,13 +544,14 @@ function Interview({ id }) {
     const source = subscription.source;
     stream.current = source;
     subscription.adopt((name, event) => {
+      const payload = eventPayload(event);
       if (name === "question") {
-        applyQuestion(JSON.parse(event.data));
+        if (payload) applyQuestion(payload);
         return;
       }
       if (name === "question_audio") {
-        const audio = JSON.parse(event.data);
-        if (audio.turn !== activeTurn.current || !audio.audio_url) return;
+        const audio = payload;
+        if (!audio || audio.turn !== activeTurn.current || !audio.audio_url) return;
         setAudioURL(audio.audio_url);
         setQuestion(current => {
           if (!current || current.turn !== audio.turn) return current;
@@ -405,19 +563,19 @@ function Interview({ id }) {
         return;
       }
       if (name === "ended") {
-        const end = JSON.parse(event.data);
+        const end = payload || {};
         setIsClosing(true);
         setWaiting(false);
         setQuestion({ turn: activeTurn.current, text: end.text || "What a lovely story! Let's make your book.", chips: [], audioURL: "" });
         source.close();
         return;
       }
-      const payload = event.data ? JSON.parse(event.data) : {};
-      if (payload.error === "not_found") {
+      const failure = payload || {};
+      if (failure.error === "not_found") {
         source.close();
         setMissing(true);
       }
-      setNotice(warmError(payload.error));
+      setNotice(warmError(failure.error));
       setWaiting(false);
     });
   }
@@ -435,9 +593,12 @@ function Interview({ id }) {
         setDone(approvedPages.current.size);
         setBookState("drawing");
       },
+      stage: stageEvent => {
+        if (STAGE_FLOORS[stageEvent.stage] !== undefined) setStage(stageEvent.stage);
+      },
       narrationUnavailable: () => setBookState("quiet"),
       bookReady: ready => {
-        window.location.assign(`/book/${currentBookID || ready.book_id || ""}`);
+        leaveForBook(`/book/${currentBookID || ready.book_id || ""}`);
       },
       failed: () => {
         setBookState("failed");
@@ -493,9 +654,10 @@ function Interview({ id }) {
       if (Number.isInteger(page.n) && page.n >= 1 && page.n <= 8) approvedPages.current.add(page.n);
     }
     setDone(approvedPages.current.size);
+    if (STAGE_FLOORS[state.stage] !== undefined) setStage(state.stage);
     if (state.status === "ready") {
       subscription.close();
-      window.location.assign(`/book/${bookID.current}`);
+      leaveForBook(`/book/${bookID.current}`);
       return true;
     }
     if (state.status === "failed") {
@@ -521,6 +683,7 @@ function Interview({ id }) {
     bookID.current = currentBookID;
     setBookState("drawing");
     setDone(0);
+    setStage("");
     approvedPages.current = new Set();
     const subscription = attachBookStream(`/interviews/${id}/generate/events`, currentBookID);
     // C4 is from-now-on: wait until the server has accepted the subscription,
@@ -599,12 +762,16 @@ function Interview({ id }) {
     const musicOption = typeof music === "boolean" ? music : true;
     setBookState("drawing");
     setDone(0);
+    setStage("");
     approvedPages.current = new Set();
     try {
       const start = await json(`/interviews/${id}/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ music: musicOption })
+        // The cloned voice the adult earned on the voice step. A retry tap
+        // reads it back out of session storage, so the second run is read in
+        // the same voice as the first.
+        body: JSON.stringify({ music: musicOption, voice_id: savedVoiceID() })
       });
       bookID.current = start.book_id || bookID.current;
       const subscription = attachBookStream(start.events_url, bookID.current);
@@ -622,17 +789,17 @@ function Interview({ id }) {
 
   function continueToGeneration(voiceID, music = true) {
     if (generationStarted.current) return;
-    if (voiceID) sessionStorage.setItem("thutapi:voice-id", voiceID);
+    rememberVoiceID(voiceID || "");
     generationStarted.current = true;
     const musicOption = typeof music === "boolean" ? music : true;
     generate(musicOption);
   }
 
-  if (bookState) return html`<section class="card wait"><p class="eyebrow">Your book is on its way</p><h1>${bookState === "failed" ? "The animals need a little rest." : bookState === "checking" ? "We’re checking on your book." : (done === 8 && bookState === "drawing") ? "The animals are giving your characters voices." : "The animals are drawing your story."}</h1><${Race} done=${done} sitting=${bookState === "failed"} />${bookState === "checking" ? html`<p class="warm">We’re still listening for the next page.</p>` : null}${bookState === "quiet" ? html`<p class="warm">Your book will be beautifully captioned and quiet today.</p>` : null}${bookState === "failed" ? html`<div class="doors"><button class="primary" onClick=${() => generate(true)}>Try again</button><a class="secondary" href="/">Look at other books</a></div>` : null}</section>`;
+  if (bookState) return html`<section class="card wait"><p class="eyebrow">Your book is on its way</p><h1>${waitHeadline(bookState, stage, done)}</h1>${bookState === "failed" ? null : html`<p class="progress" role="status" data-book-percent=${progressPercent(stage, done)}><span class="progress-figure">${progressPercent(stage, done)}%</span> of your book is made</p>`}<${Race} done=${done} sitting=${bookState === "failed"} />${bookState === "checking" ? html`<p class="warm">We’re still listening for the next page.</p>` : null}${bookState === "quiet" ? html`<p class="warm">Your book will be beautifully captioned and quiet today.</p>` : null}${bookState === "failed" ? html`<div class="doors"><button class="primary" onClick=${() => generate(true)}>Try again</button><a class="secondary" href="/">Look at other books</a></div>` : html`<div class="wait-away"><p class="warm">Making a whole book takes a few minutes. The animals keep working even if you go — you can read another book from the shelf and come back.</p><div class="doors"><a class="secondary" data-wait-leave href="/">Look at other books</a></div></div>`}</section>`;
   if (missing) return html`<section class="card"><p class="eyebrow">A tiny detour</p><h1>That story wandered away.</h1><p class="warm" role="status">Start a new story and we’ll make a fresh little path together.</p><div class="doors"><a class="primary" href="/">Start a new story</a><a class="secondary" href="/">Look at other books</a></div></section>`;
   if (ended) return html`<${VoiceSample} onContinue=${continueToGeneration} />`;
   const closing = isClosing || (question && isFarewell(question.text));
-  return html`<section class="interview"><p class="eyebrow">Your story</p><div class="question"><h1>${question ? question.text : notice ? "A little hiccup." : "I’m thinking of a good question…"}</h1>${audioURL ? html`<button class="speaker" onClick=${() => listen(audioURL, true)}>${needsTap ? "Tap to listen" : "Listen again"}</button>` : null}</div>${closing ? html`<div class="doors"><button class="primary" onClick=${() => setEnded(true)}>Make my book</button></div>` : waiting ? html`<p class="warm">🐇 A little animal is thinking…</p>` : html`<div class="chips">${(question && question.chips || []).map(chip => html`<button onClick=${() => send(chip)}>${chip}</button>`)}</div>`}${notice ? html`<p class="warm" role="status">${notice}</p>` : null}${closing ? null : html`<form class="answer" onSubmit=${event => { event.preventDefault(); send(answer); }}><input value=${answer} onInput=${e => setAnswer(e.currentTarget.value)} onFocus=${e => e.currentTarget.scrollIntoView({ block: "center" })} placeholder="Or write your own idea" autocomplete="off" /><button class="primary" disabled=${waiting}>Send</button></form>`}</section>`;
+  return html`<section class="interview"><p class="eyebrow">Your story</p><div class="question"><h1>${question ? question.text : notice ? "A little hiccup." : "I’m thinking of a good question…"}</h1>${audioURL ? html`<button class="speaker" onClick=${() => listen(audioURL, true)}>${needsTap ? "Tap to listen" : "Listen again"}</button>` : null}</div>${closing ? html`<div class="doors"><button class="primary" data-make-book onClick=${() => setEnded(true)}>Make my book</button></div>` : waiting ? html`<p class="warm">🐇 A little animal is thinking…</p>` : html`<div class="chips">${(question && question.chips || []).map(chip => html`<button onClick=${() => send(chip)}>${chip}</button>`)}</div>`}${notice ? html`<p class="warm" role="status">${notice}</p>` : null}${closing ? null : html`<form class="answer" onSubmit=${event => { event.preventDefault(); send(answer); }}><input value=${answer} onInput=${e => setAnswer(e.currentTarget.value)} onFocus=${e => e.currentTarget.scrollIntoView({ block: "center" })} placeholder="Or write your own idea" autocomplete="off" /><button class="primary" disabled=${waiting}>Send</button></form>`}</section>`;
 }
 
 function App({ initialRoute }) {

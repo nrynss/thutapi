@@ -83,6 +83,8 @@ type config struct {
 	mediaMax     int64         // T11 retention: byte budget for generated media, 0 = unbounded
 	prewarmDir   string        // T11 prewarm: fixture directory, "" = <data dir>/prewarm
 	exportBook   string        // T11 prewarm: export this book as a fixture and exit
+	completeBook string        // finish this book's narration, PDF and film, then exit ("all" for every filmless book)
+	completeMute bool          // complete without a music bed
 }
 
 type gmiVoiceCloner struct {
@@ -95,6 +97,38 @@ func (c gmiVoiceCloner) CloneVoice(ctx context.Context, request audio.VoiceClone
 		return audio.VoiceCloneResult{}, err
 	}
 	return audio.DecodeVoiceCloneResponse(raw)
+}
+
+// completeBooks runs bookgen.Complete over one book id, or over every book
+// with no film when the id is "all", and reports what each one ended with.
+// One book's failure does not stop the rest: the point of the command is to
+// repair a set, and a book that cannot be repaired today is still named in
+// the error at the end.
+func completeBooks(ctx context.Context, log *slog.Logger, generate *bookgen.Handler, which string, music bool) error {
+	ids := []string{which}
+	if which == "all" {
+		found, err := generate.IncompleteBooks(ctx)
+		if err != nil {
+			return err
+		}
+		if len(found) == 0 {
+			log.Info("no books need completing; every book has a film")
+			return nil
+		}
+		ids = found
+	}
+	log.Info("completing books", "books", ids, "music", music)
+	var failures []error
+	for _, id := range ids {
+		pdfID, videoID, err := generate.Complete(ctx, id, music, "")
+		if err != nil {
+			log.Error("could not complete book", "book", id, "err", err)
+			failures = append(failures, fmt.Errorf("book %s: %w", id, err))
+			continue
+		}
+		log.Info("book completed", "book", id, "pdf", "/media/"+pdfID, "video", "/media/"+videoID)
+	}
+	return errors.Join(failures...)
 }
 
 // resolveAddr is the ADDR/PORT resolution: ADDR wins if set, else
@@ -164,6 +198,8 @@ func parseFlags(args []string) (config, error) {
 	fs.StringVar(&cfg.dataDir, "data-dir", cfg.dataDir, "directory for the SQLite database and media blobs")
 	fs.StringVar(&cfg.prewarmDir, "prewarm-dir", cfg.prewarmDir, "directory of prewarm fixtures (default <data-dir>/prewarm)")
 	fs.StringVar(&cfg.exportBook, "prewarm-export", "", "export this book id as a prewarm fixture and exit")
+	fs.StringVar(&cfg.completeBook, "complete", "", `finish this book id's narration, PDF and film from its persisted pages, then exit ("all" completes every book with no film)`)
+	fs.BoolVar(&cfg.completeMute, "complete-no-music", false, "complete without a background music bed")
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
 	}
@@ -593,6 +629,15 @@ func run(log *slog.Logger, args []string, sigs <-chan os.Signal) error {
 	})
 	if err != nil {
 		return fmt.Errorf("build generation handler: %w", err)
+	}
+
+	// -complete finishes a book whose art landed but whose sound did not:
+	// it re-runs narration, the PDF and the film from the pages already in
+	// the store and exits, without serving. It never calls M3 or the image
+	// model, so it cannot give the child a different book than the one they
+	// already have. See internal/bookgen/complete.go.
+	if cfg.completeBook != "" {
+		return completeBooks(context.Background(), log, generate, cfg.completeBook, !cfg.completeMute)
 	}
 
 	// T11's gate. Rate limits are always on; the passcode is enforced

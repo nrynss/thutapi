@@ -1,10 +1,13 @@
 package bookgen
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -419,6 +422,8 @@ func TestPipeline_FailureIsTotalAndTerminal(t *testing.T) {
 				return
 			case "failed":
 				t.Fatalf("second run failed: %s", ev.Data)
+			case "stage":
+				// The second run announces its stages like any other.
 			default:
 				t.Fatalf("unexpected event %q on the book topic", ev.Name)
 			}
@@ -1454,5 +1459,261 @@ func TestPipeline_MusicExplicitTrueInvokesMusicBedAndMix(t *testing.T) {
 	served := getMedia(t, srv, filmID)
 	if !strings.HasPrefix(string(served), "mixed-film:") {
 		t.Errorf("persisted film = %q, want MIXED film", served)
+	}
+}
+
+// postGenerateJSON sends one generate request with an explicit body, the
+// shape the browser's voice step posts.
+func postGenerateJSON(t *testing.T, srv *httptest.Server, ivID, body string) (int, generateResponse) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/interviews/"+ivID+"/generate", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do generate: %v", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	var out generateResponse
+	if resp.StatusCode == http.StatusAccepted {
+		if err := json.Unmarshal(raw, &out); err != nil {
+			t.Fatalf("decode generate response %q: %v", raw, err)
+		}
+	}
+	return resp.StatusCode, out
+}
+
+// TestPipeline_StagesAnnounceEveryStepInOrder pins the signal screen 5's
+// progress reading is built on. Before it existed, the eight page_approved
+// events were the only thing on the wire, so the four minutes of narration,
+// PDF and film after the last page carried nothing at all and the wait
+// screen sat frozen at 8/8 (Live bug report 2).
+func TestPipeline_StagesAnnounceEveryStepInOrder(t *testing.T) {
+	ph := newPipelineHarness(t)
+	ivID, bookID := ph.makeEndedInterview("Mira")
+	sub := ph.subscribe(bookID)
+	srv := httptest.NewServer(ph.mux())
+	defer srv.Close()
+
+	code, res, _ := ph.postGenerate(srv, ivID)
+	if code != http.StatusAccepted {
+		t.Fatalf("POST generate status = %d, want 202", code)
+	}
+	for range fullStory().Pages {
+		ph.waitEvent(sub, "page_approved")
+	}
+	ph.waitEvent(sub, "book_ready")
+	if runRes := ph.waitJob(res.JobID); runRes.Status != job.StatusDone {
+		t.Fatalf("job = %+v, want done", runRes)
+	}
+
+	var got []Stage
+	for _, raw := range ph.stages {
+		var ev stageEvent
+		if err := json.Unmarshal([]byte(raw), &ev); err != nil {
+			t.Fatalf("decode stage event %q: %v", raw, err)
+		}
+		got = append(got, ev.Stage)
+	}
+	if !slices.Equal(got, Stages) {
+		t.Fatalf("stage events = %v, want every stage in pipeline order %v", got, Stages)
+	}
+	// The last stage entered is also what a reload recovers, so a client
+	// that missed the events still reads the run's real position.
+	if state := ph.h.CatchUp(bookID); state.Stage != StageFilming {
+		t.Fatalf("CatchUp stage = %q, want the last stage entered", state.Stage)
+	}
+}
+
+// TestPipeline_VoiceIDNarratesTheBook is the other half of the voice step:
+// a cloned voice the adult earned has to actually reach the speech calls,
+// or the whole clone path is decoration. A value that is not shaped like a
+// voice identity is dropped rather than forwarded — it comes from an
+// untrusted client and ends up in a provider request body.
+func TestPipeline_VoiceIDNarratesTheBook(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "cloned voice", body: `{"music":false,"voice_id":"cloned-voice-abc"}`, want: "cloned-voice-abc"},
+		{name: "no voice", body: `{"music":false}`, want: audio.DefaultVoice},
+		{name: "empty voice", body: `{"music":false,"voice_id":""}`, want: audio.DefaultVoice},
+		{name: "malformed voice is dropped", body: `{"music":false,"voice_id":"../../etc/passwd"}`, want: audio.DefaultVoice},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ph := newPipelineHarness(t)
+			ivID, bookID := ph.makeEndedInterview("Mira")
+			sub := ph.subscribe(bookID)
+			srv := httptest.NewServer(ph.mux())
+			defer srv.Close()
+
+			code, res := postGenerateJSON(t, srv, ivID, tc.body)
+			if code != http.StatusAccepted {
+				t.Fatalf("POST generate status = %d, want 202", code)
+			}
+			for range fullStory().Pages {
+				ph.waitEvent(sub, "page_approved")
+			}
+			ph.waitEvent(sub, "book_ready")
+			if runRes := ph.waitJob(res.JobID); runRes.Status != job.StatusDone {
+				t.Fatalf("job = %+v, want done", runRes)
+			}
+
+			calls := ph.tts.recorded()
+			if len(calls) == 0 {
+				t.Fatalf("no narration calls were made")
+			}
+			for _, c := range calls {
+				if c.voice != tc.want {
+					t.Fatalf("narration voice = %q, want %q", c.voice, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// TestComplete_GivesASilentBookItsSoundBack is the repair for the book of
+// 2026-09-06: art intact, no narration, no music, and a child holding a
+// silent film of his own story. Complete must give it a voice and a bed
+// WITHOUT calling the structure or image models — a re-run would hand the
+// child a different book.
+func TestComplete_GivesASilentBookItsSoundBack(t *testing.T) {
+	ph := newPipelineHarness(t)
+	music, mix := ph.enableMusic(t)
+	ivID, bookID := ph.makeEndedInterview("Mira")
+	srv := httptest.NewServer(ph.mux())
+	defer srv.Close()
+
+	// A first run whose narration is refused end to end, exactly as a
+	// per-minute cap refused it live: the book lands captioned-silent.
+	ph.tts.err = fmt.Errorf("%w: rate limit exceeded(RPM). Please try again", gmi.ErrRateLimited)
+	sub := ph.subscribe(bookID)
+	code, res, _ := ph.postGenerate(srv, ivID)
+	if code != http.StatusAccepted {
+		t.Fatalf("POST generate status = %d, want 202", code)
+	}
+	for range fullStory().Pages {
+		ph.waitEvent(sub, "page_approved")
+	}
+	ph.waitEvent(sub, "narration_unavailable")
+	ph.waitEvent(sub, "book_ready")
+	if runRes := ph.waitJob(res.JobID); runRes.Status != job.StatusDone {
+		t.Fatalf("first job = %+v, want done", runRes)
+	}
+	for n := 1; n <= story.PageCount; n++ {
+		if _, err := ph.db.PageMedia(t.Context(), bookID, n, store.MediaNarration); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("page %d has narration after a refused run: %v", n, err)
+		}
+	}
+	structureCalls := ph.chat.calls
+	imageCalls := ph.imager.count()
+	musicCalls := len(music.recorded())
+	mixPasses := mix.count()
+
+	// The cap clears. Complete finishes the book the child already has.
+	ph.tts.err = nil
+	repair := ph.subscribe(bookID)
+	pdfID, videoID, err := ph.h.Complete(t.Context(), bookID, true, "")
+	if err != nil {
+		t.Fatalf("Complete = %v, want the book finished", err)
+	}
+	if pdfID == "" || videoID == "" {
+		t.Fatalf("Complete returned pdf %q video %q, want both", pdfID, videoID)
+	}
+
+	// Every page now speaks.
+	for n := 1; n <= story.PageCount; n++ {
+		if _, err := ph.db.PageMedia(t.Context(), bookID, n, store.MediaNarration); err != nil {
+			t.Errorf("page %d still silent after Complete: %v", n, err)
+		}
+	}
+	// And the film has a bed under it.
+	if got := len(music.recorded()) - musicCalls; got != 1 {
+		t.Errorf("music bed calls during the repair = %d, want 1", got)
+	}
+	if got := mix.count() - mixPasses; got != 1 {
+		t.Errorf("mix passes during the repair = %d, want the bed mixed under the film", got)
+	}
+	// Nothing was re-structured and nothing was re-drawn: this is the same
+	// book, not a new one.
+	if ph.chat.calls != structureCalls {
+		t.Errorf("structure calls = %d, want the original %d — Complete must not re-write the story", ph.chat.calls, structureCalls)
+	}
+	if got := ph.imager.count(); got != imageCalls {
+		t.Errorf("image calls = %d, want the original %d — Complete must not re-draw the book", got, imageCalls)
+	}
+	// The repair announces itself on the book's own topic like a run does.
+	ready := ph.waitEvent(repair, "book_ready")
+	if u, _ := ready["video_url"].(string); u != "/media/"+videoID {
+		t.Errorf("book_ready video_url = %q, want /media/%s", u, videoID)
+	}
+}
+
+func TestComplete_RefusesABookItWouldHaveToInvent(t *testing.T) {
+	ph := newPipelineHarness(t)
+	if _, _, err := ph.h.Complete(t.Context(), "", true, ""); !errors.Is(err, store.ErrInvalid) {
+		t.Errorf("Complete(\"\") = %v, want ErrInvalid", err)
+	}
+	if _, _, err := ph.h.Complete(t.Context(), "no-such-book", true, ""); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("Complete(unknown) = %v, want ErrNotFound", err)
+	}
+	// A book row with no pages was never structured; completing it would
+	// mean inventing the story, which is a re-run, not a repair.
+	bare, err := ph.db.CreateBook(t.Context(), "A Book With No Pages")
+	if err != nil {
+		t.Fatalf("create book: %v", err)
+	}
+	if _, _, err := ph.h.Complete(t.Context(), bare.ID, true, ""); !errors.Is(err, ErrNoStructuredBook) {
+		t.Errorf("Complete(unstructured) = %v, want ErrNoStructuredBook", err)
+	}
+}
+
+// TestIncompleteBooks_NamesOnlyTheFilmlessOnes pins what `-complete all`
+// picks up.
+func TestIncompleteBooks_NamesOnlyTheFilmlessOnes(t *testing.T) {
+	ph := newPipelineHarness(t)
+	ivID, bookID := ph.makeEndedInterview("Mira")
+	unfinished, err := ph.db.CreateBook(t.Context(), "Never Generated")
+	if err != nil {
+		t.Fatalf("create book: %v", err)
+	}
+	srv := httptest.NewServer(ph.mux())
+	defer srv.Close()
+
+	before, err := ph.h.IncompleteBooks(t.Context())
+	if err != nil {
+		t.Fatalf("IncompleteBooks: %v", err)
+	}
+	if !slices.Contains(before, bookID) || !slices.Contains(before, unfinished.ID) {
+		t.Fatalf("IncompleteBooks = %v, want both filmless books", before)
+	}
+
+	sub := ph.subscribe(bookID)
+	code, res, _ := ph.postGenerate(srv, ivID)
+	if code != http.StatusAccepted {
+		t.Fatalf("POST generate status = %d, want 202", code)
+	}
+	for range fullStory().Pages {
+		ph.waitEvent(sub, "page_approved")
+	}
+	ph.waitEvent(sub, "book_ready")
+	if runRes := ph.waitJob(res.JobID); runRes.Status != job.StatusDone {
+		t.Fatalf("job = %+v, want done", runRes)
+	}
+
+	after, err := ph.h.IncompleteBooks(t.Context())
+	if err != nil {
+		t.Fatalf("IncompleteBooks: %v", err)
+	}
+	if slices.Contains(after, bookID) {
+		t.Errorf("IncompleteBooks = %v, want the filmed book dropped", after)
+	}
+	if !slices.Contains(after, unfinished.ID) {
+		t.Errorf("IncompleteBooks = %v, want the never-generated book kept", after)
 	}
 }

@@ -14,4 +14,9 @@
   </ol>
   <p>Record the phone model, browser/version, deployment SHA, date, and pass/fail result in the T9 remediation record. Do not mark the track complete from this page alone.</p>
 </section>
-<script type="module" src="/static/browser-test.js"></script>
+<!-- The module is loaded through a per-load cache-buster: a browser that
+     keeps the previous module in its memory cache silently re-runs the OLD
+     contract, which reads as a fix that did not take. -->
+<script type="module">
+  import(`/static/browser-test.js?run=${Date.now()}`);
+</script>

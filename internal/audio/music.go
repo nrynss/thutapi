@@ -197,6 +197,11 @@ type MusicConfig struct {
 
 	// Model is the music model. Empty means DefaultMusicModel.
 	Model string
+
+	// Throttle paces the retry the music call gets when the provider
+	// says it is over its per-minute cap. The zero value is the
+	// package default; see throttle.go.
+	Throttle ThrottleConfig
 }
 
 // MixConfig configures the bed-fit final pass. The zero value is
@@ -283,11 +288,12 @@ func (defaultRunner) Run(ctx context.Context, name string, args ...string) ([]by
 // substituted, so no code below re-reads MusicConfig and no default can
 // be applied twice or in two ways.
 type musicMaker struct {
-	music  Music
-	http   *http.Client
-	lyrics string
-	prompt string
-	model  string
+	music    Music
+	http     *http.Client
+	lyrics   string
+	prompt   string
+	model    string
+	throttle ThrottleConfig
 }
 
 // resolve substitutes MusicConfig's defaults and rejects a config
@@ -313,7 +319,7 @@ func (cfg MusicConfig) resolve() (*musicMaker, error) {
 	if model == "" {
 		model = DefaultMusicModel
 	}
-	return &musicMaker{music: cfg.Music, http: hc, lyrics: lyrics, prompt: prompt, model: model}, nil
+	return &musicMaker{music: cfg.Music, http: hc, lyrics: lyrics, prompt: prompt, model: model, throttle: cfg.Throttle.withDefaults()}, nil
 }
 
 // GenerateMusicBed asks the music client for one wordless bed and
@@ -337,9 +343,18 @@ func GenerateMusicBed(ctx context.Context, cfg MusicConfig) (Bed, error) {
 	if err != nil {
 		return Bed{}, err
 	}
-	raw, err := m.music.SynthesizeMusic(ctx, m.lyrics, m.prompt, m.model)
+	// The music call is retried on a per-minute cap for the same reason
+	// narration is (throttle.go): the bed is asked for last, after every
+	// image and every clip is already paid for, and on 2026-09-06 a live
+	// run lost its whole bed to a cap nothing waited out.
+	var raw []byte
+	err = retryThrottled(ctx, m.throttle, func() error {
+		var callErr error
+		raw, callErr = m.music.SynthesizeMusic(ctx, m.lyrics, m.prompt, m.model)
+		return callErr
+	})
 	if err != nil {
-		return Bed{}, fmt.Errorf("audio: generate music bed: %w", err)
+		return Bed{}, fmt.Errorf("audio: generate music bed: %w", throttleNote(err, m.throttle))
 	}
 	bedURL, dur, err := decodeBedURL(raw)
 	if err != nil {

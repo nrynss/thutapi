@@ -32,6 +32,16 @@ input[type=checkbox]{width:24px;height:24px;min-height:0;flex:none;accent-color:
 .voice-sample p{margin:0}
 .voice-upload{display:grid;gap:8px;font-weight:700}
 .voice-upload input{background:var(--bg)}
+/* The progress reading sits directly under the headline, above the race.
+   The figure is the loud part: a child reads the number, the sentence is
+   for the grown-up beside them. */
+.progress{margin:0;color:var(--muted);font-weight:700}
+.progress-figure{color:var(--accent);font-size:clamp(1.6rem,5vw,2.1rem);margin-right:8px}
+/* The recording countdown reads as live, not as a warning. */
+.countdown{color:var(--accent);font-weight:700}
+/* The way out of the wait. Separated from the race so it reads as a
+   standing offer, not as something that went wrong. */
+.wait-away{margin-top:20px;display:grid;gap:12px}
 .race-wrap{overflow:hidden;border-radius:20px;background:var(--surface);margin:20px 0;height:304px}
 .race-frame{display:block;width:100%;height:100%;border:0;background:var(--surface)}
 .sitting .race-frame{filter:saturate(.5)}

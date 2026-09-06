@@ -29,7 +29,7 @@ import (
 // (§T10g three tiers) — while the pages that spoke keep their voices, and
 // the run still succeeds with both a pdf_url and a video_url. The same is
 // true of the music bed (see renderFilm).
-func (h *Handler) runBook(ctx context.Context, bookID, ivID string, music bool) (pdfID, videoID string, err error) {
+func (h *Handler) runBook(ctx context.Context, bookID, ivID string, opts runOptions) (pdfID, videoID string, err error) {
 	// The run outlives the POST that started it, so everything is read
 	// fresh: the interview row carries the transcript to structure and
 	// the book row carries the byline question zero wrote.
@@ -44,6 +44,7 @@ func (h *Handler) runBook(ctx context.Context, bookID, ivID string, music bool) 
 
 	// Stage 1 — structure, then the store rows the persist stages'
 	// place calls anchor on.
+	h.enterStage(bookID, StageStructuring)
 	st, err := h.structure(ctx, book, iv)
 	if err != nil {
 		return "", "", err
@@ -52,6 +53,7 @@ func (h *Handler) runBook(ctx context.Context, bookID, ivID string, music bool) 
 	// Stage 2 — illustrate with T7's judge-and-persist loop. Pages are
 	// approved (and persisted) inside Illustrate; each approval reaches
 	// the broker as page_approved through the progress bridge.
+	h.enterStage(bookID, StageIllustrating)
 	bridge := newApprovalBridge(ctx, h, bookID)
 	writer := illustrate.NewBookWriter(h.cfg.DB, h.cfg.Blobs, bookID)
 	if _, err := illustrate.Illustrate(ctx, illustrate.Config{
@@ -68,19 +70,36 @@ func (h *Handler) runBook(ctx context.Context, bookID, ivID string, music bool) 
 		// the race must never silently lose a page.
 		return "", "", err
 	}
+	return h.finishBook(ctx, bookID, st, opts)
+}
+
+// finishBook runs the last three stages over a story whose pages are
+// already structured and illustrated: narration, the printable PDF, and the
+// film. It is the second half of runBook, and it is also the whole of
+// Complete — a book whose art is already paid for and whose sound went
+// missing needs exactly these three stages and none of the two before them.
+func (h *Handler) finishBook(ctx context.Context, bookID string, st story.Story, opts runOptions) (pdfID, videoID string, err error) {
 	// Stage 3 — narrate: one persisted clip per page, in page order.
 	// Narration NEVER fails the run (§T10f/§T10g): whatever narration does
-	// — a 503, a poll deadline, a malformed envelope, a total outage — the
-	// pages that spoke keep their voices, the pages that did not degrade to
-	// the captioned-silent tier, narration_unavailable is published once,
-	// and the run carries on to the PDF and the film so book_ready still
-	// carries both a pdf_url and a video_url. By this point the structure
-	// and every illustration are already paid for; a voice is not worth
-	// discarding them over. Only a cancelled context ends the run here.
+	// — a 503, a per-minute cap, a poll deadline, a malformed envelope, a
+	// total outage — the pages that spoke keep their voices, the pages that
+	// did not degrade to the captioned-silent tier, narration_unavailable is
+	// published once, and the run carries on to the PDF and the film so
+	// book_ready still carries both a pdf_url and a video_url. By this point
+	// the structure and every illustration are already paid for; a voice is
+	// not worth discarding them over. Only a cancelled context ends the run
+	// here. A cap is waited out before any of that applies — see
+	// audio/throttle.go.
+	h.enterStage(bookID, StageNarrating)
 	clips, err := audio.NarrateBook(ctx, audio.Config{
 		TTS:   h.cfg.TTS,
 		DB:    h.cfg.DB,
 		Blobs: h.cfg.Blobs,
+		// The cloned voice the adult's sample earned, when there is one.
+		// Empty is audio.DefaultVoice — the library narrator — which is
+		// also what a refused or skipped clone leaves here.
+		Voice:    opts.VoiceID,
+		Throttle: h.cfg.Throttle,
 	}, bookID, st.Pages)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -91,6 +110,7 @@ func (h *Handler) runBook(ctx context.Context, bookID, ivID string, music bool) 
 	}
 
 	// Stage 4 — PDF: always rendered and attached to the book.
+	h.enterStage(bookID, StageBinding)
 	pdfID, err = h.renderPDF(ctx, bookID, st)
 	if err != nil {
 		return "", "", err
@@ -98,7 +118,8 @@ func (h *Handler) runBook(ctx context.Context, bookID, ivID string, music bool) 
 
 	// Stage 5 — Film: always rendered (with narration when clips exist,
 	// captioned-silent otherwise).
-	videoID, err = h.renderFilm(ctx, bookID, st, clips, music)
+	h.enterStage(bookID, StageFilming)
+	videoID, err = h.renderFilm(ctx, bookID, st, clips, opts.Music)
 	if err != nil {
 		return "", "", err
 	}
@@ -398,7 +419,7 @@ func (h *Handler) renderFilm(ctx context.Context, bookID string, st story.Story,
 // malformed envelope, a non-2xx on the bed's storage URL, a broken mix
 // pass — may bin a book that is already complete and already paid for.
 func (h *Handler) mixFilm(ctx context.Context, filmPath string, total time.Duration) (string, error) {
-	bed, err := audio.GenerateMusicBed(ctx, audio.MusicConfig{Music: h.cfg.Music})
+	bed, err := audio.GenerateMusicBed(ctx, audio.MusicConfig{Music: h.cfg.Music, Throttle: h.cfg.Throttle})
 	if err != nil {
 		return "", err
 	}

@@ -29,14 +29,17 @@
 // is the book's topic, not the interview's (which carries turns and
 // ends at "ended") and not the job's:
 //
+//	event: stage                 → {"stage":"narrating"}
 //	event: page_approved         → {"n":3,"image_url":"/media/<id>"}
 //	event: narration_unavailable → {}
 //	event: book_ready            → {"pdf_url":"/media/<id>","video_url":"/media/<id>"}
 //	event: failed                → {}
 
-// page_approved fires the moment a page's illustration is approved and
-// persisted (the count screen 5's race reads into --done — PLAN.md
-// §T9a); book_ready fires once the run's finished artifacts are in
+// stage fires as the run enters each of the five stages below, and is
+// what lets screen 5 show a progress reading through the four minutes
+// after the last page is drawn; page_approved fires the moment a page's
+// illustration is approved and persisted (the count screen 5's race
+// reads into --done — PLAN.md §T9a); book_ready fires once the run's finished artifacts are in
 // place: the PDF always, and the film always too — with narration when
 // clips exist, captioned-silent when a transient narration outage made
 // the run publish narration_unavailable (§T10g: the outage costs the
@@ -197,6 +200,47 @@ const (
 	GenerationUnknown GenerationStatus = "unknown"
 )
 
+// Stage names which part of the pipeline a run is in. It exists because
+// page_approved alone cannot say how far along a book is: the eight
+// approvals all land in stage two, and the four or five minutes after the
+// last one — narration, the PDF, the film — carried no signal at all, so
+// screen 5 sat on 8/8 with nothing moving while the run was still working
+// (Live bug report 2). Each stage is published as its own SSE event the
+// moment the run enters it:
+//
+//	event: stage → {"stage":"narrating"}
+//
+// The names are machine classes, in pipeline order. What a child is told
+// they mean is the browser's to decide, the same way failed {} carries no
+// prose.
+type Stage string
+
+const (
+	// StageStructuring is stage 1: the transcript becoming a story.
+	StageStructuring Stage = "structuring"
+	// StageIllustrating is stage 2, the only stage with per-page progress:
+	// every page_approved event belongs to it.
+	StageIllustrating Stage = "illustrating"
+	// StageNarrating is stage 3: one speech clip per page.
+	StageNarrating Stage = "narrating"
+	// StageBinding is stage 4: the printable PDF.
+	StageBinding Stage = "binding"
+	// StageFilming is stage 5: the film, and the music bed under it.
+	StageFilming Stage = "filming"
+)
+
+// Stages lists every stage in pipeline order. A client that turns stages
+// into a percentage needs the order, and duplicating it in the browser is
+// how the two drift apart.
+var Stages = []Stage{StageStructuring, StageIllustrating, StageNarrating, StageBinding, StageFilming}
+
+// stageEvent is the payload of the stage event and of CatchUp's Stage
+// field: one machine class, no prose, like every other event this package
+// publishes.
+type stageEvent struct {
+	Stage Stage `json:"stage"`
+}
+
 // ApprovedPage is one illustration approved during the latest generation run.
 // Its URL is the same value emitted in that run's page_approved SSE event.
 type ApprovedPage struct {
@@ -212,6 +256,11 @@ type ApprovedPage struct {
 type CatchUp struct {
 	Status   GenerationStatus `json:"status"`
 	Approved []ApprovedPage   `json:"approved"`
+	// Stage is the last stage the latest run entered, empty before it
+	// enters its first. A reload mid-narration recovers the progress
+	// reading from here; without it the page would fall back to the eight
+	// approvals and show a run four minutes from done as barely started.
+	Stage Stage `json:"stage,omitempty"`
 }
 
 // failedData is the failed event's payload: {} — no code, no prose
@@ -362,6 +411,13 @@ type Config struct {
 	// (ffmpeg on PATH, 0.15 gain, 2 s end fade, exec runner); tests
 	// inject a scripted Runner so the mix step runs without ffmpeg.
 	MusicMix audio.MixConfig
+	// Throttle paces the retry the narration and music calls get when
+	// GMI says they are over its per-minute cap. Both stages are asked
+	// for after every image is paid for and both degrade to silence,
+	// so both wait rather than surrender the sound of the book
+	// (audio/throttle.go). The zero value is audio's default; tests
+	// shrink the wait so the degrade paths stay quick.
+	Throttle audio.ThrottleConfig
 	// Broker carries the book-topic events and serves the SSE route.
 	Broker broadcaster
 	// Jobs runs the pipeline off the request path.
@@ -400,6 +456,7 @@ type Handler struct {
 	mu        sync.Mutex
 	runs      map[string]string
 	approvals map[string]map[int]string
+	stages    map[string]Stage
 }
 
 // New returns a Handler with the given dependencies. It returns an
@@ -421,12 +478,27 @@ func New(cfg Config) (*Handler, error) {
 		log:       cfg.Log,
 		runs:      make(map[string]string),
 		approvals: make(map[string]map[int]string),
+		stages:    make(map[string]Stage),
 	}, nil
 }
 
 // generateRequest carries the optional parameters of POST /interviews/{id}/generate.
 type generateRequest struct {
 	Music *bool `json:"music"`
+	// VoiceID is the cloned voice POST /voice-sample verified for this
+	// family, echoed back by the browser. Empty — and anything that is not
+	// shaped like a voice identity — narrates in audio.DefaultVoice.
+	VoiceID string `json:"voice_id"`
+}
+
+// runOptions are the choices the adult makes on the voice step, carried
+// together through the run so a new one does not widen four signatures.
+// The zero value is the plain book: library narrator, no music.
+type runOptions struct {
+	// Music asks the film stage for a background bed.
+	Music bool
+	// VoiceID narrates in a cloned voice. Empty means audio.DefaultVoice.
+	VoiceID string
 }
 
 // Generate handles POST /interviews/{id}/generate: it validates the
@@ -435,14 +507,23 @@ type generateRequest struct {
 // and returns the job id plus the book topic and events URL at once.
 func (h *Handler) Generate(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	music := true
+	opts := runOptions{Music: true}
 	if r.Body != nil {
 		var req generateRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err == nil && req.Music != nil {
-			music = *req.Music
+		if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
+			if req.Music != nil {
+				opts.Music = *req.Music
+			}
+			// The voice id comes from an untrusted client and is forwarded
+			// to the provider, so a value that is not shaped like a voice
+			// identity is dropped rather than refused: the book is narrated
+			// by the library voice, which is what an absent one does too.
+			if audio.ValidVoiceID(req.VoiceID) {
+				opts.VoiceID = req.VoiceID
+			}
 		}
 	}
-	jobID, bookID, err := h.startRun(r.Context(), id, music)
+	jobID, bookID, err := h.startRun(r.Context(), id, opts)
 	if err != nil {
 		h.writeError(w, err)
 		return
@@ -477,7 +558,7 @@ func (h *Handler) Events(w http.ResponseWriter, r *http.Request) {
 // startRun validates and starts one run. It holds h.mu across the
 // check-and-start, so two concurrent POSTs cannot both pass the
 // double-fire refusal.
-func (h *Handler) startRun(ctx context.Context, id string, music bool) (jobID, bookID string, err error) {
+func (h *Handler) startRun(ctx context.Context, id string, opts runOptions) (jobID, bookID string, err error) {
 	iv, err := h.cfg.DB.Interview(ctx, id)
 	if err != nil {
 		return "", "", fmt.Errorf("bookgen: generate %s: %w", id, err)
@@ -501,10 +582,15 @@ func (h *Handler) startRun(ctx context.Context, id string, music bool) (jobID, b
 	// Reset before Start: the job may publish its first page before Start
 	// returns its id, and a retry must never claim the prior run's pages.
 	previousApprovals := h.approvals[bookID]
+	previousStage := h.stages[bookID]
 	h.approvals[bookID] = make(map[int]string)
-	jobID, err = h.cfg.Jobs.Start(ctx, h.generateJob(bookID, id, music))
+	delete(h.stages, bookID)
+	jobID, err = h.cfg.Jobs.Start(ctx, h.generateJob(bookID, id, opts))
 	if err != nil {
 		h.approvals[bookID] = previousApprovals
+		if previousStage != "" {
+			h.stages[bookID] = previousStage
+		}
 		return "", "", fmt.Errorf("bookgen: generate %s: %w", id, err)
 	}
 	h.runs[bookID] = jobID
@@ -518,6 +604,7 @@ func (h *Handler) CatchUp(bookID string) CatchUp {
 	h.mu.Lock()
 	jobID, known := h.runs[bookID]
 	approved := h.approvals[bookID]
+	stage := h.stages[bookID]
 	pages := make([]ApprovedPage, 0, len(approved))
 	for n, imageURL := range approved {
 		pages = append(pages, ApprovedPage{N: n, ImageURL: imageURL})
@@ -526,22 +613,42 @@ func (h *Handler) CatchUp(bookID string) CatchUp {
 
 	slices.SortFunc(pages, func(a, b ApprovedPage) int { return a.N - b.N })
 	if !known {
-		return CatchUp{Status: GenerationNotStarted, Approved: pages}
+		return CatchUp{Status: GenerationNotStarted, Approved: pages, Stage: stage}
 	}
 	result, err := h.cfg.Jobs.Result(jobID)
 	if err != nil {
-		return CatchUp{Status: GenerationUnknown, Approved: pages}
+		return CatchUp{Status: GenerationUnknown, Approved: pages, Stage: stage}
 	}
 	switch result.Status {
 	case job.StatusRunning:
-		return CatchUp{Status: GenerationRunning, Approved: pages}
+		return CatchUp{Status: GenerationRunning, Approved: pages, Stage: stage}
 	case job.StatusDone:
-		return CatchUp{Status: GenerationReady, Approved: pages}
+		return CatchUp{Status: GenerationReady, Approved: pages, Stage: stage}
 	case job.StatusError, job.StatusCancelled:
-		return CatchUp{Status: GenerationFailed, Approved: pages}
+		return CatchUp{Status: GenerationFailed, Approved: pages, Stage: stage}
 	default:
-		return CatchUp{Status: GenerationUnknown, Approved: pages}
+		return CatchUp{Status: GenerationUnknown, Approved: pages, Stage: stage}
 	}
+}
+
+// enterStage records that the run for bookID has entered stage and
+// publishes it. The record is written BEFORE the publish for the same
+// reason recordApproval's is: a client that reads its catch-up state
+// while the event is in flight must never see a stage older than the one
+// already on the wire.
+func (h *Handler) enterStage(bookID string, stage Stage) {
+	h.mu.Lock()
+	h.stages[bookID] = stage
+	h.mu.Unlock()
+	payload, err := json.Marshal(stageEvent{Stage: stage})
+	if err != nil {
+		// A two-field struct of constants cannot fail to marshal; if it
+		// somehow does, the stage is still recorded for the catch-up read
+		// and the run carries on. A progress reading is not worth a book.
+		h.log.Warn("bookgen: could not encode the stage event", "book", bookID, "stage", stage, "err", err)
+		return
+	}
+	h.cfg.Broker.Publish(Topic(bookID), stream.Event{Name: "stage", Data: string(payload)})
 }
 
 // recordApproval records a page_approved event for C4 before it is published.
@@ -577,7 +684,7 @@ func eventsPath(id string) string {
 // published: exactly once per run, on every path — a plain failure, a
 // cancelled context, and a panic (which is re-raised for job.call's
 // panic boundary to convert into the ErrPanic terminal).
-func (h *Handler) generateJob(bookID, ivID string, music bool) job.Func {
+func (h *Handler) generateJob(bookID, ivID string, opts runOptions) job.Func {
 	return func(ctx context.Context, _ func(string)) (data []byte, err error) {
 		topic := Topic(bookID)
 		var once sync.Once
@@ -606,7 +713,7 @@ func (h *Handler) generateJob(bookID, ivID string, music bool) job.Func {
 				publish("failed", failedData)
 			}
 		}()
-		pdfID, videoID, err := h.runBook(ctx, bookID, ivID, music)
+		pdfID, videoID, err := h.runBook(ctx, bookID, ivID, opts)
 		if err != nil {
 			return nil, err
 		}
