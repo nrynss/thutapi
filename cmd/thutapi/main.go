@@ -99,6 +99,17 @@ func (c gmiVoiceCloner) CloneVoice(ctx context.Context, request audio.VoiceClone
 	return audio.DecodeVoiceCloneResponse(raw)
 }
 
+// completeThrottle is the retry budget for this process: the audio package
+// default when this process is serving, and a deliberately patient one when
+// it was started to repair books. The patient budget spends up to about
+// seven minutes on one page before giving it up as silent.
+func completeThrottle(cfg config) audio.ThrottleConfig {
+	if cfg.completeBook == "" {
+		return audio.ThrottleConfig{}
+	}
+	return audio.ThrottleConfig{Attempts: 8, Backoff: 30 * time.Second}
+}
+
 // completeBooks runs bookgen.Complete over one book id, or over every book
 // with no film when the id is "all", and reports what each one ended with.
 // One book's failure does not stop the rest: the point of the command is to
@@ -632,6 +643,15 @@ func run(log *slog.Logger, args []string, sigs <-chan os.Signal) error {
 		Video:    bookgen.NewFFmpegRenderer(bookvideo.Config{}),
 		Film:     blobs,
 		Log:      log,
+		// A repair waits far longer on a throttled or capacity-exhausted
+		// provider than a live run does, because nobody is watching it. A
+		// child on the wait screen is: the live default keeps that wait
+		// bounded and degrades to a captioned-silent page rather than
+		// stretching six minutes into fifteen. On 2026-09-06 the speech
+		// model answered "Upstream capacity temporarily exhausted" for
+		// every page for twenty minutes straight, which the live budget
+		// cannot ride out and an unattended repair can.
+		Throttle: completeThrottle(cfg),
 	})
 	if err != nil {
 		return fmt.Errorf("build generation handler: %w", err)

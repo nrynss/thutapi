@@ -1395,3 +1395,118 @@ func TestStreakRollsBackWithTheAnswer(t *testing.T) {
 		waitTranscriptTurn(t, h, res.ID, 3)
 	})
 }
+
+// TestRepeatedAnswerToARepeatedQuestionKeepsTheInterviewOpen is the live
+// failure of 2026-09-06: the model asked the same question twice, the child
+// answered it the same way twice — the only sensible thing to do — and the
+// repeat rule read that as a child who had stopped trying and ended the
+// interview on the second exchange.
+func TestRepeatedAnswerToARepeatedQuestionKeepsTheInterviewOpen(t *testing.T) {
+	const repeatedQuestion = "What is your hero called?"
+	h, _, _, broker := newHarness(t, []string{
+		repeatedQuestion + "\n[[filled:]]",
+		repeatedQuestion + "\n[[filled:]]",
+		"What colour is Monu's cape?\n[[filled:hero]]",
+	})
+	srv := serve(t, muxFor(t, h))
+
+	_, body := postJSON(t, srv.URL+"/interviews", nil)
+	id := body["id"].(string)
+	waitTranscriptTurn(t, h, id, 1)
+	s := sub(t, broker, id)
+
+	code, body := postJSON(t, srv.URL+"/interviews/"+id+"/answers", map[string]string{"text": "Monu"})
+	if code != 202 || body["status"] != statusOpen {
+		t.Fatalf("answer 1 = %d %v, want 202 %q", code, body, statusOpen)
+	}
+	waitEvent(t, s, "question")
+
+	// The model has now asked the same thing twice. Answering it the same
+	// way is a correct answer given twice, not a stall.
+	code, body = postJSON(t, srv.URL+"/interviews/"+id+"/answers", map[string]string{"text": "Monu"})
+	if code != 202 || body["status"] != statusOpen {
+		t.Fatalf("answer 2 = %d %v, want 202 %q (a repeated question earns a repeated answer)", code, body, statusOpen)
+	}
+	if got := waitEvent(t, s, "question"); got["text"] != "What colour is Monu's cape?" {
+		t.Fatalf("question = %v, want the interview to have carried on", got["text"])
+	}
+}
+
+// TestRepeatedAnswerToANewQuestionStillEnds keeps the other half of the
+// rule honest: when the question DID move on, the same one-word answer
+// twice is still no progress and still ends the interview.
+func TestRepeatedAnswerToANewQuestionStillEnds(t *testing.T) {
+	h, _, _, broker := newHarness(t, []string{
+		"What is your hero called?\n[[filled:]]",
+		"What colour is the dragon?\n[[filled:]]",
+		"That's a lovely story. Let's make your book.\n[[filled:hero; end]]",
+	})
+	srv := serve(t, muxFor(t, h))
+
+	_, body := postJSON(t, srv.URL+"/interviews", nil)
+	id := body["id"].(string)
+	waitTranscriptTurn(t, h, id, 1)
+	s := sub(t, broker, id)
+
+	code, body := postJSON(t, srv.URL+"/interviews/"+id+"/answers", map[string]string{"text": "Monu"})
+	if code != 202 || body["status"] != statusOpen {
+		t.Fatalf("answer 1 = %d %v, want 202 %q", code, body, statusOpen)
+	}
+	waitEvent(t, s, "question")
+
+	code, body = postJSON(t, srv.URL+"/interviews/"+id+"/answers", map[string]string{"text": "Monu"})
+	if code != 202 || body["status"] != statusEnding {
+		t.Fatalf("answer 2 = %d %v, want 202 %q (the same answer to a NEW question is no progress)", code, body, statusEnding)
+	}
+	if got := waitEvent(t, s, "ended"); got["reason"] != ReasonStall {
+		t.Fatalf("ended reason = %v, want %q", got["reason"], ReasonStall)
+	}
+}
+
+// TestGoodbyeIsNeverAQuestion is the other half of the same live failure.
+// The end decision here is the SERVER's — two stalls — and the model
+// answers the goodbye directive with one more question anyway. Publishing
+// that as the closing turn is what put "Cool! Is Monu a boy or a girl?"
+// above a lone "Make my book" door, with the answer box gone.
+func TestGoodbyeIsNeverAQuestion(t *testing.T) {
+	h, _, _, broker := newHarness(t, []string{
+		"What is your hero called?\n[[filled:]]",
+		"Would you like a dragon or a dog?\n[[chips:dragon,dog]]",
+		"Cool! Is Monu a boy or a girl?\n[[filled:hero]]",
+	})
+	srv := serve(t, muxFor(t, h))
+
+	_, body := postJSON(t, srv.URL+"/interviews", nil)
+	id := body["id"].(string)
+	waitTranscriptTurn(t, h, id, 1)
+	s := sub(t, broker, id)
+
+	code, _ := postJSON(t, srv.URL+"/interviews/"+id+"/answers", map[string]string{"text": "i dunno"})
+	if code != 202 {
+		t.Fatalf("first stall = %d, want 202", code)
+	}
+	waitEvent(t, s, "question")
+
+	code, body = postJSON(t, srv.URL+"/interviews/"+id+"/answers", map[string]string{"text": "idk"})
+	if code != 202 || body["status"] != statusEnding {
+		t.Fatalf("second stall = %d %v, want 202 %q", code, body, statusEnding)
+	}
+	ended := waitEvent(t, s, "ended")
+	if got, _ := ended["text"].(string); strings.Contains(got, "?") {
+		t.Fatalf("ended text = %q, want a closing line rather than a question the child cannot answer", got)
+	}
+	if ended["text"] != fallbackGoodbye {
+		t.Fatalf("ended text = %v, want the warm fallback goodbye", ended["text"])
+	}
+
+	// And the transcript's closing turn carries the same words, so a reload
+	// recovers a finished interview rather than an unanswerable question.
+	tr, err := h.transcript(t.Context(), id)
+	if err != nil {
+		t.Fatalf("transcript: %v", err)
+	}
+	last := tr.Turns[len(tr.Turns)-1]
+	if last.Role != RoleClosing || last.Text != fallbackGoodbye {
+		t.Fatalf("closing turn = %+v, want the fallback goodbye", last)
+	}
+}

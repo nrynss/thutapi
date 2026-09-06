@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"thutapi/internal/store"
 )
 
 // Interview lifecycle states surfaced in HTTP bodies. The SSE "ended"
@@ -147,6 +149,27 @@ func (h *Handler) startWithByline(ctx context.Context, byline string) (startResp
 	}, nil
 }
 
+// askedTheSameQuestionTwice reports whether the interviewer's last two
+// questions were the same. turns is the transcript as it stands BEFORE the
+// answer being judged is appended, so its last turn is the question that
+// answer replies to and the one two questions back sits two turns earlier.
+//
+// It exists because the repeat rule reads a repeated answer as a child who
+// has stopped trying. That is only true when the child was asked something
+// new. When the model asks "what is your name?" twice — which it does — the
+// child types the same name twice, which is not a stall but a correct
+// answer given twice, and ending the interview for it is the defect this
+// guards.
+func askedTheSameQuestionTwice(turns []store.Turn) bool {
+	var questions []string
+	for i := len(turns) - 1; i >= 0 && len(questions) < 2; i-- {
+		if turns[i].Role == RoleInterviewer {
+			questions = append(questions, normalizeChip(turns[i].Text))
+		}
+	}
+	return len(questions) == 2 && questions[0] != "" && questions[0] == questions[1]
+}
+
 // answer runs the answer path: validate, detect stalls against the
 // offered chips, persist the child's turn, and launch the question or
 // goodbye turn. The store write happens BEFORE the turn starts, so a
@@ -185,7 +208,12 @@ func (h *Handler) answer(ctx context.Context, id, answer string) (answerResponse
 	low := lowEffort(answer)
 	norm := normalizeChip(answer)
 	stalled := !chip && stallAnswer(answer)
-	repeated := low && !chip && norm != "" && norm == s.lastAnswer
+	// A repeated answer is only no-progress when the QUESTION moved on. When
+	// the interviewer asks the same thing twice — which it does — answering
+	// it the same way twice is the correct thing for a child to do, not a
+	// stall, and ending the interview for it is how a real session died on
+	// 2026-09-06 after two exchanges. See askedTheSameQuestionTwice.
+	repeated := low && !chip && norm != "" && norm == s.lastAnswer && !askedTheSameQuestionTwice(iv.Turns)
 	streak0, stallStreak0, lastAnswer0 := s.streak, s.stallStreak, s.lastAnswer
 	if low && !chip {
 		s.streak++

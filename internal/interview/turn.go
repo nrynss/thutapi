@@ -253,7 +253,16 @@ func (h *Handler) questionTurn(ctx context.Context, s *session, iv store.Intervi
 // s.mu.
 func (h *Handler) closeTurn(ctx context.Context, s *session, iv store.Interview, rep reply, reason string) {
 	text := rep.Text
-	if text == "" {
+	// A goodbye is never a question. The end decision is often the SERVER's
+	// — the stall rule, the turn limit — and the model does not always take
+	// the hint: asked to say goodbye, it asks one more question instead.
+	// Publishing that as the closing turn hands the child a question with the
+	// answer box gone and a single "Make my book" door: no way to answer it,
+	// and no way to tell a finished interview from a broken one. Reported
+	// live 2026-09-06, as "Cool! Is Monu a boy or a girl?" sitting above
+	// "Make my book". The warm fallback is always a true closing line, so it
+	// is what a question-shaped goodbye becomes.
+	if text == "" || strings.Contains(text, "?") {
 		text = fallbackGoodbye
 	}
 	iv.Turns = append(iv.Turns, store.Turn{Role: RoleClosing, Text: text})
