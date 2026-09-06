@@ -188,3 +188,62 @@ type emotionEchoRecord struct {
 	Status  string             `json:"status"`
 	Payload emotionEchoPayload `json:"payload"`
 }
+
+// TestLiveAudioModelsAreAnswering asks each audio model for the smallest
+// thing it can make and reports which sentinel came back. It exists to
+// answer one operator question in about a minute: when a book comes out
+// silent and without music, is that this app or is it GMI?
+//
+// Both models are free, so this is safe to run whenever the question comes
+// up. It never fails on a provider outage — an outage is the ANSWER, not a
+// broken test — so read the log lines, not the pass.
+//
+// Recorded 2026-09-06, with every book on the deployment coming out silent:
+//
+//	speech: TRANSIENT/CAPACITY — {"error":"Upstream capacity temporarily
+//	        exhausted; please retry later"}
+//	music:  TRANSIENT/CAPACITY — Post ".../requests": context deadline
+//	        exceeded
+//
+// Both down, in different ways, and neither of them ours.
+func TestLiveAudioModelsAreAnswering(t *testing.T) {
+	if os.Getenv("GMI_API_KEY") == "" {
+		t.Skip("no GMI_API_KEY")
+	}
+	client := NewWithPoll(PollConfig{Timeout: 90 * time.Second})
+
+	t.Run("speech", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Second)
+		defer cancel()
+		raw, err := client.SynthesizeSpeech(ctx, "A little dragon.", "", "English_expressive_narrator", "")
+		reportModel(t, "speech", raw, err)
+	})
+
+	t.Run("music", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Second)
+		defer cancel()
+		raw, err := client.SynthesizeMusic(ctx, "La la la / Doo doo doo / Mm mm mm", "wordless vocalise, gentle ambient music bed", "")
+		reportModel(t, "music", raw, err)
+	})
+}
+
+// reportModel names the condition a probe met, by sentinel rather than by
+// message: a rate limit clears on its own and a capacity outage does not,
+// and an operator deciding whether to re-run a repair needs to know which.
+func reportModel(t *testing.T, name string, raw []byte, err error) {
+	t.Helper()
+	switch {
+	case err == nil:
+		body := string(raw)
+		if len(body) > 300 {
+			body = body[:300] + "…"
+		}
+		t.Logf("%s: OK — %s", name, body)
+	case errors.Is(err, gmi.ErrRateLimited):
+		t.Logf("%s: RATE LIMITED (clears on its own; re-run the repair shortly) — %v", name, err)
+	case errors.Is(err, gmi.ErrTransient):
+		t.Logf("%s: TRANSIENT/CAPACITY (does not clear on its own; re-run later) — %v", name, err)
+	default:
+		t.Logf("%s: OTHER — %v", name, err)
+	}
+}
