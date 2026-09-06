@@ -3080,4 +3080,33 @@ Reported from real-device generation run for book `58bc86ae81f116dc27979683722d8
   - While narration is in progress, the UI has no intermediate state or progress indicator ("The animals are giving your characters voices"), leading the user to think the illustration stage is frozen.
   - 10 minutes is excessive for a user to wait if upstream TTS stalls. A progress event or shorter per-clip timeout with early degradation would improve perceived responsiveness.
 
+### Live bug report 3 — 2026-09-06
+
+Reported from real-device generation run for book `58bc86ae81f116dc27979683722d87a8`.
+
+1. **Music generation failed upstream with RPM rate-limit and lacks user opt-in/opt-out:**
+   - **Symptom:** The generated film had spoken narration on pages 5–8, but no background music played. Furthermore, the user had no option to choose whether music was included.
+   - **Investigation:**
+     - In `internal/bookgen/pipeline.go` (`renderFilm` -> `mixFilm`), Thutapi unconditionally invokes `audio.GenerateMusicBed` calling MiniMax `minimax-music-3.0` whenever `h.cfg.Music != nil`.
+     - MiniMax returned `Music generation failed: rate limit exceeded(RPM). Please try again`.
+     - Per T12 degradation rules, the failure fell back to the unmixed, speech-only film so the book could still be published.
+     - There is no mechanism for the user or parent to select whether they want background music or prefer a quiet/speech-only book, which causes unnecessary upstream rate-limit contention and adds latency to every generation.
+   - **Fix direction:**
+     - Add a background music selection toggle on Screen 4 / Voice step (`static/app.js`): *"Include background music bed"* (checkbox/switch).
+     - Update `POST /interviews/{id}/generate` to accept an optional `{ "music": bool }` payload.
+     - In `internal/bookgen/pipeline.go`, skip `GenerateMusicBed` and `mixFilm` entirely when `music == false`.
+
+2. **No dynamic appearance of PDF download link on `/book/{id}` while running:**
+   - **Symptom:** When viewing the book page, there was no download link for the PDF until manually refreshing the browser.
+   - **Investigation:**
+     - `/book/{id}` is served via `internal/web/templates/book.html`.
+     - When opened while a book is in state `"running"` or prior to Stage 4 completion, `PDFURL` is empty, rendering:
+       `Your printable book will appear here when the pages are ready.`
+     - `/book/{id}` does not run `app.js` or subscribe to SSE events / poll `/book/{id}/state`.
+     - As a result, once the PDF is rendered, the page DOM remains static and does not reveal the download button without a manual browser refresh.
+   - **Fix direction:**
+     - Add a lightweight client script on `book.html` (or enhance `static/book/catchup.js`) when `data-book-state == "running"` to listen to the book's SSE stream (`/interviews/{id}/generate/events` or `/book/{id}/state` polling).
+     - When `book_ready` arrives or status transitions to `ready`, dynamically reveal the PDF and video download buttons (or trigger a refresh).
+
+
 
