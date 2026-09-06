@@ -218,8 +218,11 @@ func TestNarrate_MissingPageRowFailsLoudly(t *testing.T) {
 	if !errors.Is(err, store.ErrInvalid) {
 		t.Fatalf("err = %v, want errors.Is(.., store.ErrInvalid)", err)
 	}
-	if clips != nil {
-		t.Fatalf("clips = %v, want nil on failure", clips)
+	// The page failed, so its slot comes back unspoken rather than the
+	// whole run coming back empty (H3): the caller renders that page at
+	// the captioned-silent tier instead of discarding the book.
+	if len(clips) != 1 || clips[0].Spoken() {
+		t.Fatalf("clips = %v, want one unspoken clip", clips)
 	}
 	all, err := h.db.BookMedia(t.Context(), h.bookID)
 	if err != nil {
@@ -245,7 +248,10 @@ func TestNarrate_DownloadFailureFailsThePage(t *testing.T) {
 	if !errors.Is(err, ErrNoAudio) {
 		t.Fatalf("err = %v, want errors.Is(.., ErrNoAudio)", err)
 	}
-	if clips != nil {
-		t.Fatalf("clips = %v, want nil on failure", clips)
+	// The page failed, so its slot comes back unspoken rather than the
+	// whole run coming back empty (H3): the caller renders that page at
+	// the captioned-silent tier instead of discarding the book.
+	if len(clips) != 1 || clips[0].Spoken() {
+		t.Fatalf("clips = %v, want one unspoken clip", clips)
 	}
 }

@@ -357,10 +357,13 @@ func GenerateMusicBed(ctx context.Context, cfg MusicConfig) (Bed, error) {
 // The decode is keyed on the outcome alone — the payload beside it is
 // the request echoed verbatim, and a walker that took "the first thing
 // in the body that looks like media" is exactly how T6's round-1 H1
-// shipped. A body with no URL or no duration is a shape this package
-// does not recognise and fails loudly with ErrNoBed: the media client
-// returns every response raw and the terminal music record always
-// carries both (t12-music-record.json, t12-round1.md).
+// shipped. A body with no URL is a shape this package does not
+// recognise and fails loudly with ErrNoBed (the media client returns
+// every response raw, and the terminal music record always carries one
+// — t12-music-record.json, t12-round1.md).
+//
+// duration_ms is best-effort: an absent or non-positive value returns a
+// zero duration and no error, because nothing consumes it (see below).
 func decodeBedURL(raw []byte) (string, time.Duration, error) {
 	if len(raw) == 0 {
 		return "", 0, fmt.Errorf("%w: the response body was empty", ErrNoBed)
@@ -386,8 +389,14 @@ func decodeBedURL(raw []byte) (string, time.Duration, error) {
 	if !audioURL(u) {
 		return "", 0, fmt.Errorf("%w: no absolute http(s) bed URL in outcome: %s", ErrNoBed, excerpt(env.Outcome))
 	}
+	// A missing or non-positive duration_ms is reported as a zero Duration,
+	// NOT an error. Bed.Duration has no consumer: the mix loops the bed and
+	// anchors its fade to the RENDERER's total (MixBed's FilmDuration), and
+	// mixFilm reads only Bed.Audio. Failing here binned a finished book —
+	// PDF and film already rendered and paid for — over a field nothing
+	// reads.
 	if out.DurationMS <= 0 {
-		return "", 0, fmt.Errorf("%w: outcome.duration_ms is missing or not positive: %s", ErrNoBed, excerpt(env.Outcome))
+		return u, 0, nil
 	}
 	return u, time.Duration(out.DurationMS) * time.Millisecond, nil
 }

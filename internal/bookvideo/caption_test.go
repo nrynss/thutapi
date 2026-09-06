@@ -199,7 +199,7 @@ func TestGeometrySharedAcrossSegments(t *testing.T) {
 		img := tmp + "/p.jpg"
 		_ = os.WriteFile(img, []byte("x"), 0o600)
 		cfg := Config{Runner: runner, WorkDir: tmp, FontFile: img}
-		if err := BuildPageSegment(t.Context(), cfg, img, "words here", "", tmp+"/p.mp4"); err != nil {
+		if err := BuildPageSegment(t.Context(), cfg, img, "words here", "", 0, tmp+"/p.mp4"); err != nil {
 			t.Fatalf("page segment: %v", err)
 		}
 		page = strings.Join(runner.lastCall(), " ")

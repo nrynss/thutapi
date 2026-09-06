@@ -199,7 +199,8 @@ func TestBuildTitleCard_WithFontFile(t *testing.T) {
 
 // TestBuildPageSegment_ArgumentConstruction asserts page segment arguments
 // and geometry: 1080×1350 art over a 1080×270 --surface band with a caption
-// drawtext (textfile, text_align=C, --ink words), narrated with -shortest.
+// drawtext (textfile, text_align=C, --ink words), narrated and bounded by
+// the clip's Go-known -t (M1).
 func TestBuildPageSegment_ArgumentConstruction(t *testing.T) {
 	runner := &mockRunner{}
 	tmpDir := t.TempDir()
@@ -214,7 +215,7 @@ func TestBuildPageSegment_ArgumentConstruction(t *testing.T) {
 	_ = os.WriteFile(img, []byte("jpg"), 0o600) // test fixture
 	_ = os.WriteFile(aud, []byte("mp3"), 0o600) // test fixture
 
-	if err := BuildPageSegment(context.Background(), cfg, img, "Mira opens the garden gate.", aud, out); err != nil {
+	if err := BuildPageSegment(context.Background(), cfg, img, "Mira opens the garden gate.", aud, 2*time.Second, out); err != nil {
 		t.Fatalf("BuildPageSegment: %v", err)
 	}
 
@@ -239,7 +240,10 @@ func TestBuildPageSegment_ArgumentConstruction(t *testing.T) {
 		"-b:a 128k",
 		"-ar 44100",
 		"-ac 2",
-		"-shortest",
+		// M1: the narrated tier is bounded by an explicit -t of the
+		// clip's Go-known length, never -shortest — -shortest bounds the
+		// looped image at the encoder and overshoots.
+		"-t 2.000000",
 		"-movflags +faststart",
 		out,
 	}
@@ -248,6 +252,9 @@ func TestBuildPageSegment_ArgumentConstruction(t *testing.T) {
 		if !strings.Contains(joined, sub) {
 			t.Errorf("BuildPageSegment missing substring %q in command %s", sub, joined)
 		}
+	}
+	if strings.Contains(joined, "-shortest") {
+		t.Errorf("narrated page segment still uses -shortest; it must be bounded by -t: %s", joined)
 	}
 	if strings.Contains(joined, ":text=") && !strings.Contains(joined, "textfile=") {
 		t.Errorf("inline text= detected in page segment, must use textfile=: %s", joined)
@@ -292,7 +299,7 @@ func TestBuildPageSegment_SilentTier(t *testing.T) {
 
 	// Ten words → 5.000 s hold (10/2.0).
 	text := "one two three four five six seven eight nine ten"
-	if err := BuildPageSegment(context.Background(), cfg, img, text, "", out); err != nil {
+	if err := BuildPageSegment(context.Background(), cfg, img, text, "", 0, out); err != nil {
 		t.Fatalf("BuildPageSegment silent: %v", err)
 	}
 
@@ -344,7 +351,7 @@ func TestBuildPageSegment_SilentHoldClamps(t *testing.T) {
 
 	// One word → below the 4 s floor.
 	out := filepath.Join(tmpDir, "seg-floor.mp4")
-	if err := BuildPageSegment(context.Background(), cfg, img, "hello", "", out); err != nil {
+	if err := BuildPageSegment(context.Background(), cfg, img, "hello", "", 0, out); err != nil {
 		t.Fatalf("BuildPageSegment floor: %v", err)
 	}
 	if got := strings.Join(runner.lastCall(), " "); !strings.Contains(got, "-t 4.000") {
@@ -359,7 +366,7 @@ func TestBuildPageSegment_SilentHoldClamps(t *testing.T) {
 		"fortyone fortytwo fortythree fortyfour fortyfive fortysix fortyseven fortyeight fortynine fifty " +
 		"fiftyone fiftytwo fiftythree fiftyfour fiftyfive fiftysix fiftyseven fiftyeight fiftynine sixty")
 	out = filepath.Join(tmpDir, "seg-cap.mp4")
-	if err := BuildPageSegment(context.Background(), cfg, img, strings.Join(words, " "), "", out); err != nil {
+	if err := BuildPageSegment(context.Background(), cfg, img, strings.Join(words, " "), "", 0, out); err != nil {
 		t.Fatalf("BuildPageSegment ceiling: %v", err)
 	}
 	if got := strings.Join(runner.lastCall(), " "); !strings.Contains(got, "-t 14.000") {
@@ -529,14 +536,14 @@ func TestErrorSentinels(t *testing.T) {
 	}
 
 	// BuildPageSegment errors
-	if err := BuildPageSegment(context.Background(), cfg, "", "words", "aud.mp3", "out.mp4"); !errors.Is(err, ErrInvalidInput) {
+	if err := BuildPageSegment(context.Background(), cfg, "", "words", "aud.mp3", time.Second, "out.mp4"); !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput for empty image, got %v", err)
 	}
-	if err := BuildPageSegment(context.Background(), cfg, "img.jpg", "words", "aud.mp3", ""); !errors.Is(err, ErrInvalidInput) {
+	if err := BuildPageSegment(context.Background(), cfg, "img.jpg", "words", "aud.mp3", time.Second, ""); !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput for empty outPath, got %v", err)
 	}
 	// No audio is valid — silent tier (image + words only).
-	if err := BuildPageSegment(context.Background(), cfg, "img.jpg", "words", "", "out.mp4"); err != nil {
+	if err := BuildPageSegment(context.Background(), cfg, "img.jpg", "words", "", 0, "out.mp4"); err != nil {
 		t.Errorf("page segment without audio must be valid (silent tier), got %v", err)
 	}
 
@@ -650,7 +657,7 @@ func TestErrorSentinels(t *testing.T) {
 	// Runner failure in BuildPageSegment
 	failRunner := &mockRunner{err: errors.New("exit status 1")}
 	failCfg := Config{Runner: failRunner, WorkDir: tmpDir}
-	err := BuildPageSegment(context.Background(), failCfg, "img.jpg", "words", "aud.mp3", "out.mp4")
+	err := BuildPageSegment(context.Background(), failCfg, "img.jpg", "words", "aud.mp3", time.Second, "out.mp4")
 	if !errors.Is(err, ErrFFmpegFailed) {
 		t.Errorf("expected ErrFFmpegFailed on runner error, got %v", err)
 	}
@@ -1101,5 +1108,121 @@ func TestDockerfile_FFmpegPinnedByDigest(t *testing.T) {
 	want := "FROM mwader/static-ffmpeg:7.1@sha256:a8090df5f5608daef387e1b2e93b98aaacb4d92153ad904e7d715c725724fca4 AS ff"
 	if !strings.Contains(content, want) {
 		t.Errorf("Dockerfile does not contain expected pinned ffmpeg base image line:\nwant: %s", want)
+	}
+}
+
+// probeDurationSeconds reads a media file's container duration with
+// ffprobe. TESTS ONLY: production never probes a file (the runtime image
+// ships no ffprobe), which is exactly why the render total is arithmetic
+// — and exactly why that arithmetic needs a test that checks it against
+// reality.
+func probeDurationSeconds(t *testing.T, path string) float64 {
+	t.Helper()
+	out, err := exec.Command("ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path).Output()
+	if err != nil {
+		t.Fatalf("ffprobe %s: %v", path, err)
+	}
+	var secs float64
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(out)), "%g", &secs); err != nil {
+		t.Fatalf("parse ffprobe duration %q: %v", out, err)
+	}
+	return secs
+}
+
+// makeMP3Fixture writes an MP3 of about the requested length with real
+// ffmpeg and returns its path and its true container duration. Narration
+// arrives as MP3 in production, and the M1 defect below only appears with
+// a decoded audio input — a WAV of a tidy length does not show it.
+func makeMP3Fixture(t *testing.T, dir, name string, seconds float64) (string, time.Duration) {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	out, err := exec.Command("ffmpeg", "-v", "error",
+		"-f", "lavfi", "-i", fmt.Sprintf("sine=frequency=300:duration=%.6f", seconds),
+		"-c:a", "libmp3lame", "-b:a", "128k", "-ar", "44100", "-ac", "1",
+		"-y", path).CombinedOutput()
+	if err != nil {
+		t.Skipf("cannot build an mp3 fixture here: %v: %s", err, out)
+	}
+	return path, time.Duration(probeDurationSeconds(t, path) * float64(time.Second))
+}
+
+// TestRender_TotalMatchesTheMuxedFilm is M1's regression test: the total
+// Render computes in Go must be the length of the film that actually
+// lands on disk. It is the number the music mix anchors its end fade to
+// (audio.MixBed's FilmDuration), so when the arithmetic runs short the
+// bed fades out before the film ends.
+//
+// It ran short because the narrated tier was bounded with -shortest,
+// which bounds the LOOPED IMAGE at the encoder rather than at the clip.
+// For some clip lengths that overshoots badly and reproducibly — a
+// 10.495 s narration produced an 11.76 s segment on ffmpeg n9.0.1 here,
+// and a real 9-segment film measured 2.37 s longer than Go believed.
+// The narrated tier now carries an explicit -t of the clip's Go-known
+// length instead.
+//
+// The residual asserted below is NOT zero and is not meant to be. What
+// remains is the mp4 concat pass's own muxing overhead, measured at
+// 23.220 ms — exactly one AAC frame, 1024/44100 = 23.2199 ms — for the
+// WHOLE film, not per segment. It does not grow with the page count, and
+// it is not modelled in the returned total: a constant added to the
+// arithmetic would be a fudge factor pretending to a precision the
+// muxer does not offer. At ~0.07% of a film and 0.8% of DefaultBedFade,
+// the fade still reaches silence within one AAC frame of the end.
+func TestRender_TotalMatchesTheMuxedFilm(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not found in PATH")
+	}
+	if _, err := exec.LookPath("ffprobe"); err != nil {
+		t.Skip("ffprobe not found in PATH (test-only: production never probes)")
+	}
+
+	dir := t.TempDir()
+	// Deliberately awkward lengths: whole seconds do not show the defect.
+	clip1, dur1 := makeMP3Fixture(t, dir, "n1.mp3", 10.495438)
+	clip2, dur2 := makeMP3Fixture(t, dir, "n2.mp3", 7.291094)
+	clip3, dur3 := makeMP3Fixture(t, dir, "n3.mp3", 4.333111)
+
+	img := makeTestJPEG(1080, 1350)
+	outPath := filepath.Join(dir, "book.mp4")
+
+	in := Input{
+		Title:  "Mira and Bramble",
+		Byline: "Mira",
+		Pages: []PageInput{
+			{N: 1, ImageBytes: img, AudioPath: clip1, Duration: dur1, Text: "Mira opens the garden gate to start the morning adventure."},
+			{N: 2, ImageBytes: img, AudioPath: clip2, Duration: dur2, Text: "Bramble chases a yellow butterfly across the sunny green lawn."},
+			{N: 3, ImageBytes: img, AudioPath: clip3, Duration: dur3, Text: "They rest in the shade of the old apple tree together."},
+			// A silent page: the mixed-tier film is the real shape after
+			// H3, so the total has to be right across both tiers.
+			{N: 4, ImageBytes: img, Text: "The sun goes down and the garden grows quiet and sleepy."},
+		},
+		OutputPath: outPath,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
+	defer cancel()
+
+	total, err := Render(ctx, Config{}, in)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+
+	// The arithmetic is still pure Go and still deterministic.
+	want := DefaultTitleCardDuration + dur1 + dur2 + dur3 +
+		captionHold(in.Pages[3].Text) + DefaultEndCardDuration
+	if total != want {
+		t.Errorf("computed total = %v, want the segment arithmetic %v", total, want)
+	}
+
+	muxed := probeDurationSeconds(t, outPath)
+	delta := muxed - total.Seconds()
+	t.Logf("computed = %.6fs, muxed = %.6fs, delta = %+.6fs over 6 segments", total.Seconds(), muxed, delta)
+
+	// One AAC frame of concat overhead is 23.2 ms; 150 ms leaves room for
+	// that plus encoder variation across ffmpeg builds, while still
+	// catching the defect this pins (which was 1.1 s on ONE segment).
+	const tolerance = 150 * time.Millisecond
+	if d := time.Duration(delta * float64(time.Second)); d < -tolerance || d > tolerance {
+		t.Errorf("muxed film is %v from the computed total %v; the music fade anchors to the computed total, so it would land in the wrong place", d, total)
 	}
 }

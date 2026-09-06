@@ -199,14 +199,28 @@ func BuildTitleCard(ctx context.Context, cfg Config, imagePath, title, byline, o
 // art over a 270 px caption band on --surface carrying the page's own words.
 //
 // Audio tier (T10g): when audioPath is non-empty the narration drives the
-// segment exactly as before (-shortest against the clip, captions add no
-// duration). When it is empty the page is silent: a synthesized anullsrc
-// track holds the page for captionHold(text) — words/2.0 s, floor 4 s, cap
-// 14 s — so every tier still produces a concat-copyable aac 44100 stereo
-// segment.
-func BuildPageSegment(ctx context.Context, cfg Config, imagePath, text, audioPath, outPath string) error {
+// segment and hold is that clip's Go-known length (audio.Clip.Duration).
+// When it is empty the page is silent: a synthesized anullsrc track holds
+// the page for captionHold(text) — words/2.0 s, floor 4 s, cap 14 s — so
+// every tier still produces a concat-copyable aac 44100 stereo segment.
+//
+// The narrated tier is bounded by an explicit output "-t hold", NOT by
+// "-shortest" (M1). -shortest bounds a looped-image input at the encoder,
+// not at the clip, and for some clips it overshoots badly and
+// reproducibly: a 10.495 s narration came out as an 11.640 s segment on
+// ffmpeg n9.0.1, 1.145 s of held still frame the Go arithmetic could not
+// know about. Since the caller already knows the clip's exact length, the
+// segment is simply told it. This is what makes Render's computed total
+// agree with the muxed file without ever probing it.
+//
+// hold is required for the narrated tier and ignored for the silent tier,
+// whose length comes from its words.
+func BuildPageSegment(ctx context.Context, cfg Config, imagePath, text, audioPath string, hold time.Duration, outPath string) error {
 	if imagePath == "" || outPath == "" {
 		return fmt.Errorf("%w: page segment requires image and output paths", ErrInvalidInput)
+	}
+	if audioPath != "" && hold <= 0 {
+		return fmt.Errorf("%w: a narrated page segment needs its clip's Go-known duration to bound the segment", ErrInvalidInput)
 	}
 
 	resolved, err := resolveConfig(cfg)
@@ -243,11 +257,12 @@ func BuildPageSegment(ctx context.Context, cfg Config, imagePath, text, audioPat
 		"-i", imagePath,
 	}
 	if audioPath != "" {
-		// Narrated tier: the clip's length governs via -shortest.
+		// Narrated tier: the clip's Go-known length bounds the segment.
 		args = append(args, "-i", audioPath)
 	} else {
 		// Silent tier: anullsrc of the words-derived hold length; -shortest
-		// ends the looped image when the silence does.
+		// ends the looped image when the silence does. An anullsrc input
+		// carries its own exact -t, so this tier does not drift.
 		holdStr := fmt.Sprintf("%.3f", captionHold(text).Seconds())
 		args = append(args,
 			"-f", "lavfi",
@@ -264,7 +279,16 @@ func BuildPageSegment(ctx context.Context, cfg Config, imagePath, text, audioPat
 		"-b:a", "128k",
 		"-ar", "44100",
 		"-ac", "2",
-		"-shortest",
+	)
+	if audioPath != "" {
+		// See the doc comment: an explicit output -t, never -shortest, is
+		// what keeps a narrated segment's real length equal to the length
+		// Go computed for it.
+		args = append(args, "-t", fmt.Sprintf("%.6f", hold.Seconds()))
+	} else {
+		args = append(args, "-shortest")
+	}
+	args = append(args,
 		"-movflags", "+faststart",
 		"-y",
 		outPath,
@@ -416,6 +440,18 @@ func ConcatSegments(ctx context.Context, cfg Config, segmentPaths []string, titl
 // film (the runtime image ships no ffprobe — only /ffmpeg is copied
 // into it).
 //
+// Accuracy against the muxed file (M1). Every segment is bounded by the
+// exact hold above — the narrated tier by an explicit -t rather than
+// -shortest, which overshot a looped-image segment by up to ~1.2 s and
+// left a real 9-segment film 2.37 s longer than this arithmetic. What
+// remains is the concat pass's own overhead: the finished mp4 measures
+// about ONE AAC FRAME (1024/44100 = 23.2 ms) longer than this total,
+// for the whole film rather than per segment. That residual is
+// deliberately NOT added back here — it belongs to the muxer, not to
+// the film's content, and a constant bolted onto the arithmetic would
+// be a fudge factor. It is pinned by
+// TestRender_TotalMatchesTheMuxedFilm.
+//
 // A page whose narration has no Go-known duration (audio present but
 // PageInput.Duration <= 0) is refused loudly at validation: the total
 // would be uncomputable. The reverse — a Duration on a page with no
@@ -544,7 +580,7 @@ func Render(ctx context.Context, cfg Config, in Input) (time.Duration, error) {
 	for i := range in.Pages {
 		idx := i
 		g.Go(func() error {
-			return BuildPageSegment(gctx, resolved, materializedImages[idx], in.Pages[idx].Text, materializedAudios[idx], pageSegs[idx])
+			return BuildPageSegment(gctx, resolved, materializedImages[idx], in.Pages[idx].Text, materializedAudios[idx], in.Pages[idx].Duration, pageSegs[idx])
 		})
 	}
 

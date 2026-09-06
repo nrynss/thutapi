@@ -45,6 +45,38 @@ func (d *DB) CreateBook(ctx context.Context, title string) (Book, error) {
 	return b, nil
 }
 
+// CreateBookWithID is the caller-supplied-id variant of CreateBook,
+// mirroring the contract CreateMedia already offers ("the caller may
+// pre-set ID"). It exists so §T11's prewarm fixtures can restore a
+// finished book into a fresh data dir under the id it was published at
+// — a prewarmed book whose /book/{id} URL changed on every redeploy
+// would break every link a judge had already been given.
+//
+// ID and Title must not be empty. A zero CreatedAt is stamped now;
+// otherwise the supplied time is kept, truncated to the second like
+// every other store time. An id that already exists is ErrConflict.
+// Byline is written as supplied — a restored book keeps its byline
+// without a second UpdateBook round trip.
+func (d *DB) CreateBookWithID(ctx context.Context, b Book) (Book, error) {
+	if b.ID == "" {
+		return Book{}, fmt.Errorf("store: create book: %w: id must not be empty", ErrInvalid)
+	}
+	if b.Title == "" {
+		return Book{}, fmt.Errorf("store: create book: %w: title must not be empty", ErrInvalid)
+	}
+	if b.CreatedAt.IsZero() {
+		b.CreatedAt = time.Now()
+	}
+	b.CreatedAt = b.CreatedAt.UTC().Truncate(time.Second)
+	_, err := d.db.ExecContext(ctx,
+		`INSERT INTO books (id, title, byline, created_at) VALUES (?, ?, ?, ?)`,
+		b.ID, b.Title, b.Byline, b.CreatedAt.Unix())
+	if err != nil {
+		return Book{}, fmt.Errorf("store: create book %s: %w", b.ID, classifyConstraint(err))
+	}
+	return b, nil
+}
+
 // Book returns the book with the given id, or an error wrapping
 // ErrNotFound.
 func (d *DB) Book(ctx context.Context, id string) (Book, error) {

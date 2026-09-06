@@ -21,6 +21,7 @@ import (
 	"os/signal"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -29,11 +30,13 @@ import (
 	"thutapi/internal/bookgen"
 	"thutapi/internal/bookpdf"
 	"thutapi/internal/bookvideo"
+	"thutapi/internal/gate"
 	"thutapi/internal/gmi/media"
 	"thutapi/internal/gmi/text"
 	"thutapi/internal/interview"
 	"thutapi/internal/job"
 	"thutapi/internal/mediastore"
+	"thutapi/internal/prewarm"
 	"thutapi/internal/store"
 	"thutapi/internal/stream"
 	"thutapi/internal/web"
@@ -76,6 +79,10 @@ type config struct {
 	dataDir      string        // SQLite file + media blobs live here (T3)
 	publicOrigin string        // public HTTPS origin used for GMI source_audio (T13)
 	uploadToken  string        // bearer for the public T13 voice-sample route
+	gatePasscode string        // optional shared passcode for T11's gated routes
+	mediaMax     int64         // T11 retention: byte budget for generated media, 0 = unbounded
+	prewarmDir   string        // T11 prewarm: fixture directory, "" = <data dir>/prewarm
+	exportBook   string        // T11 prewarm: export this book as a fixture and exit
 }
 
 type gmiVoiceCloner struct {
@@ -112,6 +119,26 @@ func resolveDataDir() string {
 	return "data"
 }
 
+// resolveMediaMaxBytes is the MEDIA_MAX_BYTES resolution for T11's
+// retention sweep: an explicit byte budget wins, an unset or unparseable
+// value falls back to the package default, and an explicit 0 means
+// "no byte budget, sweep orphans only". The box has 23 GiB free and no
+// swap (PLAN.md §T11 item 4), so the default is deliberately far below it.
+func resolveMediaMaxBytes() int64 {
+	raw := strings.TrimSpace(os.Getenv("MEDIA_MAX_BYTES"))
+	if raw == "" {
+		return mediastore.DefaultMaxBytes
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || n < 0 {
+		return mediastore.DefaultMaxBytes
+	}
+	if n == 0 {
+		return mediastore.Unbounded
+	}
+	return n
+}
+
 // parseConfig reads environment only — no flags. It is the seam tests use so
 // they don't re-register flag entries across invocations.
 func parseConfig() config {
@@ -122,6 +149,9 @@ func parseConfig() config {
 		dataDir:      resolveDataDir(),
 		publicOrigin: os.Getenv("PUBLIC_ORIGIN"),
 		uploadToken:  os.Getenv("UPLOAD_TOKEN"),
+		gatePasscode: os.Getenv("GATE_PASSCODE"),
+		mediaMax:     resolveMediaMaxBytes(),
+		prewarmDir:   os.Getenv("PREWARM_DIR"),
 	}
 }
 
@@ -132,6 +162,8 @@ func parseFlags(args []string) (config, error) {
 	fs := flag.NewFlagSet("thutapi", flag.ContinueOnError)
 	fs.DurationVar(&cfg.timeout, "shutdown-timeout", cfg.timeout, "graceful shutdown deadline")
 	fs.StringVar(&cfg.dataDir, "data-dir", cfg.dataDir, "directory for the SQLite database and media blobs")
+	fs.StringVar(&cfg.prewarmDir, "prewarm-dir", cfg.prewarmDir, "directory of prewarm fixtures (default <data-dir>/prewarm)")
+	fs.StringVar(&cfg.exportBook, "prewarm-export", "", "export this book id as a prewarm fixture and exit")
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
 	}
@@ -166,9 +198,58 @@ type server struct {
 	download     *web.DownloadHandler
 }
 
-// newServer wires the routes. media, voiceSamples, interviews and generate
-// must be non-nil: they are live handlers, not optional dependencies.
-func newServer(log *slog.Logger, media *mediastore.Store, voiceSamples *audio.VoiceSampleHandler, interviews *interview.Handler, generate *bookgen.Handler, db *store.DB) *server {
+// gateRules are T11's per-route budgets. They are package-level so the
+// route wrap and any test read exactly one set of numbers.
+//
+// The arithmetic is spend, not traffic. A full generation is ~$0.35 and
+// six minutes (PLAN.md §T11 item 1), so the generate rule's per-client
+// burst of 3 is about $1.05 for one caller from cold, and its global
+// bucket holds the whole route to ~$2.10 at once and ~$2.10 an hour
+// after that. The failure screen's *try again* re-POSTs this same route
+// and legitimately spends a token — that is the intent recorded in
+// PLAN.md §T11 item 1, and it is why the burst is 3 rather than 1.
+//
+// POST /interviews and the per-turn answer route each cost one M3 call
+// plus a TTS synthesis, so they are not free either; their limits are
+// set to sit well above one honest interview (6–10 questions,
+// internal/interview/prompt.go) and well below a script.
+//
+// POST /voice-sample already carries its own UPLOAD_TOKEN bearer auth
+// (internal/audio/clone.go). This is the rate limit that route's
+// TODO(§T11) asks for and not a replacement for that auth: one token
+// holder could otherwise drive unbounded 5 MiB transcodes.
+var (
+	generateRule = gate.Rule{
+		Name:      "generate",
+		PerClient: gate.Limit{Burst: 3, Every: 20 * time.Minute},
+		Global:    gate.Limit{Burst: 6, Every: 10 * time.Minute},
+	}
+	interviewStartRule = gate.Rule{
+		Name:      "interview-start",
+		PerClient: gate.Limit{Burst: 5, Every: 2 * time.Minute},
+		Global:    gate.Limit{Burst: 30, Every: 10 * time.Second},
+	}
+	interviewAnswerRule = gate.Rule{
+		Name:      "interview-answer",
+		PerClient: gate.Limit{Burst: 20, Every: 15 * time.Second},
+		Global:    gate.Limit{Burst: 120, Every: 2 * time.Second},
+	}
+	voiceSampleRule = gate.Rule{
+		Name:      "voice-sample",
+		PerClient: gate.Limit{Burst: 4, Every: 5 * time.Minute},
+		Global:    gate.Limit{Burst: 12, Every: time.Minute},
+	}
+)
+
+// newServer wires the routes. media, voiceSamples, interviews, generate
+// and guard must be non-nil: they are live handlers, not optional
+// dependencies. It returns an error rather than an unenforced mux when a
+// gate rule cannot be honoured — an ungated generate route is the open
+// wallet §T11 exists to close, so it must never be the fallback.
+func newServer(log *slog.Logger, media *mediastore.Store, voiceSamples *audio.VoiceSampleHandler, interviews *interview.Handler, generate *bookgen.Handler, db *store.DB, guard *gate.Gate) (*server, error) {
+	if guard == nil {
+		return nil, errors.New("newServer: gate must not be nil")
+	}
 	s := &server{mux: http.NewServeMux(), log: log, start: time.Now(), media: media, voiceSamples: voiceSamples, interviews: interviews, generate: generate, book: web.NewBookHandler(db, generate), download: web.NewDownloadHandler(db, media, generate)}
 	// /healthz is the one route T0 ships. Liveness only — no dependency
 	// checks, no probes. That distinction belongs to a later track.
@@ -184,23 +265,48 @@ func newServer(log *slog.Logger, media *mediastore.Store, voiceSamples *audio.Vo
 	// blobs serve through the mediastore handler, which answers Range
 	// requests so narration can be scrubbed (PLAN.md §T3).
 	s.mux.HandleFunc("GET /media/{id}", s.handleMedia)
-	// T13's two adult capture modes converge here. The handler bounds upload
-	// bytes, invokes the shipping static ffmpeg without a shell, then persists
-	// only audio/mpeg for the existing unguessable /media/{id} route.
-	s.mux.Handle("POST /voice-sample", s.voiceSamples)
 	// T4's sanctioned route lines (PLAN.md invariant 5): the interview
 	// loop — start, catch-up transcript, SSE events, answers. The loop
 	// itself lives in internal/interview.
-	s.mux.HandleFunc("POST /interviews", s.interviews.Start)
 	s.mux.HandleFunc("GET /interviews/{id}", s.interviews.Transcript)
 	s.mux.HandleFunc("GET /interviews/{id}/events", s.interviews.Events)
-	s.mux.HandleFunc("POST /interviews/{id}/answers", s.interviews.Answer)
-	// T10c's sanctioned route lines (PLAN.md invariant 5): start a
-	// book's generation and stream its events on the book's topic.
-	// The pipeline lives in internal/bookgen.
-	s.mux.HandleFunc("POST /interviews/{id}/generate", s.generate.Generate)
+	// T10c's sanctioned route line (PLAN.md invariant 5): stream a
+	// book's generation events on the book's topic. The pipeline lives
+	// in internal/bookgen.
 	s.mux.HandleFunc("GET /interviews/{id}/generate/events", s.generate.Events)
-	return s
+
+	// T11's gate wraps the routes that spend money, and only those.
+	// Everything registered above stays ungated by construction: the
+	// shelf, the shareable book page and its state read, the download
+	// links, /static, /healthz for the box's monitoring, and
+	// GET /media/{id} — a gated media route would break the <video>
+	// element and every shared link (PLAN.md §T11 item 1).
+	//
+	// GET /interviews/{id}/events and the generation event stream are
+	// reads of work already paid for, so they are ungated too; gating
+	// them would refuse a reconnecting client its own running book.
+	gated := []struct {
+		pattern string
+		rule    gate.Rule
+		handler http.Handler
+	}{
+		// T13's two adult capture modes converge here. The handler bounds
+		// upload bytes, invokes the shipping static ffmpeg without a
+		// shell, then persists only audio/mpeg for the existing
+		// unguessable /media/{id} route.
+		{"POST /voice-sample", voiceSampleRule, s.voiceSamples},
+		{"POST /interviews", interviewStartRule, http.HandlerFunc(s.interviews.Start)},
+		{"POST /interviews/{id}/answers", interviewAnswerRule, http.HandlerFunc(s.interviews.Answer)},
+		{"POST /interviews/{id}/generate", generateRule, http.HandlerFunc(s.generate.Generate)},
+	}
+	for _, route := range gated {
+		handler, err := guard.Protect(route.rule, route.handler)
+		if err != nil {
+			return nil, fmt.Errorf("newServer: %s: %w", route.pattern, err)
+		}
+		s.mux.Handle(route.pattern, handler)
+	}
+	return s, nil
 }
 
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -356,13 +462,50 @@ func run(log *slog.Logger, args []string, sigs <-chan os.Signal) error {
 	if err != nil {
 		return fmt.Errorf("open media store: %w", err)
 	}
+	// T11 prewarm. The fixture directory holds finished books as rows
+	// plus blobs, so a redeploy or a lost SQLite file does not cost
+	// ~$0.35 and six minutes per landing book to rebuild (PLAN.md §T11
+	// item 2). -prewarm-export writes one and exits; a normal boot
+	// restores anything the database does not already have.
+	prewarmDir := cfg.prewarmDir
+	if prewarmDir == "" {
+		prewarmDir = filepath.Join(cfg.dataDir, "prewarm")
+	}
+	if cfg.exportBook != "" {
+		fixture, err := prewarm.Export(context.Background(), db, mediaDir, cfg.exportBook, prewarmDir)
+		if err != nil {
+			return fmt.Errorf("export prewarm fixture: %w", err)
+		}
+		log.Info("prewarm fixture written", "book", fixture.ID, "title", fixture.Title, "blobs", len(fixture.Media), "dir", filepath.Join(prewarmDir, fixture.ID))
+		return nil
+	}
+	restored, err := prewarm.Import(context.Background(), db, blobs, prewarmDir)
+	if err != nil {
+		return fmt.Errorf("import prewarm fixtures: %w", err)
+	}
+	if len(restored) > 0 {
+		log.Info("prewarmed books restored", "books", restored)
+	}
+	// Every book the fixture directory names is protected from the
+	// retention budget, whether this boot restored it or found it
+	// already there.
+	protected, err := prewarm.Books(prewarmDir)
+	if err != nil {
+		return fmt.Errorf("list prewarm fixtures: %w", err)
+	}
+
 	// The two GMI clients are process-wide: one text client serves the
 	// interview turns, Phase-B structuring and T7's consistency judge
 	// (a *text.Client satisfies every seam); one request-queue client
 	// serves the image renders and the speech synthesis (invariant 1:
 	// nothing outside internal/gmi talks to GMI).
 	textCli := text.New()
-	mediaCli := media.New()
+	// Narration polls for up to 10 minutes, matching the budget §T10e's live
+	// harness verified the joined pipeline under. The package default is 120s,
+	// and observed queue latency for one TTS call exceeds that (2026-09-06:
+	// 33s on one call, >120s on another), which would strand narration and
+	// emit narration_unavailable on a book the provider was still working on.
+	mediaCli := media.NewWithPoll(media.PollConfig{Timeout: 10 * time.Minute})
 	voiceSamples, err := audio.NewVoiceSampleHandler(audio.VoiceSampleConfig{
 		Store:        blobs,
 		PublicOrigin: cfg.publicOrigin,
@@ -374,6 +517,25 @@ func run(log *slog.Logger, args []string, sigs <-chan os.Signal) error {
 		return fmt.Errorf("build voice sample handler: %w", err)
 	}
 	defer voiceSamples.Close()
+
+	// T11's retention sweep. Unplaced rows — every spoken interview
+	// question is one — are unreachable by DeleteBook and immortal
+	// without this (PLAN.md §T11 item 4), and the blob directory is
+	// otherwise uncapped on a box with 23 GiB free and no swap.
+	//
+	// Retain is the veto that keeps this out of T13's way: a live voice
+	// sample is an unplaced row like any other, and only its own handler
+	// may decide when its 15 minutes are up.
+	sweeper, err := blobs.NewSweeper(mediastore.RetentionConfig{
+		MaxBytes:  cfg.mediaMax,
+		Protected: protected,
+		Retain:    voiceSamples.Tracked,
+	})
+	if err != nil {
+		return fmt.Errorf("build retention sweeper: %w", err)
+	}
+	sweeper.Start()
+	defer sweeper.Close() // run returns only at shutdown; nothing outlives it
 
 	// T4/T10c: the interview loop and the generation pipeline stream
 	// over SSE and run off the request path (PLAN.md invariant 6 —
@@ -416,7 +578,18 @@ func run(log *slog.Logger, args []string, sigs <-chan os.Signal) error {
 		return fmt.Errorf("build generation handler: %w", err)
 	}
 
-	srvHTTP := newHTTPServer(cfg, newServer(log, blobs, voiceSamples, interviews, generate, db))
+	// T11's gate. Rate limits are always on; the passcode is enforced
+	// only when GATE_PASSCODE is set (internal/gate's package doc records
+	// why that is the default posture and settles PLAN.md decision 9).
+	guard, err := gate.New(gate.Config{Passcode: cfg.gatePasscode, Log: log})
+	if err != nil {
+		return fmt.Errorf("build gate: %w", err)
+	}
+	handler, err := newServer(log, blobs, voiceSamples, interviews, generate, db, guard)
+	if err != nil {
+		return err
+	}
+	srvHTTP := newHTTPServer(cfg, handler)
 
 	errCh := make(chan error, 1)
 	serveDone := make(chan struct{})

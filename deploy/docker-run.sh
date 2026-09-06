@@ -109,14 +109,24 @@ if [[ -z "${PUBLIC_ORIGIN:-}" ]]; then
 fi
 
 # Generate an unguessable token for the voice-sample upload path (T13).
-# The Hetzner box exposes /upload for one-shot voice captures; GMI's
-# Speech 2.8 source_audio fetches the resulting URL. Short-lived and
-# unguessable keeps a child's voice off any directory listing.
+# The Hetzner box exposes POST /voice-sample for one-shot voice captures;
+# GMI's Speech 2.8 source_audio fetches the resulting /media/<id> URL.
+# Short-lived and unguessable keeps a child's voice off any directory
+# listing. The process refuses to start without this token.
 UPLOAD_TOKEN="${UPLOAD_TOKEN:-$(openssl rand -hex 16)}"
 
-# Both secrets must be exported, not merely set: the name-only --env form
-# below tells docker to read them from this process's environment.
+# T11's gate passcode is OPTIONAL. Unset means rate limits only, which is
+# the shipping posture (internal/gate's package doc settles PLAN.md
+# decision 9). Set it in ENV_FILE and re-run this script to add a shared
+# passcode on the money routes without a code change. Docker's name-only
+# --env form omits the variable entirely when it is unset, so an unset
+# GATE_PASSCODE reaches the container as "not set" rather than as "".
+#
+# MEDIA_MAX_BYTES is T11's retention budget for generated media. Unset
+# means the package default (6 GiB); the orphan sweep runs either way.
 export GMI_API_KEY UPLOAD_TOKEN PUBLIC_ORIGIN
+if [[ -n "${GATE_PASSCODE:-}" ]]; then export GATE_PASSCODE; fi
+if [[ -n "${MEDIA_MAX_BYTES:-}" ]]; then export MEDIA_MAX_BYTES; fi
 
 mkdir -p "${DATA_DIR}"
 printf '%s' "${UPLOAD_TOKEN}" > "${DATA_DIR}/upload-token"
@@ -164,6 +174,13 @@ DOCKER_ARGS=(
   --env GMI_API_KEY
   --env UPLOAD_TOKEN
   --env PUBLIC_ORIGIN
+
+  # T11. Both optional; the name-only form passes them through only when
+  # this script's environment actually has them. GATE_PASSCODE is a
+  # secret when set, so it uses the same name-only form as the key above
+  # and never enters the argument list.
+  --env GATE_PASSCODE
+  --env MEDIA_MAX_BYTES
 
   # --- Traefik v3 labels ---
   # traefik.enable: opt this container into routing.

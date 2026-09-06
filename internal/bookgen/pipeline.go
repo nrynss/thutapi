@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,7 +12,6 @@ import (
 	"thutapi/internal/audio"
 	"thutapi/internal/bookpdf"
 	"thutapi/internal/bookvideo"
-	"thutapi/internal/gmi"
 	"thutapi/internal/illustrate"
 	"thutapi/internal/store"
 	"thutapi/internal/story"
@@ -25,11 +23,12 @@ import (
 // persist) → narrate → PDF → film → ready. It is the body of the generate
 // job and returns the persisted PDF and film media ids on success — the
 // values book_ready's pdf_url and video_url are built from — and an error
-// on any fatal failure. When narration fails with a transient error (e.g.
-// 503 / gmi.ErrTransient), narration is skipped and narration_unavailable is
-// published, but the film is still rendered — a captioned silent film whose
-// page segments hold for words/2.0 s (§T10g three tiers) — and the run
-// succeeds with both a pdf_url and a video_url.
+// on any fatal failure. Narration failure is NOT fatal, whatever its error
+// class: the pages that failed are published as narration_unavailable and
+// rendered at the captioned-silent tier — segments holding for words/2.0 s
+// (§T10g three tiers) — while the pages that spoke keep their voices, and
+// the run still succeeds with both a pdf_url and a video_url. The same is
+// true of the music bed (see renderFilm).
 func (h *Handler) runBook(ctx context.Context, bookID, ivID string) (pdfID, videoID string, err error) {
 	// The run outlives the POST that started it, so everything is read
 	// fresh: the interview row carries the transcript to structure and
@@ -70,25 +69,25 @@ func (h *Handler) runBook(ctx context.Context, bookID, ivID string) (pdfID, vide
 		return "", "", err
 	}
 	// Stage 3 — narrate: one persisted clip per page, in page order.
-	// If narration fails with a transient error (e.g. 503 / gmi.ErrTransient),
-	// narration is skipped and narration_unavailable is published once; the
-	// run continues to the PDF stage and then the film stage, which renders a
-	// captioned silent film (§T10g: the outage costs the voices, not the
-	// video). Any other narration failure is total — the run ends before the
-	// PDF stage.
+	// Narration NEVER fails the run (§T10f/§T10g): whatever narration does
+	// — a 503, a poll deadline, a malformed envelope, a total outage — the
+	// pages that spoke keep their voices, the pages that did not degrade to
+	// the captioned-silent tier, narration_unavailable is published once,
+	// and the run carries on to the PDF and the film so book_ready still
+	// carries both a pdf_url and a video_url. By this point the structure
+	// and every illustration are already paid for; a voice is not worth
+	// discarding them over. Only a cancelled context ends the run here.
 	clips, err := audio.NarrateBook(ctx, audio.Config{
 		TTS:   h.cfg.TTS,
 		DB:    h.cfg.DB,
 		Blobs: h.cfg.Blobs,
 	}, bookID, st.Pages)
 	if err != nil {
-		if errors.Is(err, gmi.ErrTransient) && ctx.Err() == nil {
-			h.log.Warn("bookgen: narration unavailable; the film will be captioned and silent", "book", bookID, "err", err)
-			h.cfg.Broker.Publish(Topic(bookID), stream.Event{Name: "narration_unavailable", Data: narrationUnavailableData})
-			clips = nil
-		} else {
+		if ctx.Err() != nil {
 			return "", "", fmt.Errorf("bookgen: narrate: %w", err)
 		}
+		h.log.Warn("bookgen: narration degraded; the pages that failed will be captioned and silent", "book", bookID, "err", err)
+		h.cfg.Broker.Publish(Topic(bookID), stream.Event{Name: "narration_unavailable", Data: narrationUnavailableData})
 	}
 
 	// Stage 4 — PDF: always rendered and attached to the book.
@@ -260,11 +259,13 @@ func (b *approvalBridge) err() error { return b.first }
 // first and the old rows are removed afterwards, so the book keeps
 // serving the previous film until the new one is on disk.
 //
-// clips is nil exactly when narration was unavailable (§T10g): the film is
-// then captioned and silent — every page still carries its words (they are
-// what the film shows) and bookvideo derives each silent page's hold from
-// them. When clips are present they must cover every page in order, and
-// each page carries its clip's Go-known Duration (audio.Clip.Duration —
+// clips is nil when narration could not run at all (§T10g): the film is then
+// captioned and silent — every page still carries its words (they are what
+// the film shows) and bookvideo derives each silent page's hold from them.
+// When clips are present they must cover every page in order, but they need
+// not all be spoken: a clip whose page failed to narrate reports
+// Clip.Spoken() false and that page alone renders at the silent tier. A
+// spoken page carries its clip's Go-known Duration (audio.Clip.Duration —
 // contract row C2 of t12-round1.md) so the renderer can total the film.
 //
 // Music (PLAN.md §T12; contract row C4): when Config.Music is set, the
@@ -272,10 +273,10 @@ func (b *approvalBridge) err() error { return b.first }
 // (audio.MixBed) over the RENDERED film BEFORE persisting — the end fade
 // anchored to the renderer's computed total — and the MIXED film is what
 // is persisted as the book's one video row (the bed film replaces the
-// plain one; no second row). A TRANSIENT music failure (gmi.ErrTransient)
-// degrades to the no-music film with a log warning, exactly as a
-// transient narration outage degrades to a captioned-silent film — the
-// book must still land. Any other music failure fails the run.
+// plain one; no second row). ANY music failure degrades to the no-music
+// film with a log warning, exactly as a narration outage degrades to a
+// captioned-silent film: music is a decoration on a book that is already
+// complete, and the book must still land.
 func (h *Handler) renderFilm(ctx context.Context, bookID string, st story.Story, clips []audio.Clip) (string, error) {
 	if clips != nil && len(clips) != len(st.Pages) {
 		return "", fmt.Errorf("bookgen: render: narrate returned %d clips for %d pages", len(clips), len(st.Pages))
@@ -294,7 +295,11 @@ func (h *Handler) renderFilm(ctx context.Context, bookID string, st story.Story,
 			return "", fmt.Errorf("bookgen: render: read page %d illustration blob: %w", p.N, err)
 		}
 		page := bookvideo.PageInput{N: p.N, Text: p.Text, ImageBytes: img}
-		if clips != nil {
+		// A clip that is not Spoken is a page whose narration failed: it
+		// gets no audio and no Duration, and the renderer holds it at the
+		// captioned-silent tier from its own words. Its neighbours are
+		// unaffected.
+		if clips != nil && clips[i].Spoken() {
 			aud, err := os.ReadFile(filepath.Join(h.cfg.MediaDir, clips[i].Media.ID))
 			if err != nil {
 				return "", fmt.Errorf("bookgen: render: read page %d narration blob: %w", p.N, err)
@@ -343,9 +348,19 @@ func (h *Handler) renderFilm(ctx context.Context, bookID string, st story.Story,
 	// the file.
 	persistPath := name
 	if h.cfg.Music != nil {
-		persistPath, err = h.mixFilm(ctx, name, total)
-		if err != nil {
-			return "", fmt.Errorf("bookgen: music bed: %w", err)
+		mixed, mixErr := h.mixFilm(ctx, name, total)
+		switch {
+		case mixErr != nil && ctx.Err() != nil:
+			// The run itself is going away; there is nothing to degrade to.
+			return "", fmt.Errorf("bookgen: music bed: %w", mixErr)
+		case mixErr != nil:
+			// Music is a decoration on a book that is already complete:
+			// the PDF is persisted and the film is rendered. No music
+			// failure of any class may bin that — the plain film is
+			// persisted instead and the run succeeds with both URLs.
+			h.log.Warn("bookgen: music bed unavailable; the film plays without music", "book", bookID, "err", mixErr)
+		default:
+			persistPath = mixed
 		}
 		if persistPath != name {
 			defer func() { _ = os.Remove(persistPath) }() // best effort cleanup after persist
@@ -377,18 +392,14 @@ func (h *Handler) renderFilm(ctx context.Context, bookID string, st story.Story,
 
 // mixFilm generates the wordless bed and mixes it under the finished
 // film at filmPath (whose total is total), returning the path of the
-// MIXED film to persist. A bed generation failure wrapped in
-// gmi.ErrTransient is an outage, not an error: the film is returned
-// WITHOUT music and the caller proceeds — a captioned or narrated film
-// with no bed is a complete book (the same degradation the narration
-// outage path uses). Any other failure is total.
+// MIXED film to persist. Every failure is returned to the caller, which
+// degrades ALL of them to the plain film: by the time this runs the PDF
+// is persisted and the film is rendered, so no music failure — outage,
+// malformed envelope, a non-2xx on the bed's storage URL, a broken mix
+// pass — may bin a book that is already complete and already paid for.
 func (h *Handler) mixFilm(ctx context.Context, filmPath string, total time.Duration) (string, error) {
 	bed, err := audio.GenerateMusicBed(ctx, audio.MusicConfig{Music: h.cfg.Music})
 	if err != nil {
-		if errors.Is(err, gmi.ErrTransient) && ctx.Err() == nil {
-			h.log.Warn("bookgen: music bed unavailable; the film plays without music", "err", err)
-			return filmPath, nil
-		}
 		return "", err
 	}
 	bedTmp, err := os.CreateTemp("", "thutapi-music-bed-*.mp3")

@@ -27,6 +27,35 @@ func subscribeAfter(t *testing.T, b *stream.Broker, id string) *stream.Subscript
 	return b.Subscribe(context.Background(), Topic(id))
 }
 
+// startGated starts fn behind a gate, subscribes to its topic, and only
+// then releases it — so every event fn publishes, the first progress and
+// the terminal included, lands in the subscriber's buffer.
+//
+// Without the gate a test racing Start against Subscribe is asserting on
+// a stream whose opening events the broker legitimately never delivered:
+// Subscribe is from-now-on with no replay, so an fn that publishes on its
+// goroutine's first instruction can beat the subscribe and the assertion
+// waits forever for an event that was never owed to it. Under -race, with
+// other packages loading the scheduler, that goroutine wins often enough
+// to turn the suite intermittently red.
+//
+// A test that wants the racy shape on purpose — TestMidJobSubscriberCatchesUp
+// pins exactly the missed-early-event contract — does not use this.
+func startGated(t *testing.T, b *stream.Broker, r *Runner, fn Func) (string, *stream.Subscription) {
+	t.Helper()
+	gate := make(chan struct{})
+	id, err := r.Start(context.Background(), func(ctx context.Context, progress func(string)) ([]byte, error) {
+		<-gate
+		return fn(ctx, progress)
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	sub := subscribeAfter(t, b, id)
+	close(gate)
+	return id, sub
+}
+
 // drain collects the next n events from sub, failing the test on timeout.
 func drain(t *testing.T, sub *stream.Subscription, n int) []stream.Event {
 	t.Helper()
@@ -91,20 +120,12 @@ func TestStartReturnsImmediately(t *testing.T) {
 // test would catch a second one from any path.
 func TestProgressAndTerminalExactlyOnce(t *testing.T) {
 	b, r := newBrokerAndRunner(t)
-	gate := make(chan struct{})
 
-	id, err := r.Start(context.Background(), func(ctx context.Context, progress func(string)) ([]byte, error) {
+	id, sub := startGated(t, b, r, func(ctx context.Context, progress func(string)) ([]byte, error) {
 		progress(`{"step":1}`)
-		<-gate
 		progress(`{"step":2}`)
 		return []byte(`{"book":1}`), nil
 	})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-
-	sub := subscribeAfter(t, b, id)
-	close(gate)
 
 	events := drain(t, sub, 3)
 	if events[0].Name != "progress" || events[0].Data != `{"step":1}` {
@@ -167,14 +188,9 @@ func TestEmptyProgressDropped(t *testing.T) {
 func TestPanicBecomesErrorTerminal(t *testing.T) {
 	b, r := newBrokerAndRunner(t)
 
-	id, err := r.Start(context.Background(), func(ctx context.Context, progress func(string)) ([]byte, error) {
+	id, sub := startGated(t, b, r, func(ctx context.Context, progress func(string)) ([]byte, error) {
 		panic("illustrator exploded")
 	})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-
-	sub := subscribeAfter(t, b, id)
 	events := drain(t, sub, 1)
 	if events[0].Name != "error" {
 		t.Fatalf("terminal event = %+v, want \"error\"", events[0])
@@ -198,13 +214,10 @@ func TestPanicBecomesErrorTerminal(t *testing.T) {
 	}
 
 	// The runner survives the panic: the next job runs normally.
-	id2, err := r.Start(context.Background(), func(ctx context.Context, progress func(string)) ([]byte, error) {
+	_, sub2 := startGated(t, b, r, func(ctx context.Context, progress func(string)) ([]byte, error) {
 		return []byte("ok"), nil
 	})
-	if err != nil {
-		t.Fatalf("Start after panic: %v", err)
-	}
-	drain(t, subscribeAfter(t, b, id2), 1)
+	drain(t, sub2, 1)
 }
 
 // TestFnErrorSurfacesSentinel: an error returned by fn — not a panic —
@@ -214,14 +227,9 @@ func TestFnErrorSurfacesSentinel(t *testing.T) {
 	b, r := newBrokerAndRunner(t)
 	sentinel := errors.New("media: transient")
 
-	id, err := r.Start(context.Background(), func(ctx context.Context, progress func(string)) ([]byte, error) {
+	id, sub := startGated(t, b, r, func(ctx context.Context, progress func(string)) ([]byte, error) {
 		return nil, sentinel
 	})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-
-	sub := subscribeAfter(t, b, id)
 	events := drain(t, sub, 1)
 	if events[0].Name != "error" {
 		t.Fatalf("terminal event = %+v, want \"error\"", events[0])
@@ -241,19 +249,26 @@ func TestFnErrorSurfacesSentinel(t *testing.T) {
 func TestJobOutlivesRequestContext(t *testing.T) {
 	b, r := newBrokerAndRunner(t)
 	ctx, cancel := context.WithCancel(context.Background())
+	gate := make(chan struct{})
 
-	id, err := r.Start(ctx, func(ctx context.Context, progress func(string)) ([]byte, error) {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+	id, err := r.Start(ctx, func(jobCtx context.Context, progress func(string)) ([]byte, error) {
+		<-gate
+		if jobCtx.Err() != nil {
+			return nil, jobCtx.Err()
 		}
 		return []byte("survived"), nil
 	})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	cancel()
 
+	// Subscribe before the job may publish, then cancel the STARTING
+	// context while the job is still gated: the terminal it publishes
+	// after the release is observed in full.
 	sub := subscribeAfter(t, b, id)
+	cancel()
+	close(gate)
+
 	events := drain(t, sub, 1)
 	if events[0].Name != "done" {
 		t.Errorf("terminal event = %+v, want \"done\" despite the cancelled start context", events[0])
@@ -308,20 +323,28 @@ func TestStartAtLimit(t *testing.T) {
 		// The slot frees when the job's goroutine has fully exited;
 		// wait for the terminal event, then give Start a bounded
 		// window to observe the release.
-		id, err := r.Start(context.Background(), func(ctx context.Context, progress func(string)) ([]byte, error) {
-			return nil, nil
-		})
+		// Gated, so the terminal this drains cannot be published
+		// before the subscribe below. A failed Start begins nothing,
+		// so the retry loop leaves exactly one job on the gate.
+		gate := make(chan struct{})
+		startGatedJob := func() (string, error) {
+			return r.Start(context.Background(), func(ctx context.Context, progress func(string)) ([]byte, error) {
+				<-gate
+				return nil, nil
+			})
+		}
+		id, err := startGatedJob()
 		deadline := time.Now().Add(2 * time.Second)
 		for err != nil {
 			if !errors.Is(err, ErrLimit) || time.Now().After(deadline) {
 				t.Fatalf("Start after release: %v", err)
 			}
 			time.Sleep(time.Millisecond)
-			id, err = r.Start(context.Background(), func(ctx context.Context, progress func(string)) ([]byte, error) {
-				return nil, nil
-			})
+			id, err = startGatedJob()
 		}
-		drain(t, b.Subscribe(context.Background(), Topic(id)), 1)
+		sub := subscribeAfter(t, b, id)
+		close(gate)
+		drain(t, sub, 1)
 	})
 
 	t.Run("default-limit", func(t *testing.T) {
@@ -532,9 +555,11 @@ func TestCancelIdempotentAndUnknown(t *testing.T) {
 	if err := r.Cancel(id); err != nil {
 		t.Errorf("second Cancel = %v, want nil (idempotent while the job is registered)", err)
 	}
-	close(release)
-
+	// Subscribe before releasing the job: the cancelled terminal is
+	// published the moment fn returns, so it must not be able to run
+	// ahead of the subscription.
 	sub := subscribeAfter(t, b, id)
+	close(release)
 	drain(t, sub, 1) // the cancelled terminal, exactly once
 
 	// After the goroutine exits the entry is gone: bounded wait for

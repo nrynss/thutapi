@@ -207,7 +207,7 @@ func NewVoiceSampleHandler(cfg VoiceSampleConfig) (*VoiceSampleHandler, error) {
 	}
 	ffmpeg := cfg.FFmpegPath
 	if ffmpeg == "" {
-		ffmpeg = "/usr/local/bin/ffmpeg"
+		ffmpeg = defaultFFmpeg()
 	}
 	maxInput := cfg.MaxInput
 	if maxInput <= 0 {
@@ -286,12 +286,20 @@ func (h *VoiceSampleHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !hasVoiceSampleConsent(r) {
-		h.writeError(w, ErrVoiceSampleConsentRequired)
-		return
-	}
+	// Bearer auth is checked FIRST: it is the real gate, and checking the
+	// consent header ahead of it told an unauthenticated prober what the
+	// route wants before it had proved anything. Consent is an affirmative
+	// declaration by an already-authorized caller, not an access control.
+	//
+	// TODO(§T11): this route still has no rate limit, so one token holder can
+	// drive unbounded 5 MiB transcodes. It needs T11's rate-limiting gate
+	// applied to it; nothing here is a substitute for that.
 	if !h.hasUploadAuthorization(r) {
 		h.writeError(w, ErrVoiceSampleUnauthorized)
+		return
+	}
+	if !hasVoiceSampleConsent(r) {
+		h.writeError(w, ErrVoiceSampleConsentRequired)
 		return
 	}
 	// Multipart boundaries and headers are transport overhead; the file itself
@@ -392,6 +400,22 @@ func (w noStoreResponseWriter) WriteHeader(status int) {
 func (w noStoreResponseWriter) Write(p []byte) (int, error) {
 	w.Header().Set("Cache-Control", "no-store")
 	return w.ResponseWriter.Write(p)
+}
+
+// Tracked reports whether id is a voice sample this handler still owns
+// the lifetime of — reserved, live, or expired but not yet swept.
+//
+// It exists for §T11's retention sweep, which must never delete a row or
+// a blob out from under T13's own expiry sidecar: a voice sample is an
+// unplaced media row like any other, and the sweep classifies unplaced
+// rows by age alone. The sweep asks this before it deletes anything, so
+// the 15-minute lifetime the consent copy promises a parent stays this
+// handler's to enforce and nobody else's to shorten.
+func (h *VoiceSampleHandler) Tracked(id string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	_, tracked := h.expires[id]
+	return tracked
 }
 
 func (h *VoiceSampleHandler) trackSample(id string) error {
@@ -705,6 +729,25 @@ func sampleExtension(contentType string) (string, bool) {
 	}
 }
 
+// containerFFmpeg is where the runtime image puts the static binary
+// (Dockerfile: COPY --from=ff /ffmpeg /usr/local/bin/ffmpeg).
+const containerFFmpeg = "/usr/local/bin/ffmpeg"
+
+// defaultFFmpeg is the executable the voice transcode runs when
+// VoiceSampleConfig.FFmpegPath is empty. It resolves ffmpeg on PATH, the
+// same default MixBed (music.go) and the film renderer (internal/bookvideo)
+// use, so the transcode is runnable outside the container — on a workstation
+// ffmpeg is usually /usr/bin/ffmpeg, and the old hard-coded container path
+// made every local upload fail the duration probe. The container path is the
+// fallback for an environment with no usable PATH, so the image keeps
+// working either way.
+func defaultFFmpeg() string {
+	if _, err := exec.LookPath("ffmpeg"); err == nil {
+		return "ffmpeg"
+	}
+	return containerFFmpeg
+}
+
 type commandRunner struct{}
 
 func (commandRunner) Run(ctx context.Context, executable string, args ...string) error {
@@ -725,13 +768,54 @@ func (commandRunner) Duration(ctx context.Context, executable, input string) (ti
 	return parseFFmpegDuration(output)
 }
 
+// ffmpegDurationPattern matches the container header ffmpeg prints for the
+// input: "Duration: 00:00:12.50". A live-muxed stream has no such header
+// value and prints "Duration: N/A" instead, which this deliberately misses —
+// see ffmpegProgressTimePattern.
 var ffmpegDurationPattern = regexp.MustCompile(`Duration:\s*([0-9]+):([0-9]+):([0-9]+(?:\.[0-9]+)?)`)
 
+// ffmpegProgressTimePattern matches the "time=00:00:08.00" field of the
+// progress lines the "-f null -" decode emits. This is the DECODED length,
+// which a browser recording only has: MediaRecorder mixes WebM live, so its
+// Segment carries no duration and the container header reads "Duration: N/A"
+// — the shape Chrome and Firefox both produce, because audio/webm is the
+// first candidate static/app.js offers. ffmpeg prints progress repeatedly as
+// it decodes, so only the LAST occurrence is the full length.
+//
+// The \b keeps this off ffmpeg's other "…=H:MM:SS" fields (elapsed=, and
+// -progress's out_time=, whose underscore is a word character).
+var ffmpegProgressTimePattern = regexp.MustCompile(`\btime=\s*([0-9]+):([0-9]+):([0-9]+(?:\.[0-9]+)?)`)
+
+// parseFFmpegDuration reads the input's length out of an "ffmpeg -i <input>
+// -f null -" run's stderr. The decoded progress time is preferred over the
+// container header: it is the length that will actually be transcoded (so
+// the MaxVoiceSampleDuration guard is decided on real audio, not on a
+// header's claim), and it is the only one a live-muxed recording reports at
+// all. The header is the fallback for output with no progress line.
 func parseFFmpegDuration(output []byte) (time.Duration, error) {
+	if matches := lastSubmatch(ffmpegProgressTimePattern, output); matches != nil {
+		return hmsToDuration(matches)
+	}
 	matches := ffmpegDurationPattern.FindSubmatch(output)
 	if len(matches) != 4 {
 		return 0, errors.New("ffmpeg duration was not reported")
 	}
+	return hmsToDuration(matches)
+}
+
+// lastSubmatch returns the submatches of the LAST match of re in b, or nil
+// when there is none.
+func lastSubmatch(re *regexp.Regexp, b []byte) [][]byte {
+	all := re.FindAllSubmatch(b, -1)
+	if len(all) == 0 {
+		return nil
+	}
+	return all[len(all)-1]
+}
+
+// hmsToDuration converts an (hours, minutes, seconds) submatch triple into a
+// duration.
+func hmsToDuration(matches [][]byte) (time.Duration, error) {
 	hours, err := strconv.ParseInt(string(matches[1]), 10, 64)
 	if err != nil {
 		return 0, fmt.Errorf("parse ffmpeg hours: %w", err)

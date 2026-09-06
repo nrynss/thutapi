@@ -22,6 +22,7 @@ import (
 	"thutapi/internal/bookgen"
 	"thutapi/internal/bookpdf"
 	"thutapi/internal/bookvideo"
+	"thutapi/internal/gate"
 	"thutapi/internal/gmi/media"
 	"thutapi/internal/gmi/text"
 	"thutapi/internal/interview"
@@ -40,6 +41,22 @@ import (
 // internal/bookgen's own suite).
 func newTestServer(t *testing.T) *server {
 	t.Helper()
+	return newGatedTestServer(t, nil)
+}
+
+// newGatedTestServer is newTestServer with a caller-supplied gate, so
+// T11's refusal paths can be driven with limits a route test can
+// actually exhaust. A nil guard means the default posture: rate limits
+// on, no passcode.
+func newGatedTestServer(t *testing.T, guard *gate.Gate) *server {
+	t.Helper()
+	if guard == nil {
+		defaultGuard, err := gate.New(gate.Config{})
+		if err != nil {
+			t.Fatalf("build gate: %v", err)
+		}
+		guard = defaultGuard
+	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	db, err := store.Open(t.Context(), store.Config{
 		Path: filepath.Join(t.TempDir(), "thutapi.db"),
@@ -88,7 +105,11 @@ func newTestServer(t *testing.T) *server {
 	if err != nil {
 		t.Fatalf("build generation handler: %v", err)
 	}
-	return newServer(log, media, voiceSamples, interviews, generate, db)
+	srv, err := newServer(log, media, voiceSamples, interviews, generate, db, guard)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	return srv
 }
 
 // echoChatter answers every Chat call with a one-question reply that

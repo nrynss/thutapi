@@ -214,7 +214,8 @@ func TestDecodeBedURL_KeysOnOutcome(t *testing.T) {
 
 // TestDecodeBedURL_FailureBranches pins every no-bed shape with its
 // sentinel: an empty body, a body that is not an envelope, an outcome
-// with no URL, a non-http URL and a missing duration.
+// with no URL, and a non-http URL. The URL is the only mandatory field
+// — see TestDecodeBedURL_MissingDurationIsNotFatal.
 func TestDecodeBedURL_FailureBranches(t *testing.T) {
 	tests := []struct {
 		name string
@@ -225,14 +226,43 @@ func TestDecodeBedURL_FailureBranches(t *testing.T) {
 		{"envelope with no outcome", `{"request_id":"r1","status":"success"}`},
 		{"outcome with neither url spelling nor duration", `{"outcome":{"format":"mp3"}}`},
 		{"non-http url", `{"outcome":{"media_urls":[{"id":"0","url":"gs://bucket/b.mp3"}],"duration_ms":3000}}`},
-		{"missing duration", `{"outcome":{"media_urls":[{"id":"0","url":"https://x/y.mp3"}]}}`},
-		{"zero duration", `{"outcome":{"media_urls":[{"id":"0","url":"https://x/y.mp3"}],"duration_ms":0}}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, _, err := decodeBedURL([]byte(tt.raw))
 			if !errors.Is(err, ErrNoBed) {
 				t.Fatalf("err = %v, want errors.Is(.., ErrNoBed)", err)
+			}
+		})
+	}
+}
+
+// TestDecodeBedURL_MissingDurationIsNotFatal pins H2's half of the
+// bed contract: outcome.duration_ms is best-effort. It previously
+// raised ErrNoBed, which — because a music failure failed the whole
+// run — could bin a book whose PDF and film were already rendered and
+// paid for, over a field NOTHING reads (mixFilm uses only Bed.Audio,
+// and MixBed anchors its fade to the renderer's total). A bed with a
+// usable URL and no duration is a usable bed.
+func TestDecodeBedURL_MissingDurationIsNotFatal(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		raw  string
+	}{
+		{"missing duration", `{"outcome":{"media_urls":[{"id":"0","url":"https://x/y.mp3"}]}}`},
+		{"zero duration", `{"outcome":{"media_urls":[{"id":"0","url":"https://x/y.mp3"}],"duration_ms":0}}`},
+		{"negative duration", `{"outcome":{"media_urls":[{"id":"0","url":"https://x/y.mp3"}],"duration_ms":-1}}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			u, dur, err := decodeBedURL([]byte(tt.raw))
+			if err != nil {
+				t.Fatalf("decodeBedURL = %v, want no error — duration_ms has no consumer", err)
+			}
+			if u != "https://x/y.mp3" {
+				t.Errorf("url = %q, want the outcome's URL", u)
+			}
+			if dur != 0 {
+				t.Errorf("duration = %v, want 0", dur)
 			}
 		})
 	}

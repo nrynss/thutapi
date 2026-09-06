@@ -576,12 +576,21 @@ func (h *Handler) generateJob(bookID, ivID string) job.Func {
 		}
 		defer func() {
 			if p := recover(); p != nil {
+				// The panic value is the only description of this
+				// failure that will ever exist; job.call converts it
+				// into ErrPanic, which says nothing about what broke.
+				h.log.Error("bookgen: generation panicked", "book", bookID, "interview", ivID, "panic", p)
 				publish("failed", failedData)
 				panic(p) // job.call recovers and lands the ErrPanic terminal
 			}
 		}()
 		defer func() {
 			if err != nil {
+				// The child sees a bare failed {} — no code, no prose
+				// (§T9) — so this log line is the ONLY record of what
+				// actually went wrong. Without it a failed generation is
+				// undiagnosable in production.
+				h.log.Error("bookgen: generation failed", "book", bookID, "interview", ivID, "err", err)
 				publish("failed", failedData)
 			}
 		}()

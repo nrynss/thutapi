@@ -95,8 +95,11 @@ func TestNarrateBook_UnmeasurableClipFailsLoudly(t *testing.T) {
 	if !errors.Is(err, ErrClipDuration) {
 		t.Fatalf("err = %v, want errors.Is(.., ErrClipDuration)", err)
 	}
-	if clips != nil {
-		t.Fatalf("clips = %v, want nil on failure", clips)
+	// The page failed, so its slot comes back unspoken rather than the
+	// whole run coming back empty (H3): the caller renders that page at
+	// the captioned-silent tier instead of discarding the book.
+	if len(clips) != 1 || clips[0].Spoken() {
+		t.Fatalf("clips = %v, want one unspoken clip", clips)
 	}
 	if _, err := h.db.PageMedia(t.Context(), h.bookID, 1, store.MediaNarration); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("page 1 err = %v, want ErrNotFound (nothing persisted)", err)
@@ -272,20 +275,28 @@ func (g *gateTTS) SynthesizeSpeech(ctx context.Context, text, emotion, voice, mo
 	return successEnvelope(g.base + "/clip/" + url.PathEscape(text)), nil
 }
 
-// TestNarrateBook_FailureFailsTheRun pins the total-failure contract:
-// a page that fails synthesis fails the run with a zero clip result,
-// the error names the page and passes the upstream sentinel through
-// errors.Is, and with Limit 1 the pages after the failure never reach
-// the TTS seam (the run is cancelled, not continued).
-func TestNarrateBook_FailureFailsTheRun(t *testing.T) {
+// TestNarrateBook_FailureDegradesOnlyItsOwnPage pins the per-page
+// degradation contract (§T10f/§T10g, H3): a page that fails synthesis
+// costs THAT PAGE its voice and nothing else. The run returns one clip
+// per page in page order — the failing page's unspoken, its neighbours'
+// spoken and persisted — alongside an error that names the page and
+// passes the upstream sentinel through errors.Is. The failure does not
+// cancel the siblings, so every page still reaches the TTS seam.
+//
+// This test replaces TestNarrateBook_FailureFailsTheRun, which pinned
+// the opposite (nil clips, siblings cancelled). That contract is what
+// discarded a real eight-page book on 2026-09-06 when page 4's TTS
+// missed its poll deadline: the caller had nothing to render.
+func TestNarrateBook_FailureDegradesOnlyItsOwnPage(t *testing.T) {
 	h := newNarrationHarness(t, 3)
 	pages := threePages()
 	cfg := h.cfg(&fakeTTS{})
 	cfg.Limit = 1
 
 	// errUpstream stands in for an internal/gmi sentinel the media
-	// client would return; the wrap must keep it matchable.
-	errUpstream := errors.New("gmi: transient error")
+	// client would return; the wrap must keep it matchable. It is
+	// deliberately NOT a transient one — no error class is special.
+	errUpstream := errors.New("gmi: request-queue poll deadline exceeded")
 	scripted := &scriptedTTS{base: h.clips.URL, errs: map[string]error{pages[1].Text: errUpstream}}
 	cfg.TTS = scripted
 	clips, err := NarrateBook(t.Context(), cfg, h.bookID, pages)
@@ -295,21 +306,28 @@ func TestNarrateBook_FailureFailsTheRun(t *testing.T) {
 	if !strings.Contains(err.Error(), "page 2") {
 		t.Errorf("err = %v, want it to name the failing page", err)
 	}
-	if clips != nil {
-		t.Fatalf("clips = %v, want nil on failure", clips)
+	if len(clips) != len(pages) {
+		t.Fatalf("clips = %v, want one per page even with a failure", clips)
 	}
-	if got := scripted.count(); got != 2 {
-		t.Errorf("TTS calls = %d, want 2 (page 1 ran, page 2 failed, page 3 was cancelled)", got)
-	}
-	// Page 1 completed before the failure (Limit 1 serialises); page 2
-	// and 3 never persisted.
-	if _, err := h.db.PageMedia(t.Context(), h.bookID, 1, store.MediaNarration); err != nil {
-		t.Errorf("page 1 narration missing despite completing: %v", err)
-	}
-	for _, n := range []int{2, 3} {
-		if _, err := h.db.PageMedia(t.Context(), h.bookID, n, store.MediaNarration); !errors.Is(err, store.ErrNotFound) {
-			t.Errorf("page %d err = %v, want ErrNotFound", n, err)
+	for i, c := range clips {
+		if c.N != pages[i].N {
+			t.Errorf("clip %d is for page %d, want page %d", i, c.N, pages[i].N)
 		}
+		if want := pages[i].N != 2; c.Spoken() != want {
+			t.Errorf("clip for page %d Spoken() = %v, want %v", c.N, c.Spoken(), want)
+		}
+	}
+	if got := scripted.count(); got != 3 {
+		t.Errorf("TTS calls = %d, want 3 (page 2's failure must not cancel pages 1 and 3)", got)
+	}
+	// Pages 1 and 3 persisted; only page 2 has no narration row.
+	for _, n := range []int{1, 3} {
+		if _, err := h.db.PageMedia(t.Context(), h.bookID, n, store.MediaNarration); err != nil {
+			t.Errorf("page %d narration missing despite succeeding: %v", n, err)
+		}
+	}
+	if _, err := h.db.PageMedia(t.Context(), h.bookID, 2, store.MediaNarration); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("page 2 err = %v, want ErrNotFound", err)
 	}
 }
 
@@ -382,8 +400,11 @@ func TestNarrateBook_DecodeFailureFailsThePage(t *testing.T) {
 	if !errors.Is(err, ErrNoAudio) {
 		t.Fatalf("err = %v, want errors.Is(.., ErrNoAudio)", err)
 	}
-	if clips != nil {
-		t.Fatalf("clips = %v, want nil on failure", clips)
+	// The page failed, so its slot comes back unspoken rather than the
+	// whole run coming back empty (H3): the caller renders that page at
+	// the captioned-silent tier instead of discarding the book.
+	if len(clips) != 1 || clips[0].Spoken() {
+		t.Fatalf("clips = %v, want one unspoken clip", clips)
 	}
 }
 
@@ -405,7 +426,10 @@ func TestNarrate_PersistFailureFailsThePage(t *testing.T) {
 	if !strings.Contains(err.Error(), "persist narration clip") {
 		t.Errorf("err = %v, want it to name the persist step", err)
 	}
-	if clips != nil {
-		t.Fatalf("clips = %v, want nil on failure", clips)
+	// The page failed, so its slot comes back unspoken rather than the
+	// whole run coming back empty (H3): the caller renders that page at
+	// the captioned-silent tier instead of discarding the book.
+	if len(clips) != 1 || clips[0].Spoken() {
+		t.Fatalf("clips = %v, want one unspoken clip", clips)
 	}
 }

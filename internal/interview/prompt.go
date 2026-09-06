@@ -82,6 +82,15 @@ one short, warm goodbye to the child. Do NOT ask anything. Finish with
 the control line exactly as always, reporting filled as before and
 including end.)`
 
+// openingDirective seeds the opening turn, which has no history yet.
+// MiniMax rejects a system-only conversation with "invalid params,
+// messages must not be empty (2013)" — a request carrying nothing but
+// the system prompt counts as empty to it, so the interview could not
+// start at all against production. It goes in as a user message
+// because that is the role whose absence the upstream is objecting to.
+// It adds no behaviour: systemPrompt already governs how to ask.
+const openingDirective = `Please ask your first question.`
+
 // chatRole maps a persisted turn to its chat-completions role: the
 // child's answers go in as user messages, everything the interviewer
 // said (questions and the closing goodbye) as assistant messages.
@@ -102,6 +111,9 @@ func chatRole(turnRole string) string {
 func buildMessages(history []store.Turn, ending bool, streak int) []text.Message {
 	msgs := make([]text.Message, 0, len(history)+3)
 	msgs = append(msgs, text.Message{Role: "system", Content: systemPrompt})
+	if len(history) == 0 {
+		msgs = append(msgs, text.Message{Role: "user", Content: openingDirective})
+	}
 	for _, t := range history {
 		msgs = append(msgs, text.Message{Role: chatRole(t.Role), Content: t.Text})
 	}

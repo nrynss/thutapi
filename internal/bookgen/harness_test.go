@@ -1,6 +1,7 @@
 package bookgen
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -312,10 +313,14 @@ type ttsCall struct {
 }
 
 // fakeTTS is audio.TTS, scripted: it records every call and answers
-// with an envelope whose audio_url points at the clip server.
+// with an envelope whose audio_url points at the clip server. err
+// fails every call; textErrs fails only the calls whose text it names,
+// which is how a SINGLE page's narration is made to fail (§T10f/§T10g:
+// that page goes captioned-silent and the book still lands).
 type fakeTTS struct {
 	order     *orderRecorder
 	err       error
+	textErrs  map[string]error
 	audioBase string
 	mu        sync.Mutex
 	calls     []ttsCall
@@ -325,6 +330,9 @@ func (f *fakeTTS) SynthesizeSpeech(ctx context.Context, text, emotion, voice, mo
 	f.mu.Lock()
 	f.calls = append(f.calls, ttsCall{text: text, emotion: emotion, voice: voice, model: model})
 	err := f.err
+	if err == nil {
+		err = f.textErrs[text]
+	}
 	f.mu.Unlock()
 	if f.order != nil {
 		f.order.mark("tts")
@@ -613,6 +621,26 @@ type pipelineHarness struct {
 	film     *fakeFilmStore
 	order    *orderRecorder
 	clips    *clipServer
+	logs     *syncBuffer
+}
+
+// syncBuffer is a slog sink safe to write from the job goroutine and
+// read from the test goroutine.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }
 
 func newPipelineHarness(t *testing.T) *pipelineHarness {
@@ -642,7 +670,12 @@ func newPipelineHarness(t *testing.T) *pipelineHarness {
 	film := newFakeFilmStore(t, db, mediaDir)
 	film.order = order
 
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	// Logs are captured, not discarded: a failed run's ERROR line is the
+	// ONLY record of what went wrong (the child sees a bare failed {}), so
+	// it is a contract worth asserting — see
+	// TestPipeline_FailedRunLogsTheError.
+	logs := &syncBuffer{}
+	log := slog.New(slog.NewTextHandler(logs, nil))
 	h, err := New(Config{
 		DB:       db,
 		Blobs:    blobs,
@@ -664,7 +697,7 @@ func newPipelineHarness(t *testing.T) *pipelineHarness {
 	return &pipelineHarness{
 		t: t, db: db, blobs: blobs, mediaDir: mediaDir, broker: broker, runner: runner,
 		h: h, chat: chat, judge: judge, imager: imager, tts: tts, pdf: pdf, render: render,
-		film: film, order: order, clips: clips,
+		film: film, order: order, clips: clips, logs: logs,
 	}
 }
 

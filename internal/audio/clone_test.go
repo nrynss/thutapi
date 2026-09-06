@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/textproto"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -214,8 +215,11 @@ func TestVoiceSampleHandler_DefaultsTranscodeAndPersist(t *testing.T) {
 	if store.contentType != "audio/mpeg" || string(store.bytes) != "ID3transcoded" {
 		t.Errorf("persist = type %q bytes %q, want audio/mpeg transcoded bytes", store.contentType, store.bytes)
 	}
-	if len(runner.calls) != 1 || runner.calls[0].executable != "/usr/local/bin/ffmpeg" {
-		t.Fatalf("runner calls = %+v, want default absolute ffmpeg", runner.calls)
+	// The default is ffmpeg resolved on PATH — the same default MixBed and
+	// the film renderer use — falling back to the container path only when
+	// PATH holds no ffmpeg (L1).
+	if len(runner.calls) != 1 || runner.calls[0].executable != defaultFFmpeg() {
+		t.Fatalf("runner calls = %+v, want default ffmpeg %q", runner.calls, defaultFFmpeg())
 	}
 	args := strings.Join(runner.calls[0].args, " ")
 	for _, want := range []string{"-nostdin", "-vn", "-c:a libmp3lame", "-b:a 128k", "-ar 44100", "-ac 1"} {
@@ -566,11 +570,212 @@ func TestNewVoiceCloneRequest_RequiresAbsoluteHTTPSSource(t *testing.T) {
 }
 
 func TestParseFFmpegDuration(t *testing.T) {
+	// The container header alone, with no decode progress line.
 	d, err := parseFFmpegDuration([]byte("Duration: 00:00:12.500, start: 0.000, bitrate: 128 kb/s"))
 	if err != nil || d != 12500*time.Millisecond {
 		t.Fatalf("duration = %v, err=%v, want 12.5s", d, err)
 	}
+	// Neither a header duration nor a progress time: still an error.
 	if _, err := parseFFmpegDuration([]byte("Duration: N/A")); err == nil {
 		t.Fatal("parseFFmpegDuration accepted missing duration")
+	}
+
+	// H1: a live-muxed WebM reports "Duration: N/A" and the decoded length
+	// only on the progress line. The last time= is the full length; the
+	// earlier ones are mid-decode, and elapsed= is wall clock, not media.
+	live := []byte("  Duration: N/A, start: 0.000000, bitrate: N/A\n" +
+		"size=N/A time=00:00:03.42 bitrate=N/A speed= 400x elapsed=0:00:00.00\n" +
+		"size=N/A time=00:00:08.00 bitrate=N/A speed= 722x elapsed=0:00:00.01\n")
+	d, err = parseFFmpegDuration(live)
+	if err != nil || d != 8*time.Second {
+		t.Fatalf("live-muxed duration = %v, err=%v, want 8s", d, err)
+	}
+
+	// The decoded time wins over the header: it is what will be transcoded,
+	// so the MaxVoiceSampleDuration guard is decided on real audio.
+	both := []byte("  Duration: 00:00:02.00, start: 0.000000, bitrate: 96 kb/s\n" +
+		"size=N/A time=00:01:09.25 bitrate=N/A speed= 900x elapsed=0:00:00.07\n")
+	d, err = parseFFmpegDuration(both)
+	if err != nil || d != 69250*time.Millisecond {
+		t.Fatalf("decoded duration = %v, err=%v, want 69.25s", d, err)
+	}
+
+	// elapsed= must never be mistaken for the media time.
+	if _, err := parseFFmpegDuration([]byte("elapsed=0:00:00.01\n")); err == nil {
+		t.Fatal("parseFFmpegDuration read elapsed= as a media duration")
+	}
+}
+
+// TestCommandRunnerDuration_RealFFmpeg drives the REAL commandRunner against
+// real files, which is what H1 needed: all the handler tests above use
+// ffmpegFake, whose Duration returns a canned value, so a probe that could
+// not read a browser recording at all passed every one of them.
+//
+// The WebM here is built the way MediaRecorder builds one — live-muxed, no
+// Segment duration — with "-f webm -live 1" to a pipe. That file's container
+// header reads "Duration: N/A"; the assertion is that the probe still
+// returns its true length. The other formats guard the fallback and the
+// formats that already worked.
+func TestCommandRunnerDuration_RealFFmpeg(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skipf("ffmpeg not on PATH: %v", err)
+	}
+	dir := t.TempDir()
+
+	// A live-muxed WebM: written to stdout, so the muxer cannot seek back to
+	// fill in the Segment duration — exactly the Chrome/Firefox shape.
+	livePath := filepath.Join(dir, "live.webm")
+	live, err := os.Create(livePath)
+	if err != nil {
+		t.Fatalf("create live webm: %v", err)
+	}
+	cmd := exec.Command(ffmpeg, "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=8",
+		"-c:a", "libopus", "-f", "webm", "-live", "1", "-")
+	cmd.Stdout = live
+	runErr := cmd.Run()
+	closeErr := live.Close()
+	if runErr != nil {
+		t.Skipf("cannot build a live-muxed webm here: %v", runErr)
+	}
+	if closeErr != nil {
+		t.Fatalf("close live webm: %v", closeErr)
+	}
+
+	// Confirm the fixture really has the property H1 is about; without it
+	// this test would pass for the wrong reason.
+	probe, _ := exec.Command(ffmpeg, "-hide_banner", "-i", livePath, "-f", "null", "-").CombinedOutput()
+	if !bytes.Contains(probe, []byte("Duration: N/A")) {
+		t.Fatalf("fixture is not live-muxed — ffmpeg reported a container duration:\n%s", probe)
+	}
+
+	build := func(name string, args ...string) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		full := append([]string{"-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=8", "-y"}, args...)
+		out, err := exec.Command(ffmpeg, append(full, path)...).CombinedOutput()
+		if err != nil {
+			t.Skipf("cannot build %s here: %v: %s", name, err, out)
+		}
+		return path
+	}
+
+	cases := []struct {
+		name  string
+		input string
+	}{
+		{"live-muxed webm", livePath},
+		{"seekable webm", build("seekable.webm", "-c:a", "libopus")},
+		{"m4a", build("clip.m4a", "-c:a", "aac")},
+		{"mp3", build("clip.mp3", "-c:a", "libmp3lame")},
+		{"wav", build("clip.wav", "-c:a", "pcm_s16le")},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			d, err := commandRunner{}.Duration(context.Background(), ffmpeg, tt.input)
+			if err != nil {
+				t.Fatalf("Duration(%s) = %v", tt.name, err)
+			}
+			// Encoder priming and frame granularity move the length by a
+			// few tens of milliseconds; 8s ± 0.25s is the real assertion.
+			if d < 7750*time.Millisecond || d > 8250*time.Millisecond {
+				t.Fatalf("Duration(%s) = %v, want ~8s", tt.name, d)
+			}
+		})
+	}
+}
+
+// TestVoiceSampleHandler_BrowserRecordingIsAccepted is H1's end-to-end
+// regression test: the whole POST /voice-sample path, with the REAL
+// commandRunner and the real ffmpeg, fed the exact kind of file a browser
+// produces.
+//
+// This is the defect's actual entry point. Chrome and Firefox both pick
+// audio/webm — the first two candidates static/app.js offers — and
+// MediaRecorder mixes WebM live, so the Segment carries no duration and
+// ffmpeg prints "Duration: N/A" for it. The duration probe ran before the
+// transcode, missed, and every browser recording came back 502 telling the
+// adult to choose a different file format. Every other handler test here
+// uses ffmpegFake, whose Duration returns a canned value, which is why the
+// route could be broken for 100% of Chrome and Firefox users while all
+// sixteen of them passed.
+func TestVoiceSampleHandler_BrowserRecordingIsAccepted(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skipf("ffmpeg not on PATH: %v", err)
+	}
+
+	// Build the recording the way MediaRecorder does: muxed to a pipe, so
+	// the muxer can never seek back to write the Segment duration.
+	var webm bytes.Buffer
+	cmd := exec.Command(ffmpeg, "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=8",
+		"-c:a", "libopus", "-f", "webm", "-live", "1", "-")
+	cmd.Stdout = &webm
+	if err := cmd.Run(); err != nil {
+		t.Skipf("cannot build a live-muxed webm here: %v", err)
+	}
+
+	store := &sampleStoreFake{id: "aabbcc"}
+	cloner := &voiceClonerFake{}
+	h, err := NewVoiceSampleHandler(VoiceSampleConfig{
+		Store:        store,
+		PublicOrigin: "https://thutapi.nryn.dev",
+		TempDir:      t.TempDir(),
+		UploadToken:  "test-upload-token",
+		Cloner:       cloner,
+		// No Runner and no FFmpegPath: the real commandRunner and the
+		// resolved default executable, exactly as production wires them.
+	})
+	if err != nil {
+		t.Fatalf("NewVoiceSampleHandler: %v", err)
+	}
+	t.Cleanup(h.Close)
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, sampleRequest(t, webm.Bytes(), "audio/webm; codecs=opus"))
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("POST a browser recording = %d: %s\n(a 502 here is H1: the duration probe could not read a live-muxed WebM)", rr.Code, rr.Body.String())
+	}
+	if store.contentType != "audio/mpeg" || len(store.bytes) == 0 {
+		t.Errorf("persisted = type %q, %d bytes; want a transcoded audio/mpeg", store.contentType, len(store.bytes))
+	}
+}
+
+// TestVoiceSampleHandler_AuthIsCheckedBeforeConsent pins L3's reorder: an
+// unauthenticated request is refused for its MISSING BEARER, never told
+// first that the route wants a consent header. The bearer is the real
+// gate; consent is an affirmative declaration by an already-authorized
+// caller, not an access control.
+func TestVoiceSampleHandler_AuthIsCheckedBeforeConsent(t *testing.T) {
+	h := newVoiceSampleTestHandler(t, &sampleStoreFake{id: "id"}, &ffmpegFake{output: []byte("ID3")})
+
+	// Neither header: the answer must be about authorization.
+	req := httptest.NewRequest(http.MethodPost, "/voice-sample", bytes.NewReader([]byte("webm")))
+	req.Header.Set("Content-Type", "audio/webm")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("no bearer, no consent = %d (%s), want 401 — auth is decided first", rr.Code, rr.Body.String())
+	}
+
+	// Consent supplied but still no bearer: still 401, and the prober
+	// learns nothing about what else the route wants.
+	req = httptest.NewRequest(http.MethodPost, "/voice-sample", bytes.NewReader([]byte("webm")))
+	req.Header.Set("Content-Type", "audio/webm")
+	req.Header.Set("X-Voice-Sample-Consent", "yes")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("consent without a bearer = %d, want 401", rr.Code)
+	}
+
+	// Authorized but no consent: NOW the consent requirement is reported.
+	req = httptest.NewRequest(http.MethodPost, "/voice-sample", bytes.NewReader([]byte("webm")))
+	req.Header.Set("Content-Type", "audio/webm")
+	req.Header.Set("Authorization", "Bearer test-upload-token")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("authorized without consent = %d (%s), want 403", rr.Code, rr.Body.String())
 	}
 }

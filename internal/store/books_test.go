@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 )
 
 // TestBookLifecycle covers create → read → list → update → delete for
@@ -206,5 +207,69 @@ func TestBookByline(t *testing.T) {
 	}
 	if cleared.Byline != "" {
 		t.Errorf("byline after clear = %q, want empty", cleared.Byline)
+	}
+}
+
+// TestCreateBookWithIDPreservesEverythingItIsGiven is §T11's prewarm
+// requirement: a fixture restores a book under the id it was published
+// at, with its byline and its original creation time.
+func TestCreateBookWithIDPreservesEverythingItIsGiven(t *testing.T) {
+	ctx := t.Context()
+	db := openTestDB(t)
+
+	want := Book{
+		ID:        "d625fd608be48227f08c33cf860e5de8",
+		Title:     "Bo and Pip's Moon Mango Dance",
+		Byline:    "monu",
+		CreatedAt: time.Date(2026, 9, 6, 3, 54, 9, 0, time.UTC),
+	}
+	created, err := db.CreateBookWithID(ctx, want)
+	if err != nil {
+		t.Fatalf("create with id: %v", err)
+	}
+	if created != want {
+		t.Fatalf("create returned %+v, want %+v", created, want)
+	}
+	got, err := db.Book(ctx, want.ID)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if got.ID != want.ID || got.Title != want.Title || got.Byline != want.Byline || !got.CreatedAt.Equal(want.CreatedAt) {
+		t.Fatalf("read back %+v, want %+v", got, want)
+	}
+}
+
+// TestCreateBookWithIDStampsAZeroCreatedAt exercises the one default in
+// CreateBookWithID through its own default path.
+func TestCreateBookWithIDStampsAZeroCreatedAt(t *testing.T) {
+	ctx := t.Context()
+	db := openTestDB(t)
+	before := time.Now().UTC().Truncate(time.Second)
+	created, err := db.CreateBookWithID(ctx, Book{ID: "00000000000000000000000000000001", Title: "t"})
+	if err != nil {
+		t.Fatalf("create with id: %v", err)
+	}
+	if created.CreatedAt.Before(before) {
+		t.Fatalf("CreatedAt = %v, want now (at or after %v)", created.CreatedAt, before)
+	}
+	if created.CreatedAt.Truncate(time.Second) != created.CreatedAt {
+		t.Fatalf("CreatedAt = %v, want second precision", created.CreatedAt)
+	}
+}
+
+func TestCreateBookWithIDRejectsBadInput(t *testing.T) {
+	ctx := t.Context()
+	db := openTestDB(t)
+	if _, err := db.CreateBookWithID(ctx, Book{Title: "t"}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("empty id error = %v, want ErrInvalid", err)
+	}
+	if _, err := db.CreateBookWithID(ctx, Book{ID: "00000000000000000000000000000002"}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("empty title error = %v, want ErrInvalid", err)
+	}
+	if _, err := db.CreateBookWithID(ctx, Book{ID: "00000000000000000000000000000003", Title: "t"}); err != nil {
+		t.Fatalf("first insert: %v", err)
+	}
+	if _, err := db.CreateBookWithID(ctx, Book{ID: "00000000000000000000000000000003", Title: "t"}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("duplicate id error = %v, want ErrConflict", err)
 	}
 }

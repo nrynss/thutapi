@@ -392,8 +392,14 @@ func TestInterviewRunsToEndOnChecklist(t *testing.T) {
 			t.Fatalf("call %d carried Thinking %+v, want nil (thinking is OFF for every interview call)", i, req.Thinking)
 		}
 		// system + the transcript so far: call i carries 1+(i-1)*2 turns
-		// (opening, then child+question per exchange).
-		if got, want := len(req.Messages), 1+(i-1)*2; got != want {
+		// (opening, then child+question per exchange). Call 1 has no
+		// transcript yet and carries the opening directive instead —
+		// MiniMax rejects a system-only conversation as empty.
+		want := 1 + (i-1)*2
+		if i == 1 {
+			want++
+		}
+		if got := len(req.Messages); got != want {
 			t.Fatalf("call %d has %d messages, want %d (system + one per transcript turn)", i, got, want)
 		}
 		if req.Messages[0].Role != "system" {
@@ -793,8 +799,23 @@ func TestRestartedHandlerSeesEndedInterview(t *testing.T) {
 	_, body := postJSON(t, srv.URL+"/interviews", nil)
 	id := body["id"].(string)
 	waitTranscriptTurn(t, h, id, 1)
-	for _, answer := range checklistAnswers {
-		postJSON(t, srv.URL+"/interviews/"+id+"/answers", map[string]string{"text": answer})
+	// One answer at a time. A turn is in flight from the POST that
+	// starts it until it has persisted its reply, and answer() refuses
+	// an answer that arrives meanwhile with ErrBusy (409) — so posting
+	// the six blind drops whichever ones land inside a turn's window,
+	// the script never reaches its "end" reply, and the wait below
+	// hangs for a closing turn nothing will ever write. Waiting for
+	// each turn to land is the same gate the SSE-observing tests get
+	// from their per-answer question event; the store is the
+	// authoritative source, and the turn is persisted before s.mu is
+	// released, so a visible turn means the next answer is accepted.
+	for i, answer := range checklistAnswers {
+		code, body := postJSON(t, srv.URL+"/interviews/"+id+"/answers", map[string]string{"text": answer})
+		if code != 202 {
+			t.Fatalf("answer %d status = %d (%v), want 202", i+1, code, body)
+		}
+		// The opening question plus a child turn and a reply per answer.
+		waitTranscriptTurn(t, h, id, 1+2*(i+1))
 	}
 	waitTranscriptRole(t, ts, id, RoleClosing)
 
@@ -887,8 +908,15 @@ func TestStallEndRequiresNoProgress(t *testing.T) {
 		_, body := postJSON(t, srv.URL+"/interviews", nil)
 		id := body["id"].(string)
 		waitTranscriptTurn(t, h, id, 1)
-		if got := len(chat.request(1).Messages); got != 1 {
-			t.Fatalf("opening call carries %d messages, want 1 (no directive before any answer)", got)
+		// The opening call carries system + the opening directive and
+		// nothing else: no STALL directive before any answer exists.
+		opening := chat.request(1).Messages
+		if got := len(opening); got != 2 {
+			t.Fatalf("opening call carries %d messages, want 2 (system + opening directive)", got)
+		}
+		if opening[1].Role != "user" || opening[1].Content != openingDirective {
+			t.Fatalf("opening call message[1] = %q/%q, want user/%q (a stall directive must not precede any answer)",
+				opening[1].Role, opening[1].Content, openingDirective)
 		}
 		s := sub(t, broker, id)
 

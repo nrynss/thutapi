@@ -303,13 +303,20 @@ func discardLog() *log.Logger { return log.New(io.Discard, "", 0) }
 // fetch rather than hanging on a slow edge).
 func TestFetchAudio_ContextCancellation(t *testing.T) {
 	blocked := make(chan struct{})
-	defer close(blocked)
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		<-blocked
 	}))
 	srv.Config.ErrorLog = discardLog()
 	srv.Start()
-	defer srv.Close()
+	// ONE defer, in this order: releasing the parked handler must happen
+	// BEFORE Close. Two separate defers run LIFO, so Close ran first and
+	// waited forever on the still-parked connection — a deadlock that only
+	// showed under whole-package load and made `go test ./... -race` red
+	// about 60% of the time (M4).
+	defer func() {
+		close(blocked)
+		srv.Close()
+	}()
 
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)

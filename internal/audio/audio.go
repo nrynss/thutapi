@@ -284,6 +284,12 @@ type Clip struct {
 	Duration time.Duration
 }
 
+// Spoken reports whether this page actually has narration. A clip whose
+// page failed to narrate carries its N and nothing else (see
+// NarrateBook): the film renders that page at the captioned-silent tier
+// while its neighbours keep their voices.
+func (c Clip) Spoken() bool { return c.Media.ID != "" }
+
 // speaker is a resolved Config: every default already substituted, so
 // no code below re-reads Config and no default can be applied twice
 // or in two ways.
@@ -336,10 +342,21 @@ func (cfg Config) resolve() (*speaker, error) {
 // Everything that can fail without spending money fails first: the
 // configuration, the store presence, and every page — a page with no
 // text, an out-of-set emotion, a duplicate or zero page number is
-// refused before any call. The pages then fan out through errgroup
-// bounded to Config.Limit, and the first failure cancels the rest;
-// on any error the returned clips are nil and the run is total —
-// a book half-narrated is not a book.
+// refused before any call. Those pre-flight failures return a nil
+// clips slice and an error: nothing was spoken and nothing was spent.
+//
+// After pre-flight the pages fan out through errgroup bounded to
+// Config.Limit, and a page that fails NO LONGER CANCELS ITS SIBLINGS.
+// Narration is per-page degradable (PLAN.md §T10f/§T10g): one page's
+// TTS failing must not discard a book whose pages are already
+// structured, illustrated and paid for. So this returns BOTH a full
+// clips slice — one entry per page, in page order — AND a joined error
+// naming every page that failed. A failed page's entry carries its N
+// and nothing else, which Clip.Spoken reports as false and the film
+// renders at the captioned-silent tier. The caller degrades; it does
+// not have to abandon the book. When the context is cancelled the run
+// really is over, and that reaches the caller through the joined
+// error with ctx.Err() set.
 //
 // The book and page rows must already exist — store.CreateBook and
 // store.CreatePage are the caller's, exactly as for T7's BookWriter —
@@ -363,22 +380,31 @@ func NarrateBook(ctx context.Context, cfg Config, bookID string, pages []story.P
 	w := &narrationWriter{db: cfg.DB, blobs: cfg.Blobs, bookID: bookID}
 
 	clips := make([]Clip, len(pages))
-	g, gctx := errgroup.WithContext(ctx)
+	failures := make([]error, len(pages))
+	// A plain Group, not errgroup.WithContext: a WithContext group
+	// cancels its own context on the first error, which would turn one
+	// page's TTS failure into every other page's cancellation — the
+	// all-or-nothing behaviour that discarded a live book on 2026-09-06.
+	// Each goroutine writes only its own index of clips and failures, so
+	// no lock is needed.
+	var g errgroup.Group
 	g.SetLimit(sp.limit)
 	for i, p := range pages {
 		g.Go(func() error {
-			m, d, err := sp.narratePage(gctx, w, p)
+			// Every page's slot is anchored by its own N whether or not
+			// it is spoken, so the caller can align clips to pages.
+			clips[i] = Clip{N: p.N}
+			m, d, err := sp.narratePage(ctx, w, p)
 			if err != nil {
-				return fmt.Errorf("audio: narrate page %d: %w", p.N, err)
+				failures[i] = fmt.Errorf("audio: narrate page %d: %w", p.N, err)
+				return nil // one page's failure is not the book's
 			}
 			clips[i] = Clip{N: p.N, Media: m, Duration: d}
 			return nil
 		})
 	}
-	if err := g.Wait(); err != nil {
-		return nil, err
-	}
-	return clips, nil
+	_ = g.Wait() // no goroutine returns an error; the failures are collected per page
+	return clips, errors.Join(failures...)
 }
 
 // narratePage runs one page through the whole narration pipeline:

@@ -14,7 +14,14 @@ h1{font-size:clamp(1.75rem,7vw,3.5rem);line-height:1.25;margin:0}
 .warm{color:var(--muted)}
 .card form,.answer{display:grid;gap:12px}
 .card label{display:grid;gap:8px;font-weight:700}
-input{font:inherit;min-height:60px;border:2px solid var(--rule);border-radius:14px;padding:10px 14px;width:100%;background:var(--bg);color:var(--ink)}
+input:not([type=checkbox]):not([type=radio]){font:inherit;min-height:60px;border:2px solid var(--rule);border-radius:14px;padding:10px 14px;width:100%;background:var(--bg);color:var(--ink)}
+/* A checkbox is a control, not a field: the rule above sized every one
+   of them to the full 592x60 text-input box, which floated the consent
+   tick above its own sentence as a large empty rectangle (M2). */
+input[type=checkbox]{width:24px;height:24px;min-height:0;flex:none;accent-color:var(--accent);margin:0}
+/* The consent tick sits BESIDE its sentence, not stacked above it —
+   .card label is a grid, which would put it on its own row. */
+.card label.consent{display:flex;align-items:flex-start;gap:10px}
 .answer{position:sticky;bottom:0;background:var(--bg);padding:12px 0 calc(12px + env(safe-area-inset-bottom));grid-template-columns:1fr auto}
 .chips,.doors{display:flex;flex-wrap:wrap;gap:12px}
 .chips button{flex:1 1 180px}

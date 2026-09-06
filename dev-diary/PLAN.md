@@ -115,12 +115,13 @@ size as the yardstick:
 | ~~**T10b**~~ | book template in `internal/web/**`, `static/book/**`, route lines | — | **DONE** | Closed at round-6 **APPROVE 0/0/0/0, zero residue**; C4 keeps reload state truthful across reconnects |
 | ~~**T10d**~~ | `supportedTypes` in `internal/mediastore/` + its test | — | **DONE** | Closed at round 1: **APPROVE 0/0/0/0, zero residue**. Added `video/mp4` with Range support |
 | ~~**T10f**~~ | `internal/bookpdf/**` + its own `application/pdf` and `bookgen` stage lines | T5, T7 | **DONE** `326d2c1` | Closed at round-3 APPROVE 0/0/0/0. PDF always; narration-503 → `narration_unavailable`, PDF-only success (pre-activation — the film-either-way flip is T10g's) |
-| ~~**T10g**~~ | its own caption lines in `internal/bookvideo` + a wrap helper | T5, T10a | **DONE** `7e8c5a8` | Closed at round-2 APPROVE 0/0/0/0. Words on every page at 1080×1620; captioned-silent tier makes a film either way; the §T10f both-URLs contract is live. T10e's geometry pin migrated — the operator re-run at the new geometry is outstanding |
+| ~~**T10g**~~ | its own caption lines in `internal/bookvideo` + a wrap helper | T5, T10a | **DONE** `7e8c5a8` | Closed at round-2 APPROVE 0/0/0/0. Words on every page at 1080×1620; captioned-silent tier makes a film either way; the §T10f both-URLs contract is live. T10e's geometry pin migrated, and the **re-run at 1080×1620 is DONE** (2026-09-06, PASS) — see §T10e |
 | ~~**T10e**~~ | `internal/bookgen/live_test.go` + `t10e-live-record.md` | T10d | **DONE** | Closed at round-1 APPROVE 0/0/0/0. Full joined pipeline verified live end-to-end |
 | ~~**T10c**~~ | `internal/bookgen/**` + route lines | T5, T6, T7, T8, T10a | **DONE** | Closed at round-1 APPROVE 0/0/0/0 |
 | **T11** gate | `internal/gate/**` + route wrap | — | **S** | Middleware against no one else's code |
 | **T11** sweep | retention sweep in `internal/mediastore/` | — (T3 closed) | **S** | Disk cap arithmetic |
 | **T11** prewarm | fixtures | T10b | **M** | Needs real finished books: money, clock, free window |
+| **T9b** | shelf landing in `internal/web/**` + `static/**`, plus completing the prewarm fixture | T11 prewarm | **M** | Two closed tracks (T9, T10b) and a fixture that must be finished without a paid run |
 | **T12** | `internal/audio/music.go` | T8, T10a | **S** | Nothing left: the mix is a **verified 1.1 s final pass** over the finished MP4 (below). One free live call to get the bed |
 | ~~**T13**~~ | `internal/audio/clone.go`, **plus both capture modes in `static/**` and one upload route** | — | **DONE** | Closed at round-5 **APPROVE 0/0/0/0, zero residue**; clone-result/HD handoff is deferred operator verification |
 | **T14** | `README.md`, submission assets | T11 (+T12/T13) | **M** | Fixed 4-hour box; the demo video is an edit, not a build |
@@ -225,9 +226,9 @@ routes anyway; not worth doing speculatively before then.**
 | **T10c** | **DONE** 2026-09-05, closed at `61e4da5` — **round-1 APPROVE 0/0/0/0, zero residue** (t10c-round1.md; five reviewer mutations red, byte-identical restores). `internal/bookgen` joins every stage: `POST /interviews/{id}/generate` → job on the book's topic; 409-busy double-fire refusal, fresh run after terminal; stages in order (structure with byline/page-cast rows → illustrate with Judge+Persist → narrate → bookvideo → film persisted + attached); events `page_approved {n,image_url}` (drives T9a's `--done`) / `book_ready {video_url}` / `failed {}` exactly-once incl. panic; failure total + terminal, no auto retry; store-side catch-up pinned. Contract rows C1–C6 sanctioned. **Two cross-track deliverables ride on this:** C2 — mediastore's closed type set lacks `video/mp4`, so production film persist lands when its owner adds the type (lifecycle pinned via the filmStore seam meanwhile); C4 — the HTTP book-state catch-up read is T10b's. |
 | **T10a** | **DONE** 2026-09-05. Closed after round-1 remediation and **round-2 APPROVE 0/0/0/0, zero residue** (t10a-round1.md, t10a-remediation-round1.md, t10a-round2.md). Implemented video pipeline in `internal/bookvideo` (`types.go`, `command.go`, `video.go`, `bookvideo_test.go`): title card (blurred page 1 with title + byline via `textfile=`), page segments (`-shortest`, scale/pad/setsar 1080x1350 4:5 portrait, libx264/aac), end card (flat `0x1b1614` with domain attribution), and concat demuxer (`-c copy +faststart` with MP4 metadata tags). Bounded concurrency via `errgroup.SetLimit`. Added static ffmpeg 7.1 pinned by immutable sha256 digest to `Dockerfile`. Coverage 89.1%. |
 | **T10b** | **DONE** 2026-09-06. Closed at round 6: **APPROVE 0/0/0/0, zero residue** (t10b-round1.md → t10b-remediation-round1.md → t10b-round2.md → t10b-remediation-round2.md → t10b-round3.md → t10b-remediation-round3.md → t10b-round4.md → t10b-remediation-round4.md → t10b-round5.md → t10b-remediation-round5.md → t10b-round6.md). Delivers the server-rendered book page and T10c C4 catch-up read. |
-| **T10g** | **DONE** 2026-09-06, closed at `7e8c5a8` — round 1 (0C/0H/1M/1L) → remediation → **round 2 APPROVE 0/0/0/0** (t10g-round1.md → t10g-remediation-round1.md → t10g-round2.md). Every film segment moved to **1080×1620** — 1080×1350 4:5 art full-bleed (increase+crop), 270px `--surface` band below with `--ink` words; title/end cards on `--film`; one master geometry constant, concat-free agreement preserved. Words via one drawtext per page (`textfile=`, `expansion=none`, `text_align=C`), wrapped in Go by rune count (≤3 lines, one shrink 60→52, ellipsis; all 8 real page texts fit). Font: embedded Fredoka-Regular instance derived single-source from the vendored variable face (byte-identical to bookpdf's audited md5), materialised per render — the runtime image ships no fonts. Audio tiers: narration → `-shortest`; absent → anullsrc at words/2.0s clamp [4s,14s]. **Bookgen contract row (the §T10f activation):** narration 503 → `narration_unavailable {}` once, the film is still made captioned-silent, `book_ready` carries **both** `pdf_url` and `video_url`. Coverage: bookvideo 88.2, bookgen 81.8. T10e's geometry pin migrated — the live re-run at 1080×1620 is the operator's outstanding step. |
+| **T10g** | **DONE** 2026-09-06, closed at `7e8c5a8` — round 1 (0C/0H/1M/1L) → remediation → **round 2 APPROVE 0/0/0/0** (t10g-round1.md → t10g-remediation-round1.md → t10g-round2.md). Every film segment moved to **1080×1620** — 1080×1350 4:5 art full-bleed (increase+crop), 270px `--surface` band below with `--ink` words; title/end cards on `--film`; one master geometry constant, concat-free agreement preserved. Words via one drawtext per page (`textfile=`, `expansion=none`, `text_align=C`), wrapped in Go by rune count (≤3 lines, one shrink 60→52, ellipsis; all 8 real page texts fit). Font: embedded Fredoka-Regular instance derived single-source from the vendored variable face (byte-identical to bookpdf's audited md5), materialised per render — the runtime image ships no fonts. Audio tiers: narration → `-shortest`; absent → anullsrc at words/2.0s clamp [4s,14s]. **Bookgen contract row (the §T10f activation):** narration 503 → `narration_unavailable {}` once, the film is still made captioned-silent, `book_ready` carries **both** `pdf_url` and `video_url`. Coverage: bookvideo 88.2, bookgen 81.8. T10e's geometry pin migrated and the live re-run at 1080×1620 **passed on 2026-09-06** — see §T10e. It was never operator work: the re-run is cache-backed and cost nothing. |
 | **T10f** | **DONE** 2026-09-06, closed at `326d2c1` — round 1 (0C/1H/2L) → round 2 (0C/0H/0M/5L) → **round 3 APPROVE 0/0/0/0, zero residue** (t10f-round1.md → t10f-remediation-round1.md → t10f-round2.md → t10f-remediation-round2.md → t10f-round3.md). `internal/bookpdf` renders the printable A4 book (title page + byline, page JPEG pass-through + text, Fredoka embedded single-source from the vendored variable face, fpdf v0.9.0 as a direct require with its §T0 reason); `application/pdf` joined mediastore's closed set (T10d's `video/mp4` precedent) with a Range pin; bookgen gained its PDF stage between narrate and film under contract rows; cmd wired. **Outage semantics — now fully activated:** T10g (`7e8c5a8`) landed the captioned-silent tier, so narration 503 emits `narration_unavailable {}` once and the run still **succeeds** with BOTH the PDF and the film; `book_ready` carries `pdf_url` and `video_url` on every run. The PDF-only intermediate state (film skipped) was T10f's close-time contract and is history. |
-| **T10e** | **DONE** 2026-09-05. Closed at round 1: **APPROVE 0/0/0/0, zero residue** (t10e-live-record.md, t10e-round1.md). Full generation pipeline verified live end-to-end: Phase-A interview transcript structured by M3 (22.4s); 3 reference sheets + 8 pages illustrated via seedream-5.0-lite with M3 consistency judge; live judge caught character drift on pages 4 and 8, triggering T7 regeneration loop, and approved on re-render; upstream TTS 503 capacity outage documented; video rendered via ffmpeg 7.1 in 5.1s (title card + 8 segments + end card); MP4 persisted in mediastore; HTTP serving verified (200 OK immutable + 206 Partial Content Range); ffprobe confirmed 1080x1350 h264/aac; SSE sequence verified: 8 page_approved, 1 book_ready, 0 failed. Probe in `internal/bookgen/live_test.go`. |
+| **T10e** | **DONE** 2026-09-05. Closed at round 1: **APPROVE 0/0/0/0, zero residue** (t10e-live-record.md, t10e-round1.md). Full generation pipeline verified live end-to-end: Phase-A interview transcript structured by M3 (22.4s); 3 reference sheets + 8 pages illustrated via seedream-5.0-lite with M3 consistency judge; live judge caught character drift on pages 4 and 8, triggering T7 regeneration loop, and approved on re-render; upstream TTS 503 capacity outage documented; video rendered via ffmpeg 7.1 in 5.1s (title card + 8 segments + end card); MP4 persisted in mediastore; HTTP serving verified (200 OK immutable + 206 Partial Content Range); ffprobe confirmed 1080x1350 h264/aac; SSE sequence verified: 8 page_approved, 1 book_ready, 0 failed. Probe in `internal/bookgen/live_test.go`. **Re-run 2026-09-06 at the T10g geometry: PASS.** ffprobe confirms **1080×1620** h264/aac (the original run recorded 1080×1350, which T10g superseded); `book_ready` carried both `pdf_url` and `video_url`; 8 `page_approved`, 0 `failed`; pipeline 8.0s. **This was not operator work and cost nothing** — `live_test.go:609` auto-starts a local cache server from `data/live/cache/` whenever `story.json` parses, and every paid stage was served from it (structure, 2 sheets, 8 pages, 8 judge calls, 8 TTS). Only the ffmpeg render was real work, 6.14s. A `GMI_API_KEY` must merely be non-empty for the guard at `live_test.go:572`; no provider is contacted. Re-run it after any geometry or segment change. |
 | **T10d** | **DONE** 2026-09-05. Closed at round 1: **APPROVE 0/0/0/0, zero residue** (t10d-round1.md). Resolves T10c's contract row C2: added `"video/mp4": true` to closed `mediastore.supportedTypes`, updated package doc and set doc comment, replaced `"video/mp4"` in unsupported test cases with `"video/webm"`, and pinned persistence, serving, and Range requests (206 Partial Content, sub-slice and suffix) via `TestPersistAndServeVideoMP4_RangeRequest`. Coverage: mediastore 95.6%. |
 | **T11** | Not started. Gate targets exactly one route — `POST /interviews/{id}/generate`, the only one that spends money — and must **not** gate the shelf, the book page or `GET /media/{id}`. **Prewarm cannot run before T5c and T10d**, or the judges' landing books are generated twice. Item 4 now specs the unplaced-orphan sweep. |
 | **T12** | Not started. **Ships** — no longer optional (operator, 2026-09-05). **Schema settled 2026-09-05, and it moved the goalposts:** `minimax-music-3.0` requires **`lyrics`**, and a sung vocal under a narrated children's book is worse than silence. No duration parameter either (harmless — the verified mix loops). One free call must settle whether an instrumental-directing `prompt` yields a usable bed **before** any decode is written. Depends on **T10a**, not T10. |
@@ -1862,6 +1863,67 @@ glance, in the warm palette, is the deliverable — the motion is done.
   on a 390 px screen. Change it if it looks thin.
 * Keep it in one file with its SVGs inline. It has no dependencies and should
   not acquire any — that is the whole point of the track.
+
+---
+
+## T9b — The shelf actually has books on it
+
+**Owns:** the shelf landing in `internal/web/**` (`web.Shelf`, `shelf.html`) and
+its client-rendered twin in `static/app.js`, plus the completion of the prewarm
+fixture under `data/prewarm/`.
+
+**Depends on:** T11's prewarm (done — `internal/prewarm/**` exports and
+restores a book with every id preserved). **Cx:** M.
+
+Split out of T11 rather than taken inside it, because it is a contract change
+to two closed tracks — T9 and T10b, six review rounds each — and the T11 agent
+correctly refused to make that call unilaterally.
+
+### Part 1 — prewarmed books become screen 1
+
+§T11 item 2 asks for the prewarmed books to be *"the default landing
+experience"*. T11 delivered the fixtures and stopped there, which is what the
+remaining-work table gave it (`**T11** prewarm | fixtures`). What is left is
+the shelf itself: today `shelf.html` is a static hero with one CTA, and
+`app.js`'s `Shelf` re-renders the same thing client-side. Both must learn to
+list restored books.
+
+Three surfaces, and all three have to agree or the page duplicates itself:
+
+* `web.Shelf` becomes a handler with a store, listing restored books.
+* `shelf.html` gains a `{{range}}` — and it is the **no-JS fallback**, so it
+  must stand alone.
+* `static/app.js`'s `Shelf` must render the same list. **Read §T9 post-close
+  fix 1 first:** the client clears `#app` before mounting, so a server-rendered
+  list is replaced, not appended. Get that wrong and every book shows twice.
+
+The book cards link to `/book/{id}`, which is already public and ungated by
+T11's route table — a shared book must open for someone with no passcode.
+
+### Part 2 — the fixture book, completed without paying for it
+
+`data/prewarm/d625fd608be48227f08c33cf860e5de8/` ("Bo and Pip's Moon Mango
+Dance") carries 18 blobs — 8 illustrations, 3 reference sheets, 7 narration
+clips — because the live run that produced it **failed at page 4's narration**
+before the film and PDF stages. So `/book/{id}/state` reports `not_started`
+and both download links 404. A landing shelf whose one book cannot be opened
+is worse than no shelf.
+
+**The artefacts already exist and cost nothing to install.** The recovered film
+(1080×1620 h264/aac, 82.5s, 3.48 MB) and the 9-page PDF (3.53 MB) were rendered
+offline from exactly these blobs, with page 4 on the captioned-silent tier —
+which is what the pipeline should have produced by itself. Persist them as
+`video/mp4` and `application/pdf` media rows against this book id, then
+re-export the fixture so a restore carries them.
+
+**Do not start a paid generation to close this**, and do not export
+`bookgen`'s unexported `renderFilm` / `renderPDF` to do it either — that is a
+closed track's internals. Persisting two finished files into the store needs
+neither.
+
+**Done when:** a cold boot against an empty data dir restores the fixture, `/`
+lists it, and its `/book/{id}` plays the film and serves both downloads — with
+JavaScript on and off.
 
 ---
 

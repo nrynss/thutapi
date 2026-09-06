@@ -62,6 +62,13 @@ jobs:
         run: |
           awk -v min="$MIN" -v gmiMin="$GMI_MIN" '
             /\[no test files\]/ { print "warn " $2 ": no test files"; next }
+            # A package with no statements cannot have coverage. static/race
+            # is package race_test asserting over HTML/CSS, so `-cover` prints
+            # "coverage: [no statements]" -- which the parse below reads as
+            # "[no" -> 0%, failing the floor on a package that has tests and
+            # nothing to instrument. Skipped like the no-test-files case; this
+            # lowers no floor.
+            /\[no statements\]/ { print "warn " $2 ": no statements to cover"; next }
             /coverage:/ {
               pct = ""
               for (i = 1; i <= NF; i++) if ($i == "coverage:") { pct = $(i+1); break }

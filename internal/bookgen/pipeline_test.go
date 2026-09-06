@@ -348,10 +348,16 @@ func TestPipeline_ApprovalEventsCarryRealIds(t *testing.T) {
 // job lands its terminal error, the book topic carries failed {} (and
 // nothing else terminal), and a re-POST after the terminal starts a
 // fresh run that completes.
+//
+// The vehicle is the PDF stage. It used to be narration, which is no
+// longer a fatal stage at all (§T10f/§T10g, H3): narration degrades
+// per page and the book still lands with both URLs, so it can no
+// longer stand in for "a stage failed". The PDF is a genuine hard
+// stage — book_ready must never name a pdf_url that was not rendered.
 func TestPipeline_FailureIsTotalAndTerminal(t *testing.T) {
 	ph := newPipelineHarness(t)
 	ivID, bookID := ph.makeEndedInterview("")
-	ph.tts.err = errors.New("fixture: speech pool down")
+	ph.pdf.err = errors.New("fixture: pdf renderer down")
 	srv := httptest.NewServer(ph.mux())
 	defer srv.Close()
 	sub := ph.subscribe(bookID)
@@ -361,7 +367,7 @@ func TestPipeline_FailureIsTotalAndTerminal(t *testing.T) {
 		t.Fatalf("POST generate status = %d, want 202", code)
 	}
 
-	// Every page illustrated and approved before narration failed;
+	// Every page illustrated and approved before the PDF stage failed;
 	// then the run died with failed {}, never book_ready.
 	for range fullStory().Pages {
 		ph.waitEvent(sub, "page_approved")
@@ -388,7 +394,7 @@ func TestPipeline_FailureIsTotalAndTerminal(t *testing.T) {
 	// The failed run is terminal: a re-POST starts a fresh run (new
 	// job id) and this one completes. Drain events until the terminal
 	// book_ready — the fresh run re-approves every page.
-	ph.tts.err = nil
+	ph.pdf.err = nil
 	code2, res2, eerr := ph.postGenerate(srv, ivID)
 	if code2 != http.StatusAccepted {
 		t.Fatalf("re-POST after failure status = %d (%+v), want 202", code2, eerr)
@@ -633,27 +639,135 @@ func TestPipeline_NarrationTransientOutageProducesCaptionedSilentFilm(t *testing
 	}
 }
 
-// TestPipeline_NarrationNonTransientFailureFailsRun pins that a fatal non-transient
-// narration error still causes the run to fail and publish failed {}.
-func TestPipeline_NarrationNonTransientFailureFailsRun(t *testing.T) {
-	ph := newPipelineHarness(t)
-	ivID, bookID := ph.makeEndedInterview("")
-	ph.tts.err = errors.New("fatal non-transient error")
-	srv := httptest.NewServer(ph.mux())
-	defer srv.Close()
-	sub := ph.subscribe(bookID)
+// TestPipeline_NarrationFailureStillCompletesTheBook is H3's
+// regression test, and it INVERTS the pin that used to live here
+// (TestPipeline_NarrationNonTransientFailureFailsRun, which asserted a
+// non-transient narration error published failed {} and landed a
+// terminal job error). That pin contradicted §T10f/§T10g and was the
+// live defect: on 2026-09-06 an eight-page book was structured and
+// fully illustrated, seven of eight pages narrated, and page 4's TTS
+// came back "request-queue poll deadline exceeded (last status:
+// processing)" — not a 503, so not gmi.ErrTransient — and the whole
+// run failed. No pdf_url, no video_url, every illustration wasted.
+//
+// The contract this now pins: a per-page narration failure of ANY
+// error class degrades THAT PAGE to the captioned-silent tier and the
+// book completes with both URLs. The subtests cover one page failing
+// and every page failing, both with a deliberately non-transient
+// error, because no error class may be special-cased.
+func TestPipeline_NarrationFailureStillCompletesTheBook(t *testing.T) {
+	// The exact shape of the live failure: not a 503, not transient.
+	fatal := errors.New("media: request-queue poll deadline exceeded (last status: processing)")
 
-	code, res, _ := ph.postGenerate(srv, ivID)
-	if code != http.StatusAccepted {
-		t.Fatalf("POST generate status = %d, want 202", code)
+	tests := []struct {
+		name string
+		// silent reports whether the page with this text must come out
+		// silent; arrange installs the failure on the harness.
+		arrange   func(ph *pipelineHarness, st story.Story)
+		wantVoice func(text string) bool
+	}{
+		{
+			name: "one page fails",
+			arrange: func(ph *pipelineHarness, st story.Story) {
+				ph.tts.textErrs = map[string]error{st.Pages[3].Text: fatal}
+			},
+			wantVoice: func(text string) bool { return text != fullStory().Pages[3].Text },
+		},
+		{
+			name: "every page fails",
+			arrange: func(ph *pipelineHarness, st story.Story) {
+				ph.tts.err = fatal
+			},
+			wantVoice: func(string) bool { return false },
+		},
 	}
-	for range fullStory().Pages {
-		ph.waitEvent(sub, "page_approved")
-	}
-	ph.waitEvent(sub, "failed")
-	runRes := ph.waitJob(res.JobID)
-	if runRes.Status != job.StatusError {
-		t.Fatalf("job = %+v, want terminal error", runRes)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ph := newPipelineHarness(t)
+			ivID, bookID := ph.makeEndedInterview("")
+			st := fullStory()
+			tt.arrange(ph, st)
+			srv := httptest.NewServer(ph.mux())
+			defer srv.Close()
+			sub := ph.subscribe(bookID)
+
+			code, res, _ := ph.postGenerate(srv, ivID)
+			if code != http.StatusAccepted {
+				t.Fatalf("POST generate status = %d, want 202", code)
+			}
+			for range st.Pages {
+				ph.waitEvent(sub, "page_approved")
+			}
+
+			// narration_unavailable is published once, and then the run
+			// carries on: book_ready, never failed.
+			ph.waitEvent(sub, "narration_unavailable")
+			ready := ph.waitEvent(sub, "book_ready")
+
+			// BOTH URLs on every run — the §T10g contract T10g closed on.
+			pdfURL, ok := ready["pdf_url"].(string)
+			if !ok || !strings.HasPrefix(pdfURL, "/media/") || len(pdfURL) <= len("/media/") {
+				t.Fatalf("book_ready pdf_url = %v, want /media/<id>", ready["pdf_url"])
+			}
+			videoURL, ok := ready["video_url"].(string)
+			if !ok || !strings.HasPrefix(videoURL, "/media/") || len(videoURL) <= len("/media/") {
+				t.Fatalf("book_ready video_url = %v, want /media/<id>", ready["video_url"])
+			}
+
+			if runRes := ph.waitJob(res.JobID); runRes.Status != job.StatusDone || runRes.Err != nil {
+				t.Fatalf("job = %+v, want done with no error", runRes)
+			}
+
+			// The film was rendered once, mixing tiers: the pages that
+			// spoke carry audio and a Duration, the pages that failed
+			// carry neither and hold on their words alone.
+			ins := ph.render.inputs()
+			if len(ins) != 1 {
+				t.Fatalf("film renderer calls = %d, want 1", len(ins))
+			}
+			if len(ins[0].Pages) != story.PageCount {
+				t.Fatalf("render input pages = %d, want %d", len(ins[0].Pages), story.PageCount)
+			}
+			for i, p := range ins[0].Pages {
+				if p.Text != st.Pages[i].Text {
+					t.Fatalf("render page %d text = %q, want %q", p.N, p.Text, st.Pages[i].Text)
+				}
+				if len(p.ImageBytes) == 0 {
+					t.Fatalf("render page %d lacks image bytes", p.N)
+				}
+				voiced := tt.wantVoice(p.Text)
+				if got := len(p.AudioBytes) > 0; got != voiced {
+					t.Errorf("render page %d has audio = %v, want %v", p.N, got, voiced)
+				}
+				// bookvideo refuses a Duration without audio and audio
+				// without a Duration; the two must agree per page.
+				if got := p.Duration > 0; got != voiced {
+					t.Errorf("render page %d has a Duration = %v, want %v", p.N, got, voiced)
+				}
+			}
+
+			// One PDF row and one film row are really attached.
+			all, err := ph.db.BookMedia(t.Context(), bookID)
+			if err != nil {
+				t.Fatalf("book media: %v", err)
+			}
+			var pdfRows, filmRows []store.Media
+			for _, m := range all {
+				switch m.ContentType {
+				case "application/pdf":
+					pdfRows = append(pdfRows, m)
+				case "video/mp4":
+					filmRows = append(filmRows, m)
+				}
+			}
+			if len(pdfRows) != 1 || pdfRows[0].ID != pdfURL[len("/media/"):] {
+				t.Fatalf("pdf rows = %+v, want exactly the one book_ready names", pdfRows)
+			}
+			if len(filmRows) != 1 || filmRows[0].ID != videoURL[len("/media/"):] {
+				t.Fatalf("film rows = %+v, want exactly the one book_ready names", filmRows)
+			}
+		})
 	}
 }
 
@@ -1082,16 +1196,19 @@ func TestPipeline_MusicTransientFailureDegradesToThePlainFilm(t *testing.T) {
 	}
 }
 
-// TestPipeline_MusicHardFailureFailsRun pins that a NON-transient music
-// failure is total: the run fails and no film row lands.
-func TestPipeline_MusicHardFailureFailsRun(t *testing.T) {
+// TestPipeline_FailedRunLogsTheError pins H4: a generation run that
+// fails must log an ERROR naming the book and the underlying error.
+// The child is shown a bare failed {} — no code, no prose (§T9) — so
+// this line is the only record that will ever exist. When the live
+// failure of 2026-09-06 happened the server logged NOTHING at all,
+// which made it undiagnosable in production.
+func TestPipeline_FailedRunLogsTheError(t *testing.T) {
 	ph := newPipelineHarness(t)
-	ph.enableMusic(t)
-	ph.h.cfg.Music.(*fakeMusic).err = errors.New("media: payload rejected")
-	ivID, bookID := ph.makeEndedInterview("Mira")
-	sub := ph.subscribe(bookID)
+	ivID, bookID := ph.makeEndedInterview("")
+	ph.pdf.err = errors.New("fixture: pdf renderer down")
 	srv := httptest.NewServer(ph.mux())
 	defer srv.Close()
+	sub := ph.subscribe(bookID)
 
 	code, res, _ := ph.postGenerate(srv, ivID)
 	if code != http.StatusAccepted {
@@ -1100,53 +1217,122 @@ func TestPipeline_MusicHardFailureFailsRun(t *testing.T) {
 	for range fullStory().Pages {
 		ph.waitEvent(sub, "page_approved")
 	}
-	runRes := ph.waitJob(res.JobID)
-	if runRes.Status != job.StatusError {
-		t.Fatalf("job = %+v, want error", runRes)
-	}
 	ph.waitEvent(sub, "failed")
-	all, err := ph.db.BookMedia(t.Context(), bookID)
-	if err != nil {
-		t.Fatalf("book media: %v", err)
+	if runRes := ph.waitJob(res.JobID); runRes.Status != job.StatusError {
+		t.Fatalf("job = %+v, want terminal error", runRes)
 	}
-	for _, m := range all {
-		if m.ContentType == "video/mp4" {
-			t.Fatalf("failed run left a film row: %+v", m)
+
+	logs := ph.logs.String()
+	if !strings.Contains(logs, "level=ERROR") {
+		t.Fatalf("a failed run logged no ERROR line; logs:\n%s", logs)
+	}
+	for _, want := range []string{"generation failed", bookID, "fixture: pdf renderer down"} {
+		if !strings.Contains(logs, want) {
+			t.Errorf("failure log does not mention %q; logs:\n%s", want, logs)
 		}
 	}
 }
 
-// TestPipeline_MixFailureFailsRun pins that an ffmpeg failure in the
-// mix step is total: the run fails and no film row lands (the render
-// itself succeeded; the book still has no new film).
-func TestPipeline_MixFailureFailsRun(t *testing.T) {
-	ph := newPipelineHarness(t)
-	ph.enableMusic(t)
-	ph.h.cfg.MusicMix = audio.MixConfig{Runner: &fakeMixRunner{err: errors.New("ffmpeg died")}}
-	ivID, bookID := ph.makeEndedInterview("Mira")
-	sub := ph.subscribe(bookID)
-	srv := httptest.NewServer(ph.mux())
-	defer srv.Close()
+// TestPipeline_AnyMusicFailureDegradesToThePlainFilm INVERTS two pins
+// that used to live here — TestPipeline_MusicHardFailureFailsRun and
+// TestPipeline_MixFailureFailsRun, which asserted that a non-transient
+// bed failure and a failed ffmpeg mix each failed the whole run and
+// left no film row. Those pins encoded H2: by the time the music step
+// runs, the PDF is persisted and the film is RENDERED, so failing the
+// run there threw away roughly $0.35 and six minutes of finished book
+// and showed the child a failure screen — over background music.
+//
+// The contract now: ANY music failure degrades to the plain film, the
+// same way a transient one always did. The subtests cover the two
+// concrete non-transient triggers the review found (a rejected music
+// request, and a bed whose storage URL answers non-2xx) plus a broken
+// mix pass.
+func TestPipeline_AnyMusicFailureDegradesToThePlainFilm(t *testing.T) {
+	tests := []struct {
+		name string
+		// arrange installs the failure; wantMix reports whether the mix
+		// step should still have been reached.
+		arrange func(t *testing.T, ph *pipelineHarness, mix *fakeMixRunner)
+		wantMix int
+	}{
+		{
+			name: "non-transient bed failure",
+			arrange: func(_ *testing.T, ph *pipelineHarness, _ *fakeMixRunner) {
+				ph.h.cfg.Music.(*fakeMusic).err = errors.New("media: payload rejected")
+			},
+		},
+		{
+			name: "bed storage URL answers non-2xx",
+			arrange: func(_ *testing.T, ph *pipelineHarness, _ *fakeMixRunner) {
+				// The bed request succeeds and names a URL that 404s —
+				// the fetchBed leg of the failure, not the queue leg.
+				gone := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					http.Error(w, "gone", http.StatusNotFound)
+				}))
+				t.Cleanup(gone.Close)
+				ph.h.cfg.Music.(*fakeMusic).bedBase = gone.URL
+			},
+		},
+		{
+			name: "mix pass fails",
+			arrange: func(_ *testing.T, ph *pipelineHarness, _ *fakeMixRunner) {
+				ph.h.cfg.MusicMix = audio.MixConfig{Runner: &fakeMixRunner{err: errors.New("ffmpeg died")}}
+			},
+		},
+	}
 
-	code, res, _ := ph.postGenerate(srv, ivID)
-	if code != http.StatusAccepted {
-		t.Fatalf("POST generate status = %d, want 202", code)
-	}
-	for range fullStory().Pages {
-		ph.waitEvent(sub, "page_approved")
-	}
-	runRes := ph.waitJob(res.JobID)
-	if runRes.Status != job.StatusError {
-		t.Fatalf("job = %+v, want error", runRes)
-	}
-	ph.waitEvent(sub, "failed")
-	all, err := ph.db.BookMedia(t.Context(), bookID)
-	if err != nil {
-		t.Fatalf("book media: %v", err)
-	}
-	for _, m := range all {
-		if m.ContentType == "video/mp4" {
-			t.Fatalf("failed mix left a film row: %+v", m)
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ph := newPipelineHarness(t)
+			_, mix := ph.enableMusic(t)
+			tt.arrange(t, ph, mix)
+			ivID, bookID := ph.makeEndedInterview("Mira")
+			sub := ph.subscribe(bookID)
+			srv := httptest.NewServer(ph.mux())
+			defer srv.Close()
+
+			code, res, _ := ph.postGenerate(srv, ivID)
+			if code != http.StatusAccepted {
+				t.Fatalf("POST generate status = %d, want 202", code)
+			}
+			for range fullStory().Pages {
+				ph.waitEvent(sub, "page_approved")
+			}
+			ready := ph.waitEvent(sub, "book_ready")
+			videoURL, _ := ready["video_url"].(string)
+			pdfURL, _ := ready["pdf_url"].(string)
+			if !strings.HasPrefix(pdfURL, "/media/") || !strings.HasPrefix(videoURL, "/media/") {
+				t.Fatalf("book_ready = %v, want both a pdf_url and a video_url", ready)
+			}
+			if runRes := ph.waitJob(res.JobID); runRes.Status != job.StatusDone || runRes.Err != nil {
+				t.Fatalf("job = %+v, want done despite the music failure", runRes)
+			}
+			if got := mix.count(); got != tt.wantMix {
+				t.Errorf("mix calls = %d, want %d", got, tt.wantMix)
+			}
+
+			// The film that landed is the PLAIN one the renderer wrote,
+			// not a mixed file — and it is the one book_ready names.
+			all, err := ph.db.BookMedia(t.Context(), bookID)
+			if err != nil {
+				t.Fatalf("book media: %v", err)
+			}
+			films := 0
+			for _, m := range all {
+				if m.ContentType != "video/mp4" {
+					continue
+				}
+				films++
+				if m.ID != videoURL[len("/media/"):] {
+					t.Fatalf("video row %q != book_ready's %q", m.ID, videoURL)
+				}
+				if got := string(getMedia(t, srv, m.ID)); !strings.HasPrefix(got, "film:") {
+					t.Errorf("persisted film = %q, want the PLAIN film (no music)", got)
+				}
+			}
+			if films != 1 {
+				t.Fatalf("film rows = %d, want exactly 1", films)
+			}
+		})
 	}
 }
