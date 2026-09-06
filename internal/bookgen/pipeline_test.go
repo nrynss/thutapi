@@ -1673,25 +1673,20 @@ func TestComplete_RefusesABookItWouldHaveToInvent(t *testing.T) {
 	}
 }
 
-// TestIncompleteBooks_NamesOnlyTheFilmlessOnes pins what `-complete all`
-// picks up.
-func TestIncompleteBooks_NamesOnlyTheFilmlessOnes(t *testing.T) {
+// TestIncompleteBooks_NamesEveryBookMissingSound pins what `-complete all`
+// picks up. The narration half is the part that matters: the run of
+// 2026-09-06 produced a film with four of eight pages silent, so a
+// film-only check would have called that book finished and left the child
+// with the silent one.
+func TestIncompleteBooks_NamesEveryBookMissingSound(t *testing.T) {
 	ph := newPipelineHarness(t)
 	ivID, bookID := ph.makeEndedInterview("Mira")
-	unfinished, err := ph.db.CreateBook(t.Context(), "Never Generated")
+	neverStructured, err := ph.db.CreateBook(t.Context(), "Never Generated")
 	if err != nil {
 		t.Fatalf("create book: %v", err)
 	}
 	srv := httptest.NewServer(ph.mux())
 	defer srv.Close()
-
-	before, err := ph.h.IncompleteBooks(t.Context())
-	if err != nil {
-		t.Fatalf("IncompleteBooks: %v", err)
-	}
-	if !slices.Contains(before, bookID) || !slices.Contains(before, unfinished.ID) {
-		t.Fatalf("IncompleteBooks = %v, want both filmless books", before)
-	}
 
 	sub := ph.subscribe(bookID)
 	code, res, _ := ph.postGenerate(srv, ivID)
@@ -1706,14 +1701,35 @@ func TestIncompleteBooks_NamesOnlyTheFilmlessOnes(t *testing.T) {
 		t.Fatalf("job = %+v, want done", runRes)
 	}
 
-	after, err := ph.h.IncompleteBooks(t.Context())
+	// A run that landed everything is finished, and a book that was never
+	// structured is not Complete's to fix — it has no story to re-render,
+	// and naming it would only produce noise an operator cannot act on.
+	finished, err := ph.h.IncompleteBooks(t.Context())
 	if err != nil {
 		t.Fatalf("IncompleteBooks: %v", err)
 	}
-	if slices.Contains(after, bookID) {
-		t.Errorf("IncompleteBooks = %v, want the filmed book dropped", after)
+	if slices.Contains(finished, bookID) {
+		t.Errorf("IncompleteBooks = %v, want the finished book dropped", finished)
 	}
-	if !slices.Contains(after, unfinished.ID) {
-		t.Errorf("IncompleteBooks = %v, want the never-generated book kept", after)
+	if slices.Contains(finished, neverStructured.ID) {
+		t.Errorf("IncompleteBooks = %v, want the never-structured book left out", finished)
+	}
+
+	// Take one page's voice away: the book still has its film, its PDF and
+	// seven of eight voices, and it is exactly the captioned-silent book a
+	// film-only check misses.
+	clip, err := ph.db.PageMedia(t.Context(), bookID, 3, store.MediaNarration)
+	if err != nil {
+		t.Fatalf("read page 3 narration: %v", err)
+	}
+	if err := ph.db.DeleteMedia(t.Context(), clip.ID); err != nil {
+		t.Fatalf("delete page 3 narration: %v", err)
+	}
+	silent, err := ph.h.IncompleteBooks(t.Context())
+	if err != nil {
+		t.Fatalf("IncompleteBooks: %v", err)
+	}
+	if !slices.Contains(silent, bookID) {
+		t.Errorf("IncompleteBooks = %v, want a book with a silent page named", silent)
 	}
 }

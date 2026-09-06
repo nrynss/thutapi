@@ -238,13 +238,13 @@ already have, and it costs nothing but the speech and music calls.
 Complete one book:
 
 ```bash
-docker exec thutapi thutapi -data-dir /data -complete <book-id>
+docker exec thutapi /thutapi -data-dir /data -complete <book-id>
 ```
 
 Complete every book that has no film at all:
 
 ```bash
-docker exec thutapi thutapi -data-dir /data -complete all
+docker exec thutapi /thutapi -data-dir /data -complete all
 ```
 
 Add `-complete-no-music` for a speech-only film. A book that already has a
@@ -258,9 +258,23 @@ picks the finished book up on its next poll. It exits when it is done; one
 book's failure does not stop the rest, and every failure is named on the
 way out.
 
-Note that this runs a second process against the same `/data`. SQLite is
-opened in WAL mode with a 5-second busy timeout, so it coexists with the
-serving container; run one `-complete` at a time.
+`docker exec` runs it inside the SERVING container, so it uses that
+container's `/data`, its `GMI_API_KEY` and its ffmpeg — one image, one
+volume, no second copy of anything. SQLite is opened in WAL mode with a
+5-second busy timeout, so the repair and the server coexist; a `-complete`
+process deliberately does NOT start the retention sweeper, because the
+serving container is already running one. Run one `-complete` at a time.
+
+From CI, the same repair is a button:
+
+```bash
+gh workflow run complete-books.yml                     # every book missing sound
+gh workflow run complete-books.yml -f book=<book-id>   # one book
+gh workflow run complete-books.yml -f music=false      # speech only
+```
+
+It shares the `production-deploy` concurrency group, so a repair and a
+deploy can never interleave.
 
 ## DNS
 

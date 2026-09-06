@@ -79,11 +79,19 @@ func (h *Handler) Complete(ctx context.Context, bookID string, music bool, voice
 	return pdfID, videoID, nil
 }
 
-// IncompleteBooks lists the books that have no film, oldest first. A book
-// without a film is one whose run never reached its last stage — the set
-// Complete exists for. A silent film is NOT in this set: nothing in the
-// store records whether a film has a voice on it, so a book that finished
-// captioned-silent has to be named explicitly.
+// IncompleteBooks lists the books whose last three stages did not all land,
+// oldest first. A book is incomplete when it is missing its film, its PDF,
+// or a narration clip on any page it has.
+//
+// The narration check is what makes this useful rather than merely correct:
+// the run that lost four of eight voices to a per-minute cap still produced
+// a film, so "has a film" would have called that book finished and left the
+// child with the silent one. A page with no narration row is a page nobody
+// can hear, and it is visible in the store without asking the provider
+// anything.
+//
+// A book with no pages at all is never listed: it was never structured, and
+// Complete refuses it rather than inventing a story (ErrNoStructuredBook).
 func (h *Handler) IncompleteBooks(ctx context.Context) ([]string, error) {
 	books, err := h.cfg.DB.Books(ctx)
 	if err != nil {
@@ -91,22 +99,53 @@ func (h *Handler) IncompleteBooks(ctx context.Context) ([]string, error) {
 	}
 	var incomplete []string
 	for _, b := range books {
-		media, err := h.cfg.DB.BookMedia(ctx, b.ID)
+		missing, err := h.missingWork(ctx, b.ID)
 		if err != nil {
-			return nil, fmt.Errorf("bookgen: read media for book %s: %w", b.ID, err)
+			return nil, err
 		}
-		hasFilm := false
-		for _, m := range media {
-			if m.ContentType == filmContentType {
-				hasFilm = true
-				break
-			}
-		}
-		if !hasFilm {
+		if missing {
 			incomplete = append(incomplete, b.ID)
 		}
 	}
 	return incomplete, nil
+}
+
+// missingWork reports whether book bookID is missing an artifact the last
+// three stages produce.
+func (h *Handler) missingWork(ctx context.Context, bookID string) (bool, error) {
+	pages, err := h.cfg.DB.Pages(ctx, bookID)
+	if err != nil {
+		return false, fmt.Errorf("bookgen: read pages for book %s: %w", bookID, err)
+	}
+	if len(pages) == 0 {
+		return false, nil
+	}
+	media, err := h.cfg.DB.BookMedia(ctx, bookID)
+	if err != nil {
+		return false, fmt.Errorf("bookgen: read media for book %s: %w", bookID, err)
+	}
+	film, pdf := false, false
+	for _, m := range media {
+		switch m.ContentType {
+		case filmContentType:
+			film = true
+		case pdfContentType:
+			pdf = true
+		}
+	}
+	if !film || !pdf {
+		return true, nil
+	}
+	for _, p := range pages {
+		_, err := h.cfg.DB.PageMedia(ctx, bookID, p.N, store.MediaNarration)
+		if errors.Is(err, store.ErrNotFound) {
+			return true, nil
+		}
+		if err != nil {
+			return false, fmt.Errorf("bookgen: read narration for book %s page %d: %w", bookID, p.N, err)
+		}
+	}
+	return false, nil
 }
 
 // storyFromStore rebuilds the structured story out of the rows the run

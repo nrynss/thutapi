@@ -587,8 +587,14 @@ func run(log *slog.Logger, args []string, sigs <-chan os.Signal) error {
 	if err != nil {
 		return fmt.Errorf("build retention sweeper: %w", err)
 	}
-	sweeper.Start()
-	defer sweeper.Close() // run returns only at shutdown; nothing outlives it
+	// A -complete run shares /data with the container that is still serving,
+	// and that container is already sweeping. A second sweeper against the
+	// same media directory would be two processes deciding independently what
+	// is an orphan, so this one only watches when it is the one serving.
+	if cfg.completeBook == "" {
+		sweeper.Start()
+		defer sweeper.Close() // run returns only at shutdown; nothing outlives it
+	}
 
 	// T4/T10c: the interview loop and the generation pipeline stream
 	// over SSE and run off the request path (PLAN.md invariant 6 —

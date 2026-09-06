@@ -1,0 +1,95 @@
+# Finish a book whose art landed but whose sound did not. MANUAL ONLY.
+#
+# A generation run keeps a book whose narration or music failed: it degrades
+# to captioned-silent rather than binning eight paid-for illustrations. That
+# is the right call during a run, and it leaves a child holding a silent film
+# of their own story. This runs the repair on the box.
+#
+# It re-runs ONLY narration, the PDF and the film, from the pages already in
+# the store, so it cannot hand the child a different book than the one they
+# have. See internal/bookgen/complete.go and deploy/README.md.
+#
+#   gh workflow run complete-books.yml                     # every silent book
+#   gh workflow run complete-books.yml -f book=<book-id>   # one book
+#   gh workflow run complete-books.yml -f music=false      # speech only
+name: complete-books
+
+on:
+  workflow_dispatch:
+    inputs:
+      book:
+        description: 'Book id to complete, or "all" for every book missing sound'
+        required: false
+        default: all
+        type: string
+      music:
+        description: 'Mix a background music bed under the film'
+        required: false
+        default: true
+        type: boolean
+
+# Shares the deploy group: a repair rewrites the same book rows a deploy's
+# container serves, and the two must never interleave.
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  complete:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Complete books on the production box
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          BOOK: ${{ inputs.book }}
+          MUSIC: ${{ inputs.music }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "${DEPLOY_SSH_KEY}" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          printf '%s\n' "${DEPLOY_KNOWN_HOSTS}" >> ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+          DEPLOY_TARGET="${DEPLOY_HOST}"
+          if [[ "${DEPLOY_TARGET}" != *"@"* ]]; then
+            DEPLOY_TARGET="root@${DEPLOY_TARGET}"
+          fi
+
+          # The book id reaches a shell on the box, so it is checked here
+          # against the same shape the store mints: hex, or the literal
+          # "all". Nothing else is passed on.
+          if [[ ! "${BOOK}" =~ ^([0-9a-f]{8,64}|all)$ ]]; then
+            echo "refusing to run: book id ${BOOK} is not a book id or 'all'" >&2
+            exit 1
+          fi
+
+          FLAGS=""
+          if [[ "${MUSIC}" != "true" ]]; then
+            FLAGS="-complete-no-music"
+          fi
+
+          echo "Completing '${BOOK}' (music=${MUSIC})..."
+          # The repair runs inside the serving container, against the same
+          # /data it serves: one process, WAL, no second copy of the store.
+          ssh -i ~/.ssh/id_deploy "${DEPLOY_TARGET}" \
+            "docker exec thutapi /thutapi -data-dir /data -complete '${BOOK}' ${FLAGS}" \
+            2>&1 | tee /tmp/complete_out.log
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### Book completion" >> $GITHUB_STEP_SUMMARY
+          echo "- **Book:** \`${{ inputs.book }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Music:** \`${{ inputs.music }}\`" >> $GITHUB_STEP_SUMMARY
+          if [[ -f /tmp/complete_out.log ]]; then
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            tail -n 40 /tmp/complete_out.log >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- No output: the job failed before it reached the box." >> $GITHUB_STEP_SUMMARY
+          fi
