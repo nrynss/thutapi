@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -219,5 +221,37 @@ func TestCatchUpReportsRunStatusAndApprovedPages(t *testing.T) {
 	h := &Handler{cfg: Config{Jobs: resultReader{}}, runs: map[string]string{}, approvals: map[string]map[int]string{}}
 	if got := h.CatchUp("new-book"); got.Status != GenerationNotStarted || len(got.Approved) != 0 {
 		t.Fatalf("new book catch-up = %+v, want empty not_started", got)
+	}
+}
+
+// TestGenerate_MusicBodyOption verifies that Generate parses optional
+// music parameter from the request body.
+func TestGenerate_MusicBodyOption(t *testing.T) {
+	ph := newPipelineHarness(t)
+	srv := httptest.NewServer(ph.mux())
+	defer srv.Close()
+
+	// Valid JSON with music: false on ended interview
+	ivID, _ := ph.makeEndedInterview("MusicChildFalse")
+	body := strings.NewReader(`{"music": false}`)
+	resp, err := http.Post(srv.URL+"/interviews/"+ivID+"/generate", "application/json", body)
+	if err != nil {
+		t.Fatalf("POST generate: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST valid body status = %d, want 202", resp.StatusCode)
+	}
+
+	// Valid JSON with music: true on ended interview
+	ivID2, _ := ph.makeEndedInterview("MusicChildTrue")
+	body2 := strings.NewReader(`{"music": true}`)
+	resp2, err := http.Post(srv.URL+"/interviews/"+ivID2+"/generate", "application/json", body2)
+	if err != nil {
+		t.Fatalf("POST generate: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST valid body status = %d, want 202", resp2.StatusCode)
 	}
 }

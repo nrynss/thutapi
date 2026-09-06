@@ -21,7 +21,7 @@ input:not([type=checkbox]):not([type=radio]){font:inherit;min-height:60px;border
 input[type=checkbox]{width:24px;height:24px;min-height:0;flex:none;accent-color:var(--accent);margin:0}
 /* The consent tick sits BESIDE its sentence, not stacked above it —
    .card label is a grid, which would put it on its own row. */
-.card label.consent{display:flex;align-items:flex-start;gap:10px}
+.card label.consent,.card label.music-option{display:flex;align-items:flex-start;gap:10px}
 .answer{position:sticky;bottom:0;background:var(--bg);padding:12px 0 calc(12px + env(safe-area-inset-bottom));grid-template-columns:1fr auto}
 .chips,.doors{display:flex;flex-wrap:wrap;gap:12px}
 .chips button{flex:1 1 180px}

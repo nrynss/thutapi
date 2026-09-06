@@ -29,7 +29,7 @@ import (
 // (§T10g three tiers) — while the pages that spoke keep their voices, and
 // the run still succeeds with both a pdf_url and a video_url. The same is
 // true of the music bed (see renderFilm).
-func (h *Handler) runBook(ctx context.Context, bookID, ivID string) (pdfID, videoID string, err error) {
+func (h *Handler) runBook(ctx context.Context, bookID, ivID string, music bool) (pdfID, videoID string, err error) {
 	// The run outlives the POST that started it, so everything is read
 	// fresh: the interview row carries the transcript to structure and
 	// the book row carries the byline question zero wrote.
@@ -98,7 +98,7 @@ func (h *Handler) runBook(ctx context.Context, bookID, ivID string) (pdfID, vide
 
 	// Stage 5 — Film: always rendered (with narration when clips exist,
 	// captioned-silent otherwise).
-	videoID, err = h.renderFilm(ctx, bookID, st, clips)
+	videoID, err = h.renderFilm(ctx, bookID, st, clips, music)
 	if err != nil {
 		return "", "", err
 	}
@@ -268,7 +268,7 @@ func (b *approvalBridge) err() error { return b.first }
 // spoken page carries its clip's Go-known Duration (audio.Clip.Duration —
 // contract row C2 of t12-round1.md) so the renderer can total the film.
 //
-// Music (PLAN.md §T12; contract row C4): when Config.Music is set, the
+// Music (PLAN.md §T12; contract row C4): when music is enabled and Config.Music is set, the
 // film stage generates a wordless bed and runs the verified bed-fit mix
 // (audio.MixBed) over the RENDERED film BEFORE persisting — the end fade
 // anchored to the renderer's computed total — and the MIXED film is what
@@ -277,7 +277,7 @@ func (b *approvalBridge) err() error { return b.first }
 // film with a log warning, exactly as a narration outage degrades to a
 // captioned-silent film: music is a decoration on a book that is already
 // complete, and the book must still land.
-func (h *Handler) renderFilm(ctx context.Context, bookID string, st story.Story, clips []audio.Clip) (string, error) {
+func (h *Handler) renderFilm(ctx context.Context, bookID string, st story.Story, clips []audio.Clip, music bool) (string, error) {
 	if clips != nil && len(clips) != len(st.Pages) {
 		return "", fmt.Errorf("bookgen: render: narrate returned %d clips for %d pages", len(clips), len(st.Pages))
 	}
@@ -347,7 +347,7 @@ func (h *Handler) renderFilm(ctx context.Context, bookID string, st story.Story,
 	// computed — the mix anchors its end fade to it and never probes
 	// the file.
 	persistPath := name
-	if h.cfg.Music != nil {
+	if music && h.cfg.Music != nil {
 		mixed, mixErr := h.mixFilm(ctx, name, total)
 		switch {
 		case mixErr != nil && ctx.Err() != nil:

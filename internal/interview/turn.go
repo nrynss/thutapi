@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"thutapi/internal/gmi"
@@ -169,13 +170,9 @@ func (h *Handler) runTurn(ctx context.Context, id string, ending bool, reason st
 	s.filled.union(rep.Slots)
 	s.inFlight = false
 
-	// A full checklist is deliberately NOT an end condition here. A
-	// reply that fills the last slot without the model saying "end"
-	// still goes through questionTurn below, which publishes the
-	// question and then enforces the close — the documented behaviour
-	// (the goodbye path is for a model "end" or a server decision
-	// made in answer).
-	endNow := ending || rep.End
+	// A full checklist is terminal before any question event is published. The
+	// browser must never briefly offer an answer to a completed interview.
+	endNow := ending || rep.End || s.filled.full() || isClosingPhrasing(rep.Text)
 	if !endNow {
 		if rep.Text == "" {
 			// A reply that is only a control line gives the child
@@ -245,16 +242,6 @@ func (h *Handler) questionTurn(ctx context.Context, s *session, iv store.Intervi
 			})
 		}()
 	}
-	// Server-side enforcement: the checklist filled but the model did
-	// not say "end". The question still lands (it is good transcript
-	// content and often a confirmation); the interview ends right
-	// behind it with no further answer accepted. The close goes
-	// through closeTurn with the model's text absent, so the closing
-	// turn (and with it the restart-stable end) is persisted exactly
-	// as on every other end path.
-	if s.filled.full() {
-		h.closeTurn(ctx, s, iv, reply{}, ReasonChecklist)
-	}
 }
 
 // closeTurn persists and publishes the goodbye of an ended interview.
@@ -276,7 +263,54 @@ func (h *Handler) closeTurn(ctx context.Context, s *session, iv store.Interview,
 	}
 	s.ended = true
 	s.ending = false
+	s.current = nil
+	s.chips = nil
 	h.publish(iv.ID, "ended", endedEvent{Reason: reason, Text: text, Filled: s.filled.filled()})
+}
+
+// isClosingPhrasing reports whether text signals a farewell closing statement.
+func isClosingPhrasing(text string) bool {
+	lower := strings.TrimSpace(strings.ToLower(text))
+	// A farewell embedded in a question is still a question the child must
+	// be able to answer (for example, "What does Pip say when waving
+	// goodbye?"). Closing language only ends a declarative closing turn.
+	if strings.Contains(lower, "?") {
+		return false
+	}
+	lower = strings.TrimRight(lower, ".! \t\r\n")
+	lastSentence := lower[strings.LastIndexAny(lower, ".!")+1:]
+	lastSentence = strings.TrimSpace(lastSentence)
+	for _, closing := range []string{
+		"goodbye",
+		"good-bye",
+		"bye",
+		"farewell",
+	} {
+		if lastSentence == closing {
+			return true
+		}
+	}
+	for _, ending := range []string{
+		"make your book",
+		"make our book",
+		"make the book",
+		"draw your book",
+		"drawing your book",
+		"create your book",
+		"ready to make your book",
+		"ready for your book",
+		"go make your book",
+		"go make our book",
+		"go make the book",
+		"make your book now",
+		"make our book now",
+		"make the book now",
+	} {
+		if strings.HasSuffix(lastSentence, ending) {
+			return true
+		}
+	}
+	return false
 }
 
 // turnFailed records a failed turn: release the turn slot, reopen a

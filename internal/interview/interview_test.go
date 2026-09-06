@@ -551,13 +551,8 @@ func TestChecklistFullWithoutModelEndStillEnds(t *testing.T) {
 	if code, _ := postJSON(t, srv.URL+"/interviews/"+id+"/answers", map[string]string{"text": "the whole story happens"}); code != 202 {
 		t.Fatalf("answer status, want 202")
 	}
-	// The answer turn's reply filled everything without saying end:
-	// the question still lands, and enforcement ends the interview
-	// right behind it.
-	q := waitEvent(t, s, "question")
-	if got := int(q["turn"].(float64)); got != 3 {
-		t.Fatalf("enforcement question turn = %d, want 3", got)
-	}
+	// The answer turn's reply filled everything without saying end. It is
+	// terminal before a question event can offer the child another reply box.
 	ended := waitEvent(t, s, "ended")
 	if got := ended["reason"]; got != ReasonChecklist {
 		t.Fatalf("ended reason = %v, want %q", got, ReasonChecklist)
@@ -1104,13 +1099,12 @@ func TestEnforcedEndSurvivesRestart(t *testing.T) {
 	if code, _ := postJSON(t, srv.URL+"/interviews/"+id+"/answers", map[string]string{"text": "the whole story happens"}); code != 202 {
 		t.Fatalf("answer status, want 202")
 	}
-	waitEvent(t, s, "question")
 	ended := waitEvent(t, s, "ended")
 	if ended["reason"] != ReasonChecklist {
 		t.Fatalf("ended reason = %v, want %q", ended["reason"], ReasonChecklist)
 	}
-	if got := ended["text"]; got != fallbackGoodbye {
-		t.Fatalf("ended text = %v, want the fallback goodbye", got)
+	if got := ended["text"]; got != "Everything at once then!" {
+		t.Fatalf("ended text = %v, want the terminal model text", got)
 	}
 	waitTranscriptRole(t, ts, id, RoleClosing)
 

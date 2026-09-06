@@ -1336,3 +1336,123 @@ func TestPipeline_AnyMusicFailureDegradesToThePlainFilm(t *testing.T) {
 		})
 	}
 }
+
+// TestPipeline_MusicOffSkipsMusicBedAndMix asserts that when POST /interviews/{id}/generate
+// specifies {"music": false}, GenerateMusicBed and MixBed are skipped entirely,
+// persisting the plain film directly without touching the music provider.
+func TestPipeline_MusicOffSkipsMusicBedAndMix(t *testing.T) {
+	ph := newPipelineHarness(t)
+	music, mix := ph.enableMusic(t)
+	ivID, bookID := ph.makeEndedInterview("Mira")
+	sub := ph.subscribe(bookID)
+	srv := httptest.NewServer(ph.mux())
+	defer srv.Close()
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/interviews/"+ivID+"/generate", strings.NewReader(`{"music":false}`))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do generate: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("generate status = %d, want 202", resp.StatusCode)
+	}
+
+	for range fullStory().Pages {
+		ph.waitEvent(sub, "page_approved")
+	}
+	ready := ph.waitEvent(sub, "book_ready")
+	videoURL, _ := ready["video_url"].(string)
+
+	// Assert NO music calls were made and mix was never invoked:
+	if calls := len(music.recorded()); calls != 0 {
+		t.Fatalf("music bed calls = %d, want 0 when music is false", calls)
+	}
+	if mixes := mix.count(); mixes != 0 {
+		t.Fatalf("mix calls = %d, want 0 when music is false", mixes)
+	}
+
+	// Persisted film is the plain film:
+	all, err := ph.db.BookMedia(t.Context(), bookID)
+	if err != nil {
+		t.Fatalf("book media: %v", err)
+	}
+	var filmID string
+	for _, m := range all {
+		if m.ContentType == "video/mp4" {
+			filmID = m.ID
+			break
+		}
+	}
+	if filmID == "" {
+		t.Fatal("no video/mp4 row found")
+	}
+	if filmID != videoURL[len("/media/"):] {
+		t.Fatalf("film id %q != video_url %q", filmID, videoURL)
+	}
+	served := getMedia(t, srv, filmID)
+	if !strings.HasPrefix(string(served), "film:") {
+		t.Errorf("persisted film = %q, want PLAIN film (film: prefix)", served)
+	}
+}
+
+// TestPipeline_MusicExplicitTrueInvokesMusicBedAndMix asserts that when POST /interviews/{id}/generate
+// explicitly specifies {"music": true}, GenerateMusicBed and MixBed are invoked as expected.
+func TestPipeline_MusicExplicitTrueInvokesMusicBedAndMix(t *testing.T) {
+	ph := newPipelineHarness(t)
+	music, mix := ph.enableMusic(t)
+	ivID, bookID := ph.makeEndedInterview("Mira")
+	sub := ph.subscribe(bookID)
+	srv := httptest.NewServer(ph.mux())
+	defer srv.Close()
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/interviews/"+ivID+"/generate", strings.NewReader(`{"music":true}`))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do generate: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("generate status = %d, want 202", resp.StatusCode)
+	}
+
+	for range fullStory().Pages {
+		ph.waitEvent(sub, "page_approved")
+	}
+	ready := ph.waitEvent(sub, "book_ready")
+	videoURL, _ := ready["video_url"].(string)
+
+	if calls := len(music.recorded()); calls != 1 {
+		t.Fatalf("music bed calls = %d, want 1 when music is true", calls)
+	}
+	if mixes := mix.count(); mixes != 1 {
+		t.Fatalf("mix calls = %d, want 1 when music is true", mixes)
+	}
+
+	all, err := ph.db.BookMedia(t.Context(), bookID)
+	if err != nil {
+		t.Fatalf("book media: %v", err)
+	}
+	var filmID string
+	for _, m := range all {
+		if m.ContentType == "video/mp4" {
+			filmID = m.ID
+			break
+		}
+	}
+	if filmID != videoURL[len("/media/"):] {
+		t.Fatalf("film id %q != video_url %q", filmID, videoURL)
+	}
+	served := getMedia(t, srv, filmID)
+	if !strings.HasPrefix(string(served), "mixed-film:") {
+		t.Errorf("persisted film = %q, want MIXED film", served)
+	}
+}

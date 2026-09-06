@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -364,12 +365,13 @@ func TestQuestionSpeaker_EmptyMediaIDEmitsNothing(t *testing.T) {
 	assertNoEvent(t, s, 60*time.Millisecond)
 }
 
-// TestQuestionSpeaker_ChecklistEndPublishesQuestionAndAudioAndEnded asserts that
-// when a question fills the checklist, question is published, question_audio is
-// synthesized in the background, and ended is also published.
-func TestQuestionSpeaker_ChecklistEndPublishesQuestionAndAudioAndEnded(t *testing.T) {
+// TestTurn_FullChecklistPublishesEndedWithoutQuestion pins the terminal
+// transition: an ordinary model sentence that fills the last checklist slot
+// must not briefly publish an answerable question or synthesize its audio.
+func TestTurn_FullChecklistPublishesEndedWithoutQuestion(t *testing.T) {
 	script := []string{
-		"Who is your hero?\n[[filled: hero, companion, want, obstacle, turn, ending]]",
+		"Who is your hero?\n[[filled:]]",
+		"Do you think Pip should celebrate at sunset.\n[[filled: hero, companion, want, obstacle, turn, ending]]",
 	}
 	speaker := &fakeSpeaker{mediaID: "media-final-q"}
 	h, chat, _, broker := newHarnessWithSpeaker(t, script, speaker)
@@ -389,42 +391,156 @@ func TestQuestionSpeaker_ChecklistEndPublishesQuestionAndAudioAndEnded(t *testin
 
 	s := sub(t, broker, id)
 	close(gate)
+	waitEvent(t, s, "question")
+	waitEvent(t, s, "question_audio")
 
-	// Question is published.
-	q := waitEvent(t, s, "question")
-	if got := int(q["turn"].(float64)); got != 1 {
-		t.Fatalf("question turn = %d, want 1", got)
+	code, body = postJSON(t, srv.URL+"/interviews/"+id+"/answers", map[string]string{"text": "Pip"})
+	if code != http.StatusAccepted {
+		t.Fatalf("answer status = %d (%v), want 202", code, body)
 	}
 
-	// Server-side checklist enforcement triggers ended right behind it.
-	// Since audio runs in background goroutine, both ended and question_audio will arrive.
-	var gotAudio, gotEnded bool
-	for i := 0; i < 2; i++ {
-		select {
-		case ev := <-s.Events:
-			switch ev.Name {
-			case "ended":
-				gotEnded = true
-			case "question_audio":
-				gotAudio = true
-				var qa questionAudioEvent
-				if err := json.Unmarshal([]byte(ev.Data), &qa); err != nil {
-					t.Fatalf("decode question_audio: %v", err)
-				}
-				if qa.Turn != 1 || qa.AudioURL != "/media/media-final-q" {
-					t.Fatalf("unexpected question_audio: %+v", qa)
-				}
-			default:
-				t.Fatalf("unexpected event: %s", ev.Name)
-			}
-		case <-time.After(2 * time.Second):
-			t.Fatalf("timed out waiting for ended / question_audio; gotEnded=%v gotAudio=%v", gotEnded, gotAudio)
-		}
+	ended := waitEvent(t, s, "ended")
+	if got := ended["reason"]; got != ReasonChecklist {
+		t.Fatalf("ended reason = %v, want %q", got, ReasonChecklist)
 	}
-	if !gotEnded {
-		t.Fatal("expected ended event")
+	assertNoEvent(t, s, 60*time.Millisecond)
+	if got := speaker.callCount(); got != 1 {
+		t.Fatalf("speaker calls = %d, want only the initial question", got)
 	}
-	if !gotAudio {
-		t.Fatal("expected question_audio event")
+}
+
+// TestTurn_ClosingPhrasingWithoutModelEndFinishesCleanly verifies that when the model
+// outputs farewell/closing phrasing without a bare "end" token in the control line,
+// the server treats it as an ended interview cleanly, publishing "ended" and clearing
+// the active question.
+func TestTurn_ClosingPhrasingWithoutModelEndFinishesCleanly(t *testing.T) {
+	script := []string{
+		"Who is your hero?\n[[filled:]]",
+		"Thanks for the great story, Leopold is going to be such a special character. I'll go make your book now!\n[[filled: hero]]",
+	}
+	h, _, _, broker := newHarness(t, script)
+	srv := serve(t, muxFor(t, h))
+
+	code, body := postJSON(t, srv.URL+"/interviews", nil)
+	if code != 201 {
+		t.Fatalf("start status = %d (%v), want 201", code, body)
+	}
+	id := body["id"].(string)
+
+	s := sub(t, broker, id)
+	q1 := waitEvent(t, s, "question")
+	if int(q1["turn"].(float64)) != 1 {
+		t.Fatalf("q1 turn = %v, want 1", q1["turn"])
+	}
+
+	code, body = postJSON(t, srv.URL+"/interviews/"+id+"/answers", map[string]string{"text": "Leopold"})
+	if code != 202 {
+		t.Fatalf("answer status = %d (%v), want 202", code, body)
+	}
+
+	endedEv := waitEvent(t, s, "ended")
+	if got := endedEv["reason"]; got != ReasonChecklist {
+		t.Fatalf("ended reason = %v, want %q", got, ReasonChecklist)
+	}
+	wantText := "Thanks for the great story, Leopold is going to be such a special character. I'll go make your book now!"
+	if got := endedEv["text"]; got != wantText {
+		t.Fatalf("ended text = %q, want %q", got, wantText)
+	}
+
+	tr, err := h.transcript(t.Context(), id)
+	if err != nil {
+		t.Fatalf("transcript: %v", err)
+	}
+	if tr.Status != statusEnded {
+		t.Fatalf("transcript status = %q, want ended", tr.Status)
+	}
+	if tr.Current != nil {
+		t.Fatalf("transcript Current = %+v, want nil on ended interview", tr.Current)
+	}
+	lastTurn := tr.Turns[len(tr.Turns)-1]
+	if lastTurn.Role != RoleClosing || lastTurn.Text != wantText {
+		t.Fatalf("last turn = %+v, want RoleClosing with farewell text", lastTurn)
+	}
+
+	code, _ = postJSON(t, srv.URL+"/interviews/"+id+"/answers", map[string]string{"text": "more"})
+	if code != 409 {
+		t.Fatalf("subsequent answer status = %d, want 409 conflict", code)
+	}
+}
+
+// TestTurn_QuestionContainingFarewellWordDoesNotEnd pins that a farewell word
+// inside an ordinary question does not suppress the answer the child owes.
+func TestTurn_QuestionContainingFarewellWordDoesNotEnd(t *testing.T) {
+	script := []string{
+		"Who is your hero?\n[[filled:]]",
+		"Tell me what Pip says when waving goodbye.\n[[filled:]]",
+	}
+	h, _, _, broker := newHarness(t, script)
+	srv := serve(t, muxFor(t, h))
+
+	code, body := postJSON(t, srv.URL+"/interviews", nil)
+	if code != http.StatusCreated {
+		t.Fatalf("start status = %d (%v), want 201", code, body)
+	}
+	id := body["id"].(string)
+	s := sub(t, broker, id)
+	waitEvent(t, s, "question")
+
+	code, body = postJSON(t, srv.URL+"/interviews/"+id+"/answers", map[string]string{"text": "Pip"})
+	if code != http.StatusAccepted {
+		t.Fatalf("answer status = %d (%v), want 202", code, body)
+	}
+	question := waitEvent(t, s, "question")
+	if got := question["text"]; got != "Tell me what Pip says when waving goodbye." {
+		t.Fatalf("question text = %q, want the farewell-word question", got)
+	}
+
+	tr, err := h.transcript(t.Context(), id)
+	if err != nil {
+		t.Fatalf("transcript: %v", err)
+	}
+	if tr.Status != statusOpen || tr.Current == nil {
+		t.Fatalf("transcript = %+v, want open interview with an answerable question", tr)
+	}
+}
+
+// TestTurn_ModelEndFinishesCleanly verifies that when the model includes "; end" in the
+// control line, the turn finishes cleanly, emitting "ended" and clearing Current.
+func TestTurn_ModelEndFinishesCleanly(t *testing.T) {
+	script := []string{
+		"Who is your hero?\n[[filled:]]",
+		"That was wonderful!\n[[filled: hero; end]]",
+	}
+	h, _, _, broker := newHarness(t, script)
+	srv := serve(t, muxFor(t, h))
+
+	code, body := postJSON(t, srv.URL+"/interviews", nil)
+	if code != 201 {
+		t.Fatalf("start status = %d (%v), want 201", code, body)
+	}
+	id := body["id"].(string)
+
+	s := sub(t, broker, id)
+	waitEvent(t, s, "question")
+
+	code, body = postJSON(t, srv.URL+"/interviews/"+id+"/answers", map[string]string{"text": "Alice"})
+	if code != 202 {
+		t.Fatalf("answer status = %d (%v), want 202", code, body)
+	}
+
+	endedEv := waitEvent(t, s, "ended")
+	if got := endedEv["reason"]; got != ReasonChecklist {
+		t.Fatalf("ended reason = %v, want %q", got, ReasonChecklist)
+	}
+
+	tr, err := h.transcript(t.Context(), id)
+	if err != nil {
+		t.Fatalf("transcript: %v", err)
+	}
+	if tr.Status != statusEnded {
+		t.Fatalf("transcript status = %q, want ended", tr.Status)
+	}
+	if tr.Current != nil {
+		t.Fatalf("transcript Current = %+v, want nil on ended interview", tr.Current)
 	}
 }

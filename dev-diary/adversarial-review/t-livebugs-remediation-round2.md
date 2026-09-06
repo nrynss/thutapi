@@ -1,0 +1,8 @@
+# T-LiveBugs remediation round 2
+
+| Finding | Fix | Pin | Mutation |
+|---|---|---|---|
+| H1 | Made the browser's `isFarewell` classifier match the server's terminal-sentence contract: question marks always remain answerable; only an exact farewell final sentence or an allowed final book-making phrase opens the completion action. `How would Pip say goodbye to a friend.` and `Pip says goodbye before dinner.` therefore retain the answer form. | `TestAppFarewellClassifierMatchesTerminalClosingContract` evaluates the shipped `static/app.js` classifier against both ordinary farewell-word sentences, a question, and two terminal closings. | Restore an unanchored `includes("goodbye")` (or another broad keyword match); the static pin fails when either ordinary sentence is classified as terminal. |
+| H2 | Moved the full-checklist decision ahead of `questionTurn`, so it persists and publishes only the terminal closing event; it no longer sends a final question or starts question TTS. Updated the two legacy enforcement expectations that encoded the former flicker. | `TestTurn_FullChecklistPublishesEndedWithoutQuestion` asserts an ordinary final-slot reply emits `ended` with no subsequent event and only the opening TTS call. `TestChecklistFullWithoutModelEndStillEnds` and `TestEnforcedEndSurvivesRestart` cover the adjusted terminal persistence path. | Move `s.filled.full()` back after `questionTurn`; the pin again sees an answerable `question` (and potentially `question_audio`) before `ended`. |
+
+Focused verification passes: `GOCACHE=/tmp/thutapi-livebugs-gocache go test ./internal/bookgen ./internal/interview ./internal/web -race -count=1`, `node --check static/app.js`, and `git diff --check`.

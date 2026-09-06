@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -58,6 +59,35 @@ func placeMedia(t *testing.T, db *store.DB, bookID, id, contentType string, plac
 	}
 	if err := db.SetMediaPlace(t.Context(), id, place); err != nil {
 		t.Fatalf("place %s: %v", id, err)
+	}
+}
+
+// TestAppFarewellClassifierMatchesTerminalClosingContract evaluates the shipped
+// browser classifier itself so ordinary sentences containing farewell words do
+// not hide an answer form, while terminal closing sentences still do.
+func TestAppFarewellClassifierMatchesTerminalClosingContract(t *testing.T) {
+	source, err := os.ReadFile(filepath.Join("..", "..", "static", "app.js"))
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	const program = `
+const source = process.argv[1];
+const start = source.indexOf("function isFarewell(text) {");
+const end = source.indexOf("\n}\n\nfunction Interview", start);
+if (start < 0 || end < 0) throw new Error("isFarewell function not found");
+const isFarewell = new Function(source.slice(start, end + 2) + "; return isFarewell;")();
+for (const [text, want] of [
+  ["How would Pip say goodbye to a friend.", false],
+  ["Pip says goodbye before dinner.", false],
+  ["What does Pip say when waving goodbye?", false],
+  ["Thanks for telling me. Goodbye!", true],
+  ["I'll go make your book now!", true],
+]) {
+  if (isFarewell(text) !== want) throw new Error(JSON.stringify({ text, got: isFarewell(text), want }));
+}
+`
+	if output, err := exec.Command("node", "--input-type=module", "--eval", program, "--", string(source)).CombinedOutput(); err != nil {
+		t.Fatalf("app farewell classifier: %v\n%s", err, output)
 	}
 }
 
@@ -202,6 +232,28 @@ func TestBookStateRunningUsesLatestRunNotStaleMedia(t *testing.T) {
 	if strings.Contains(body, "download/pdf") || strings.Contains(body, "download/video") || strings.Contains(body, "<video") {
 		t.Fatalf("running page exposes stale artifact controls: %s", body)
 	}
+	if !strings.Contains(body, `/book/`+book.ID+`/state`) || !strings.Contains(body, `window.location.reload()`) {
+		t.Fatalf("running page lacks dynamic refresh polling script: %s", body)
+	}
+}
+
+func TestBookPage_ReadyOmitsPollingScript(t *testing.T) {
+	db := openBookStore(t)
+	book, err := db.CreateBook(t.Context(), "Finished book")
+	if err != nil {
+		t.Fatalf("create book: %v", err)
+	}
+	placeMedia(t, db, book.ID, "pdf-1", "application/pdf", store.MediaPlace{BookID: book.ID})
+	placeMedia(t, db, book.ID, "film-1", "video/mp4", store.MediaPlace{BookID: book.ID})
+	h := NewBookHandler(db, fixedGeneration{state: bookgen.CatchUp{Status: bookgen.GenerationReady}})
+	pageReq := httptest.NewRequest(http.MethodGet, "/book/"+book.ID, nil)
+	pageReq.SetPathValue("id", book.ID)
+	pageRes := httptest.NewRecorder()
+	h.Book(pageRes, pageReq)
+	body := pageRes.Body.String()
+	if strings.Contains(body, `setInterval`) || strings.Contains(body, `window.location.reload()`) {
+		t.Fatalf("ready book page should not include polling script: %s", body)
+	}
 }
 
 func TestBookStateDefaultsToNotStartedWithoutArtifacts(t *testing.T) {
@@ -221,6 +273,13 @@ func TestBookStateDefaultsToNotStartedWithoutArtifacts(t *testing.T) {
 	}
 	if state.Status != bookgen.GenerationNotStarted || len(state.Pages) != 0 || state.PDFURL != "" || state.VideoURL != "" {
 		t.Fatalf("default state = %+v, want an empty not_started book", state)
+	}
+	pageReq := httptest.NewRequest(http.MethodGet, "/book/"+book.ID, nil)
+	pageReq.SetPathValue("id", book.ID)
+	pageRes := httptest.NewRecorder()
+	h.Book(pageRes, pageReq)
+	if body := pageRes.Body.String(); strings.Contains(body, "setInterval") {
+		t.Fatalf("not-started book page must not poll: %s", body)
 	}
 }
 
@@ -257,6 +316,9 @@ func TestBookStateReportsFailedLatestRunWithoutInventingArtifacts(t *testing.T) 
 	body := pageRes.Body.String()
 	if strings.Contains(body, "download/pdf") || strings.Contains(body, "download/video") || strings.Contains(body, "<video") {
 		t.Fatalf("failed page exposes stale artifact controls: %s", body)
+	}
+	if strings.Contains(body, "setInterval") {
+		t.Fatalf("failed book page must not poll: %s", body)
 	}
 }
 
@@ -295,6 +357,9 @@ func TestBookStateUnknownDoesNotExposePriorRunArtifacts(t *testing.T) {
 	body := pageRes.Body.String()
 	if strings.Contains(body, "old-pdf") || strings.Contains(body, "old-film") || strings.Contains(body, "download/pdf") || strings.Contains(body, "download/video") || strings.Contains(body, "<video") {
 		t.Fatalf("unknown page exposes prior artifacts: %s", body)
+	}
+	if strings.Contains(body, "setInterval") {
+		t.Fatalf("unknown book page must not poll: %s", body)
 	}
 
 	for _, kind := range []string{"pdf", "video"} {

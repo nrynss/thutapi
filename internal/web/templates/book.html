@@ -33,5 +33,23 @@
       </article>{{else}}<p class="warm">The illustrators are making the first page now.</p>{{end}}
     </section>
   </main>
+  {{if eq .Book.Status "running"}}
+  <script>
+    (function() {
+      const stateUrl = "/book/{{.Book.ID}}/state";
+      const timer = setInterval(async function() {
+        try {
+          const res = await fetch(stateUrl);
+          if (!res.ok) return;
+          const data = await res.json();
+          if (data.status === "ready" || data.pdf_url) {
+            clearInterval(timer);
+            window.location.reload();
+          }
+        } catch (_) {}
+      }, 3000);
+    })();
+  </script>
+  {{end}}
 </body>
 </html>{{end}}

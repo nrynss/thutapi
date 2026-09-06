@@ -424,13 +424,25 @@ func New(cfg Config) (*Handler, error) {
 	}, nil
 }
 
+// generateRequest carries the optional parameters of POST /interviews/{id}/generate.
+type generateRequest struct {
+	Music *bool `json:"music"`
+}
+
 // Generate handles POST /interviews/{id}/generate: it validates the
 // interview (exists, ended, linked to a book), refuses a second run
 // while one is generating, starts the pipeline as an internal/job job,
 // and returns the job id plus the book topic and events URL at once.
 func (h *Handler) Generate(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	jobID, bookID, err := h.startRun(r.Context(), id)
+	music := true
+	if r.Body != nil {
+		var req generateRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err == nil && req.Music != nil {
+			music = *req.Music
+		}
+	}
+	jobID, bookID, err := h.startRun(r.Context(), id, music)
 	if err != nil {
 		h.writeError(w, err)
 		return
@@ -465,7 +477,7 @@ func (h *Handler) Events(w http.ResponseWriter, r *http.Request) {
 // startRun validates and starts one run. It holds h.mu across the
 // check-and-start, so two concurrent POSTs cannot both pass the
 // double-fire refusal.
-func (h *Handler) startRun(ctx context.Context, id string) (jobID, bookID string, err error) {
+func (h *Handler) startRun(ctx context.Context, id string, music bool) (jobID, bookID string, err error) {
 	iv, err := h.cfg.DB.Interview(ctx, id)
 	if err != nil {
 		return "", "", fmt.Errorf("bookgen: generate %s: %w", id, err)
@@ -490,7 +502,7 @@ func (h *Handler) startRun(ctx context.Context, id string) (jobID, bookID string
 	// returns its id, and a retry must never claim the prior run's pages.
 	previousApprovals := h.approvals[bookID]
 	h.approvals[bookID] = make(map[int]string)
-	jobID, err = h.cfg.Jobs.Start(ctx, h.generateJob(bookID, id))
+	jobID, err = h.cfg.Jobs.Start(ctx, h.generateJob(bookID, id, music))
 	if err != nil {
 		h.approvals[bookID] = previousApprovals
 		return "", "", fmt.Errorf("bookgen: generate %s: %w", id, err)
@@ -565,7 +577,7 @@ func eventsPath(id string) string {
 // published: exactly once per run, on every path — a plain failure, a
 // cancelled context, and a panic (which is re-raised for job.call's
 // panic boundary to convert into the ErrPanic terminal).
-func (h *Handler) generateJob(bookID, ivID string) job.Func {
+func (h *Handler) generateJob(bookID, ivID string, music bool) job.Func {
 	return func(ctx context.Context, _ func(string)) (data []byte, err error) {
 		topic := Topic(bookID)
 		var once sync.Once
@@ -594,7 +606,7 @@ func (h *Handler) generateJob(bookID, ivID string) job.Func {
 				publish("failed", failedData)
 			}
 		}()
-		pdfID, videoID, err := h.runBook(ctx, bookID, ivID)
+		pdfID, videoID, err := h.runBook(ctx, bookID, ivID, music)
 		if err != nil {
 			return nil, err
 		}

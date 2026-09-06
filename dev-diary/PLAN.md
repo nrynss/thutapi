@@ -3135,3 +3135,43 @@ Reported from real-device navigation to `https://thutapi.nryn.dev/`.
        ENV PREWARM_DIR=/prewarm
        ```
      - Why Option A: Hermetic, zero SSH sync overhead in CI deploy, and the container immediately boots with prewarmed shelf books in any environment (local Docker, staging, production).
+
+---
+
+## Track T-LiveBugs — Live Bug Remediation & Polish
+
+**Status:** DONE. Approved at round 3 (0C/0H/0M/0L), with explicit zero residue
+against rounds 1–2; release commit pending.
+
+**Owns:**
+- `internal/interview/turn.go`, `internal/interview/turn_test.go`
+- `internal/bookgen/bookgen.go`, `internal/bookgen/pipeline.go`, `internal/bookgen/bookgen_test.go`, `internal/bookgen/pipeline_test.go`
+- `internal/web/templates/book.html`, `internal/web/web_test.go`
+- `static/app.js`, `static/app.css`
+
+**Depends on:** T9b, T1c, T11. **Cx:** M.
+
+### Requirements
+
+1. **Bug 1a (Interview Goodbye Loop):**
+   - When the interview concludes (closing phrasing detected, all slots full, or closing turn), suppress the freeform text input and answer form in `static/app.js`.
+   - Present a single, clear primary button (e.g. *"Continue to voice & book"*) to advance to Screen 4 without prompting the child to type a response to a farewell.
+   - In `internal/interview/turn.go`, ensure closing phrasing or full checklist reliably finishes the interview.
+
+2. **Bug 1b (Microphone Context & Permission Guidance):**
+   - In `static/app.js`, check `window.isSecureContext`. If false, explain clearly: *"Microphone recording requires a secure HTTPS connection or localhost. Please use the file upload below or open via HTTPS."*
+   - Disambiguate `NotAllowedError` (permission denied) from hardware/browser unavailable errors and missing tokens.
+
+3. **Bug 2 & 3 (Background Music Option & Narration Progress):**
+   - On Screen 4 (`static/app.js`), provide a user toggle: `Include background music bed` (default true or false).
+   - In `POST /interviews/{id}/generate`, accept an optional JSON payload `{ "music": bool }`.
+   - In `internal/bookgen`, pass `music` option to the pipeline run. If `music == false`, skip `GenerateMusicBed` and `mixFilm` entirely, rendering only the narration/captions and saving upstream latency and rate limit contention.
+   - When illustrations are done and narration starts, indicate progress clearly (e.g. *"The animals are giving your characters voices"*).
+
+4. **Bug 3 Item 2 (Dynamic PDF/Video Download Link on `/book/{id}`):**
+   - When `data-book-state == "running"` on `/book/{id}`, add a client-side listener / poll to `/book/{id}/state` so that when `status == "ready"`, the page dynamically reveals the PDF and film download buttons without requiring a manual browser refresh.
+
+### Done when
+1. All 4 live bugs have working, verified fixes inside their owned seams.
+2. `go test -race ./...`, `go vet ./...`, `test -z "$(gofmt -l .)"` and `deploy/redeploy_test.sh` are all green.
+3. Unit tests cover all modified Go and template behavior.
