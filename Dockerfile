@@ -31,6 +31,8 @@ RUN go mod download
 
 # Rest of the source.
 COPY . .
+# Ensure prewarm fixtures are readable by nonroot in the runtime stage.
+RUN chmod -R a+rX /src/data/prewarm
 
 # Static, stripped binary at /out/thutapi. The build context is the repo root,
 # so the package path is ./cmd/thutapi (matches cmd/thutapi/main.go's package
@@ -82,6 +84,12 @@ COPY --from=builder /out/thutapi /thutapi
 # explicit so the relative path is a decision, not an inherited default.
 WORKDIR /
 COPY --from=builder /src/static /static
+
+# Prewarm fixtures are baked into the image (Option A) so the container
+# immediately boots with prewarmed shelf books in any environment (local Docker,
+# staging, production) without relying on a host bind-mount.
+COPY --from=builder /src/data/prewarm /prewarm
+ENV PREWARM_DIR=/prewarm
 
 USER nonroot:nonroot
 

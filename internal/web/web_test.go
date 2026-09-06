@@ -442,6 +442,9 @@ func TestShelf_PackageLevelFunction(t *testing.T) {
 	if !strings.Contains(body, `<script type="application/json" id="shelf-books">[]</script>`) {
 		t.Fatalf("body lacks empty json script: %s", body)
 	}
+	if !strings.Contains(body, `<script type="module" src="/static/app.js?v=2"></script>`) {
+		t.Fatalf("body lacks cache-busted module script: %s", body)
+	}
 }
 
 func TestShelfHandler_WithBooks(t *testing.T) {

@@ -3127,12 +3127,11 @@ Reported from real-device navigation to `https://thutapi.nryn.dev/`.
 
 2. **Prewarmed books fixture missing on host deployment volume:**
    - **Symptom:** On a deployed instance, the prewarmed fixture `d625fd608be48227f08c33cf860e5de8` ("Bo and Pip's Moon Mango Dance") was not restored on container boot because `/srv/thutapi/data/prewarm` did not exist on the host bind-mount.
-   - **Resolution:**
-     - Copied `data/prewarm` to `/srv/thutapi/data/prewarm` on the host.
-     - Restarted container `thutapi`. Startup log confirmed: `"prewarmed books restored", "books": ["d625fd608be48227f08c33cf860e5de8"]`.
-     - Production database now contains all 3 books (`d625fd608be48227f08c33cf860e5de8`, `58bc86ae81f116dc27979683722d87a8`, `469e374bf0998aa96e11ca9aa8e876d0`).
-     - Ensure automated deployment scripts or the Docker build synchronize `data/prewarm` into the host's data directory.
-
-
-
-
+   - **Resolution & Decision (Option A):**
+     - Hotfix applied: Copied `data/prewarm` to `/srv/thutapi/data/prewarm` on the host. Restarted container `thutapi`. Startup log confirmed: `"prewarmed books restored", "books": ["d625fd608be48227f08c33cf860e5de8"]`.
+     - Permanent architectural fix (Option A): Bake `data/prewarm` directly into the Docker image at build time in `Dockerfile`:
+       ```dockerfile
+       COPY --from=builder /src/data/prewarm /prewarm
+       ENV PREWARM_DIR=/prewarm
+       ```
+     - Why Option A: Hermetic, zero SSH sync overhead in CI deploy, and the container immediately boots with prewarmed shelf books in any environment (local Docker, staging, production).

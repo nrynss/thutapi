@@ -338,6 +338,10 @@ func (s *server) handleMedia(w http.ResponseWriter, r *http.Request) {
 // HTTP would leak source. They 404 like any other missing path; every real
 // asset (app.css, app.js, book/**, race/*.html, vendor/**) still serves.
 //
+// Static assets set Cache-Control: no-cache, must-revalidate so intermediary
+// caches (such as Cloudflare) and browsers do not serve stale scripts or
+// stylesheets across deployments.
+//
 // noDirFS additionally suppresses http.FileServer's generated directory
 // listings, which would otherwise enumerate the whole asset tree — including
 // the names of the very files the basename rule refuses to serve.
@@ -353,6 +357,7 @@ func staticAssets() http.Handler {
 			http.NotFound(w, r)
 			return
 		}
+		w.Header().Set("Cache-Control", "no-cache, must-revalidate")
 		files.ServeHTTP(w, r)
 	})
 }

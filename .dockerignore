@@ -15,7 +15,8 @@ dev-diary/
 
 # Generated / runtime data — kept on the box on a Docker volume, never in the
 # image. See deploy/README.md.
-data/
+data/*
+!data/prewarm
 media/
 
 # Local SQLite databases

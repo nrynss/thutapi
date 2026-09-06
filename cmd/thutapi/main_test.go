@@ -1084,3 +1084,140 @@ func TestColdBootRestoresFixtureAndServesShelfBookAndDownloads(t *testing.T) {
 		t.Fatalf("video bytes = %d, want 3477486", mediaRec.Body.Len())
 	}
 }
+
+// TestStaticAssets_CacheControlAndFiltering verifies that staticAssets() sets
+// Cache-Control: no-cache, must-revalidate on served assets to prevent edge
+// and browser caching of stale code, while strictly filtering developer files.
+func TestStaticAssets_CacheControlAndFiltering(t *testing.T) {
+	tmp := t.TempDir()
+	staticDir := filepath.Join(tmp, "static")
+	if err := os.Mkdir(staticDir, 0o755); err != nil {
+		t.Fatalf("mkdir static: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(staticDir, "app.js"), []byte("console.log('thutapi');"), 0o644); err != nil {
+		t.Fatalf("write app.js: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(staticDir, "app.css"), []byte("body { margin: 0; }"), 0o644); err != nil {
+		t.Fatalf("write app.css: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(staticDir, "main.go"), []byte("package main"), 0o644); err != nil {
+		t.Fatalf("write main.go: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(staticDir, "browser-test.html"), []byte("<html></html>"), 0o644); err != nil {
+		t.Fatalf("write browser-test.html: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(staticDir, "index.html"), []byte("<html></html>"), 0o644); err != nil {
+		t.Fatalf("write index.html: %v", err)
+	}
+	t.Chdir(tmp)
+
+	h := staticAssets()
+
+	// 1. Legitimate files receive 200 and Cache-Control: no-cache, must-revalidate
+	for _, asset := range []struct {
+		path string
+		body string
+	}{
+		{"/app.js", "console.log('thutapi');"},
+		{"/app.css", "body { margin: 0; }"},
+	} {
+		req := httptest.NewRequest(http.MethodGet, asset.path, nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s status = %d, want 200", asset.path, rec.Code)
+		}
+		if got := rec.Header().Get("Cache-Control"); got != "no-cache, must-revalidate" {
+			t.Fatalf("%s Cache-Control = %q, want 'no-cache, must-revalidate'", asset.path, got)
+		}
+		if rec.Body.String() != asset.body {
+			t.Fatalf("%s body = %q, want %q", asset.path, rec.Body.String(), asset.body)
+		}
+	}
+
+	// 2. Blocked files and missing paths return 404
+	for _, blocked := range []string{"/main.go", "/browser-test.html", "/index.html", "/missing.js"} {
+		req := httptest.NewRequest(http.MethodGet, blocked, nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("%s status = %d, want 404", blocked, rec.Code)
+		}
+	}
+
+	// 3. Routed through server GET /static/app.js
+	srv := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/static/app.js", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/static/app.js status = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-cache, must-revalidate" {
+		t.Fatalf("/static/app.js Cache-Control = %q, want 'no-cache, must-revalidate'", got)
+	}
+}
+
+// TestDockerfile_OptionAPrewarmAndPermissions pins the Option A prewarm baking
+// contract in Dockerfile and verifies that data/prewarm fixtures on disk are
+// readable by non-root users.
+func TestDockerfile_OptionAPrewarmAndPermissions(t *testing.T) {
+	dockerfilePath := filepath.Join("..", "..", "Dockerfile")
+	content, err := os.ReadFile(dockerfilePath)
+	if err != nil {
+		t.Fatalf("read Dockerfile: %v", err)
+	}
+	text := string(content)
+
+	for _, want := range []string{
+		"RUN chmod -R a+rX /src/data/prewarm",
+		"COPY --from=builder /src/data/prewarm /prewarm",
+		"ENV PREWARM_DIR=/prewarm",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("Dockerfile missing expected directive %q", want)
+		}
+	}
+
+	// Walk data/prewarm on disk to verify read access for others (nonroot)
+	prewarmDir := filepath.Join("..", "..", "data", "prewarm")
+	count := 0
+	err = filepath.Walk(prewarmDir, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		count++
+		mode := info.Mode()
+		if mode.IsDir() {
+			if mode.Perm()&0o005 != 0o005 {
+				return fmt.Errorf("directory %s mode %o lacks read/execute permission for others", path, mode.Perm())
+			}
+		} else {
+			if mode.Perm()&0o004 != 0o004 {
+				return fmt.Errorf("file %s mode %o lacks read permission for others", path, mode.Perm())
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("prewarm permissions check failed: %v", err)
+	}
+	if count < 5 {
+		t.Fatalf("expected prewarm fixtures to be found, got %d items", count)
+	}
+}
+
+// TestParseConfig_PrewarmDir verifies that parseConfig reads PREWARM_DIR from the environment.
+func TestParseConfig_PrewarmDir(t *testing.T) {
+	t.Setenv("PREWARM_DIR", "/custom/prewarm")
+	cfg := parseConfig()
+	if cfg.prewarmDir != "/custom/prewarm" {
+		t.Fatalf("cfg.prewarmDir = %q, want '/custom/prewarm'", cfg.prewarmDir)
+	}
+
+	t.Setenv("PREWARM_DIR", "")
+	cfgDefault := parseConfig()
+	if cfgDefault.prewarmDir != "" {
+		t.Fatalf("cfgDefault.prewarmDir = %q, want empty", cfgDefault.prewarmDir)
+	}
+}
