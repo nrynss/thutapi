@@ -122,6 +122,7 @@ size as the yardstick:
 | ~~**T11** sweep~~ | `internal/mediastore/retention.go` | — (T3 closed) | **DONE** `bcc7ceb` | One pass over unplaced rows by age, unreferenced blobs by mtime, and a 6 GiB budget. Cannot touch a row T13 owns — guarded by both age and an explicit `Retain` veto |
 | ~~**T11** prewarm~~ | `internal/prewarm/**` | T10b | **DONE** `bcc7ceb` | Export/restore with every id preserved, so `/book/{id}` and `/media/{id}` survive a redeploy. Fixture built from the 2026-09-06 live run, no paid call. **Screen-1 landing was NOT taken here — that is §T9b** |
 | **T9b** | shelf landing in `internal/web/**` + `static/**`, plus completing the prewarm fixture | T11 prewarm | **M** | Two closed tracks (T9, T10b) and a fixture that must be finished without a paid run |
+| **T1c** | `.github/workflows/deploy.yml`, a redeploy wrapper in `deploy/`, box-side provisioning | T1b, `image.yml` | **M** | Needs an access decision and operator-set secrets; the risk is a root key in a public repo's CI, not the YAML |
 | ~~**T12**~~ | `internal/audio/music.go` | T8, T10a | **DONE** `f933638` | Closed at round-2 APPROVE 0/0/0/0. Narration length measured from MP3 frames in Go, never probed; fade anchored to the deterministic total. The `-shortest` overshoot that made that total wrong by 1.168 s was fixed in `bcc7ceb` |
 | ~~**T13**~~ | `internal/audio/clone.go`, **plus both capture modes in `static/**` and one upload route** | — | **DONE** | Closed at round-5 **APPROVE 0/0/0/0, zero residue**; clone-result/HD handoff is deferred operator verification |
 | **T14** | `README.md`, submission assets | T11 (done), T9b | **M** | Fixed 4-hour box; the demo video is an edit, not a build. **Only T9b and T14 remain open** |
@@ -235,6 +236,7 @@ routes anyway; not worth doing speculatively before then.**
 | **T12** | **DONE** 2026-09-06 at `f933638`, round-2 APPROVE 0/0/0/0. The `lyrics` problem was solved by directing a gibberish vocalise rather than a sung lyric. Narration length is measured from declared MP3 frames in Go — never probed, no `ffprobe` in production — and the bed's fade anchors to that deterministic total, same code path trimmed or looped. **Two defects found afterwards by running it** (both fixed in `bcc7ceb`): any non-transient music failure discarded an already-rendered book, and the deterministic total under-counted by 1.168 s because `-shortest` bounds the looped image at the encoder rather than at the clip. Residual after the fix is one AAC frame, 23.2 ms, for the whole film. |
 | **T13** | **DONE** 2026-09-06. Closed at round 5: **APPROVE 0/0/0/0, zero residue** (t13-round1.md → t13-remediation-round1.md → t13-round2.md → t13-remediation-round2.md → t13-round3.md → t13-remediation-round3.md → t13-round4.md → t13-remediation-round4.md → t13-round5.md). Capture/upload, consent, bounded MP3 transcode and fail-closed clone submission ship; the consented deployed-HTTPS clone response and HD identity handoff are deferred operator verification. |
 | **T9b** | Not started. Split out of T11 on 2026-09-06: prewarmed books become the shelf landing, and the fixture book is completed from the already-rendered film and PDF rather than by paying for a second generation. Touches two closed tracks (T9, T10b), which is why T11 raised it instead of taking it. |
+| **T1c** | Not started. Automated deployment, added 2026-09-06 after a manual deploy found production 68 commits behind with `/` returning 404 while `/healthz` stayed green, `/etc/thutapi/env` absent, and the box's deploy script two days stale. Publishing stays manual; the deploy follows it. **Blocked on an operator decision**: push-based SSH from Actions (needs `DEPLOY_SSH_KEY`/`DEPLOY_HOST`/`DEPLOY_KNOWN_HOSTS`, and today the only account is root on a shared box) versus pull-based on the box (zero secrets, polls the already-public GHCR digest). |
 | **T14** | Not started. Never cut. Now blocked only by **T9b**. |
 
 ---
@@ -550,6 +552,121 @@ opens. Until then T1b stays `Blocked`.
 
 
 ---
+
+## T1c — Automated deployment
+
+**Owns:** `.github/workflows/deploy.yml`, a redeploy wrapper and prune step
+under `deploy/`, and the box-side provisioning they assume. Touches no
+`internal/` package and does not change `verify.yml`.
+
+**Depends on:** T1b (the box, live) and `image.yml`. **Cx:** M.
+
+### Why this track exists — evidence, not theory
+
+The 2026-09-06 manual deploy is the argument. Every item below actually
+happened:
+
+* **Production sat 68 commits and 39 hours behind** while `/` and
+  `/interview/new` returned **404**. Nobody noticed, because `/healthz` kept
+  answering 200 — it was the only route the deployed build had. A health check
+  that cannot tell "alive" from "serving the product" is not a health check.
+* **`/etc/thutapi/env` did not exist.** The running container was the only copy
+  of `GMI_API_KEY`. Any redeploy would have aborted, and a `docker rm` without
+  a redeploy would have destroyed the key.
+* **The box's `docker-run.sh` was two days stale** and would have failed the
+  deploy on its own: no `PUBLIC_ORIGIN` (which current code refuses to start
+  without), and `--env GMI_API_KEY=value`, putting the secret into argv — the
+  exact exposure the repo version had already fixed.
+* **The deploy took about a dozen hand-run steps** across build, ship, scp,
+  `docker rm -f` and run, with a local 244 MB image build that turned out to be
+  unnecessary — the GHCR package is public and the box pulls it anonymously.
+* **Images accumulate.** Two thutapi images and eight dangling layers are on
+  the box now; each deploy adds ~243 MB against 23 GiB free.
+
+### The shape, decided
+
+**Publishing stays manual** (operator, 2026-09-06) — `image.yml` keeps its
+`workflow_dispatch`-only trigger and its reasoning. What automates is what
+follows the decision: `deploy.yml` triggers on `workflow_run` of a **successful
+`image.yml`**, plus its own `workflow_dispatch` taking an image ref so a
+rollback is a button and not an SSH session.
+
+So the human decision stays exactly where it was — "publish this build" — and
+stops being followed by a dozen manual steps.
+
+### The access decision — this is the real content of the track
+
+**Option A — push-based SSH from Actions (recommended).** `deploy.yml` opens an
+SSH session to the box. Gives an auditable deploy log, instant deploys, and a
+rollback button. Needs three repository secrets:
+
+| Secret | Why |
+| --- | --- |
+| `DEPLOY_SSH_KEY` | Private key for the deploy account |
+| `DEPLOY_HOST` | The box address — **must** be a secret; `ORIGIN_IP` is deliberately kept out of this repo, which goes public for judging |
+| `DEPLOY_KNOWN_HOSTS` | Pinned host key, so the job never needs `StrictHostKeyChecking=no` |
+
+**The risk to weigh before doing this:** today the only SSH account is `root`
+with a key, and there are no other user accounts on the box. Putting a root key
+into a **public** repository's Actions secrets means any workflow that runs on
+the default branch can reach root on a machine that also hosts unrelated
+projects. Fork PRs cannot read secrets, but that is not the whole threat model.
+Mitigate before shipping, not after:
+
+* a dedicated `deploy` account, **or** a forced command in
+  `authorized_keys` (`command="/srv/thutapi/deploy/redeploy.sh",no-pty,
+  no-port-forwarding,no-agent-forwarding`) so the key can do exactly one thing;
+* a GitHub **environment** with required reviewers on the deploy job;
+* verify the sshd policy first — `PermitRootLogin` and `PasswordAuthentication`
+  are not set explicitly in `sshd_config` and may live in a drop-in.
+
+**Option B — pull-based on the box (zero secrets).** A systemd timer polls the
+**public** GHCR digest for `latest` and redeploys when it changes. No inbound
+access, no GitHub secrets, nothing to leak; the cost is a polling delay and no
+deploy log in CI. Genuinely viable here because the package is already public —
+verified 2026-09-06, the box pulled anonymously with no `~/.docker/config.json`.
+
+**Recommendation: A, with the forced command.** B is safer but gives up the
+audit trail and the rollback button, and rollback is the thing you want most at
+2 a.m. during judging.
+
+### On putting `GMI_API_KEY` in GitHub secrets
+
+**Default: no.** The inference key belongs on the box in
+`/etc/thutapi/env`; CI has no reason to hold it, and a key in Actions is a key
+in one more place that can leak.
+
+**The exception worth building:** a separate, manually-triggered `provision`
+workflow that writes `/etc/thutapi/env` from secrets. That closes the failure we
+actually hit — the file not existing at all — and makes the box rebuildable
+from scratch. Keep it a distinct workflow from `deploy.yml` so a routine deploy
+never touches secrets. Note the recorded constraint: the key is an HS256 JWT
+with **no `exp` claim**, so it cannot expire mid-judging but must be rotated by
+hand afterwards.
+
+### Done when
+
+1. A successful manual `image.yml` run is followed automatically by a deploy,
+   with no human SSH.
+2. The deploy pins a **digest**, never a moving tag, and records the digest that
+   actually ran.
+3. **Preflight refuses** to proceed if `/etc/thutapi/env` is missing any of
+   `GMI_API_KEY`, `UPLOAD_TOKEN`, `PUBLIC_ORIGIN` — the 2026-09-06 failure mode.
+4. The current `deploy/docker-run.sh` is shipped to the box **before** it is
+   run, so a stale box-side copy can never decide the deploy.
+5. A **real health gate**: poll `/healthz` until `version` equals the deployed
+   SHA, and additionally assert `GET /` returns 200 — a 200 on `/healthz` alone
+   is exactly what hid the 404s for 39 hours. On failure, **roll back to the
+   previous digest** and fail the run.
+6. Old images are pruned, keeping the last few plus dangling layers.
+7. A `concurrency` group so two deploys cannot interleave.
+
+### Not in scope
+
+Auto-publishing images on push (settled: manual). Changing `verify.yml`.
+Zero-downtime deploys — `docker rm -f` then run costs a few seconds of 502,
+which is acceptable for this product; a canary container name plus a Traefik
+label switch is the upgrade path if that ever stops being true.
 
 ## T2 — GMI clients  *(DONE — closed at round 5, see t2-round5.md; live half in T2b)*
 
