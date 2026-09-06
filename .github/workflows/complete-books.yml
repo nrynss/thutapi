@@ -27,6 +27,11 @@ on:
         required: false
         default: true
         type: boolean
+      prune_abandoned:
+        description: 'Also delete the empty book rows abandoned interviews left behind (no pages, no media)'
+        required: false
+        default: false
+        type: boolean
 
 # Shares the deploy group: a repair rewrites the same book rows a deploy's
 # container serves, and the two must never interleave.
@@ -45,6 +50,7 @@ jobs:
           DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
           BOOK: ${{ inputs.book }}
           MUSIC: ${{ inputs.music }}
+          PRUNE: ${{ inputs.prune_abandoned }}
         run: |
           set -euo pipefail
 
@@ -73,6 +79,13 @@ jobs:
             FLAGS="-complete-no-music"
           fi
 
+          if [[ "${PRUNE}" == "true" ]]; then
+            echo "Removing abandoned book rows..."
+            ssh -i ~/.ssh/id_deploy "${DEPLOY_TARGET}" \
+              "docker exec thutapi /thutapi -data-dir /data -prune-abandoned" \
+              2>&1 | tee /tmp/prune_out.log
+          fi
+
           echo "Completing '${BOOK}' (music=${MUSIC})..."
           # The repair runs inside the serving container, against the same
           # /data it serves: one process, WAL, no second copy of the store.
@@ -86,6 +99,11 @@ jobs:
           echo "### Book completion" >> $GITHUB_STEP_SUMMARY
           echo "- **Book:** \`${{ inputs.book }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Music:** \`${{ inputs.music }}\`" >> $GITHUB_STEP_SUMMARY
+          if [[ -f /tmp/prune_out.log ]]; then
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            tail -n 10 /tmp/prune_out.log >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
           if [[ -f /tmp/complete_out.log ]]; then
             echo '```' >> $GITHUB_STEP_SUMMARY
             tail -n 40 /tmp/complete_out.log >> $GITHUB_STEP_SUMMARY

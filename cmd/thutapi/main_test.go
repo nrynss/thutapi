@@ -882,6 +882,16 @@ func TestShelfRouteServesLandingAndBooks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create book 2: %v", err)
 	}
+	// The shelf lists books there is something to read; a bare book row is
+	// an interview somebody abandoned, not a book.
+	for _, b := range []struct{ id, media string }{{b1.ID, "pdf-1"}, {b2.ID, "pdf-2"}} {
+		if _, err := db.CreateMedia(t.Context(), store.Media{ID: b.media, ContentType: "application/pdf", SizeBytes: 1}); err != nil {
+			t.Fatalf("create %s: %v", b.media, err)
+		}
+		if err := db.SetMediaPlace(t.Context(), b.media, store.MediaPlace{BookID: b.id}); err != nil {
+			t.Fatalf("place %s: %v", b.media, err)
+		}
+	}
 
 	req = httptest.NewRequest(http.MethodGet, "/", nil)
 	rec = httptest.NewRecorder()

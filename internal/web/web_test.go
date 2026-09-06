@@ -447,6 +447,38 @@ func (errStore) Books(context.Context) ([]store.Book, error) {
 	return nil, errors.New("db down")
 }
 
+func (errStore) BookMedia(context.Context, string) ([]store.Media, error) {
+	return nil, errors.New("db down")
+}
+
+// TestShelfHandler_HidesAbandonedInterviews pins what the shelf is for. A
+// book row is created the moment an interview STARTS, so every interview
+// anyone walked away from leaves one behind carrying the working title. The
+// live shelf was offering a child five identical "Our story" cards, each
+// opening on a page with no pictures, no words and nothing to download.
+func TestShelfHandler_HidesAbandonedInterviews(t *testing.T) {
+	db := openBookStore(t)
+	finished, err := db.CreateBook(t.Context(), "Moon Bear's Honey")
+	if err != nil {
+		t.Fatalf("create finished book: %v", err)
+	}
+	placeMedia(t, db, finished.ID, "pdf-finished", "application/pdf", store.MediaPlace{BookID: finished.ID})
+	abandoned, err := db.CreateBook(t.Context(), "Our story")
+	if err != nil {
+		t.Fatalf("create abandoned book: %v", err)
+	}
+
+	res := httptest.NewRecorder()
+	NewShelfHandler(db).Shelf(res, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := res.Body.String()
+	if !strings.Contains(body, "/book/"+finished.ID) {
+		t.Errorf("shelf dropped the finished book: %s", body)
+	}
+	if strings.Contains(body, "/book/"+abandoned.ID) {
+		t.Errorf("shelf offered a book with nothing in it: %s", body)
+	}
+}
+
 func TestShelfHandler_EmptyStore(t *testing.T) {
 	h := NewShelfHandler(nil)
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -525,6 +557,10 @@ func TestShelfHandler_WithBooks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create book 2: %v", err)
 	}
+	// The shelf lists books there is something to read, so both need a
+	// finished artifact behind them.
+	placeMedia(t, db, b1.ID, "pdf-b1", "application/pdf", store.MediaPlace{BookID: b1.ID})
+	placeMedia(t, db, b2.ID, "film-b2", "video/mp4", store.MediaPlace{BookID: b2.ID})
 
 	h := NewShelfHandler(db)
 	req := httptest.NewRequest(http.MethodGet, "/", nil)

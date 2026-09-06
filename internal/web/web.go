@@ -21,9 +21,13 @@ var templates embed.FS
 
 var pageTemplates = template.Must(template.ParseFS(templates, "templates/*.html"))
 
-// shelfStore is the shelf page's narrow view of the persistent store.
+// shelfStore is the shelf page's narrow view of the persistent store. The
+// shelf needs the book media too: a book row is created the moment an
+// interview starts, so "every book" includes every interview anyone ever
+// abandoned.
 type shelfStore interface {
 	Books(ctx context.Context) ([]store.Book, error)
+	BookMedia(ctx context.Context, bookID string) ([]store.Media, error)
 }
 
 // ShelfBook is a display model for one book card on the landing shelf.
@@ -54,6 +58,14 @@ func (h *ShelfHandler) Shelf(w http.ResponseWriter, r *http.Request) {
 			stored = nil
 		}
 		for _, b := range stored {
+			// Only books there is something to read. A book row is created
+			// when an interview STARTS, so an abandoned interview leaves one
+			// behind carrying the working title — and the shelf was offering
+			// a child five identical "Our story" cards that open on a page
+			// with no pictures, no words and nothing to download.
+			if !h.readable(r.Context(), b.ID) {
+				continue
+			}
 			books = append(books, ShelfBook{
 				ID:     b.ID,
 				Title:  b.Title,
@@ -139,6 +151,34 @@ func (h *BookHandler) State(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(page) // the client may close after headers are sent
 }
+
+// readable reports whether a book has a finished artifact behind it: the
+// printable PDF or the film. Either one means a run reached its last stages
+// and there is a book to open; neither means the row is an interview that
+// never became one.
+func (h *ShelfHandler) readable(ctx context.Context, bookID string) bool {
+	media, err := h.store.BookMedia(ctx, bookID)
+	if err != nil {
+		// A store fault is not evidence that a book is empty. Show it and
+		// let the book page say what it can — hiding a real book because
+		// one read failed is the worse of the two mistakes.
+		return true
+	}
+	for _, m := range media {
+		if m.ContentType == pdfMediaType || m.ContentType == filmMediaType {
+			return true
+		}
+	}
+	return false
+}
+
+// The two finished-artifact content types the shelf and the download route
+// recognise. They mirror bookgen's own constants; this package does not
+// import them because bookgen keeps them unexported.
+const (
+	pdfMediaType  = "application/pdf"
+	filmMediaType = "video/mp4"
+)
 
 // DownloadHandler serves a book artifact with a filename derived from the
 // story title. The media handler still owns byte serving, ranges and errors.

@@ -265,12 +265,29 @@ volume, no second copy of anything. SQLite is opened in WAL mode with a
 process deliberately does NOT start the retention sweeper, because the
 serving container is already running one. Run one `-complete` at a time.
 
+### Removing the rows abandoned interviews leave behind
+
+A book row is created the moment an interview STARTS, so every interview
+anyone walked away from leaves one behind carrying the working title "Our
+story". The shelf no longer offers them — it lists only books with a PDF or
+a film — but the rows are still there:
+
+```bash
+docker exec thutapi /thutapi -data-dir /data -prune-abandoned
+```
+
+It deletes a row only when it has **no pages and no media at all**. A book
+with pages is a story somebody told, however unfinished, and belongs to
+`-complete` instead; a book with media has something a child can still see.
+The delete cascades to the row's pages, cast, interview and media rows.
+
 From CI, the same repair is a button:
 
 ```bash
 gh workflow run complete-books.yml                     # every book missing sound
 gh workflow run complete-books.yml -f book=<book-id>   # one book
 gh workflow run complete-books.yml -f music=false      # speech only
+gh workflow run complete-books.yml -f prune_abandoned=true
 ```
 
 It shares the `production-deploy` concurrency group, so a repair and a

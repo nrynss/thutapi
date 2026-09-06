@@ -148,6 +148,64 @@ func (h *Handler) missingWork(ctx context.Context, bookID string) (bool, error) 
 	return false, nil
 }
 
+// AbandonedBooks lists the book rows that are not books at all, oldest
+// first: no pages and no media of any kind.
+//
+// A book row is created the moment an interview STARTS, before a single
+// question is asked, so every interview anyone walked away from leaves one
+// behind carrying the working title. Five of them were sitting on the live
+// shelf as identical "Our story" cards, each opening on a page with no
+// pictures, no words and nothing to download.
+//
+// The two conditions are deliberately strict and checked together. A book
+// with pages is a story somebody told, even if its run never finished — that
+// is Complete's to repair, never this. A book with media has something a
+// child can still see. Only a row with neither has nothing to lose.
+func (h *Handler) AbandonedBooks(ctx context.Context) ([]string, error) {
+	books, err := h.cfg.DB.Books(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("bookgen: list books to prune: %w", err)
+	}
+	var abandoned []string
+	for _, b := range books {
+		pages, err := h.cfg.DB.Pages(ctx, b.ID)
+		if err != nil {
+			return nil, fmt.Errorf("bookgen: read pages for book %s: %w", b.ID, err)
+		}
+		if len(pages) > 0 {
+			continue
+		}
+		media, err := h.cfg.DB.BookMedia(ctx, b.ID)
+		if err != nil {
+			return nil, fmt.Errorf("bookgen: read media for book %s: %w", b.ID, err)
+		}
+		if len(media) > 0 {
+			continue
+		}
+		abandoned = append(abandoned, b.ID)
+	}
+	return abandoned, nil
+}
+
+// PruneAbandoned deletes every book AbandonedBooks names and returns the
+// ids it removed. The book row cascades to its pages, cast, interview and
+// media rows, so nothing is orphaned behind it.
+func (h *Handler) PruneAbandoned(ctx context.Context) ([]string, error) {
+	abandoned, err := h.AbandonedBooks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	removed := make([]string, 0, len(abandoned))
+	for _, id := range abandoned {
+		if err := h.cfg.DB.DeleteBook(ctx, id); err != nil {
+			return removed, fmt.Errorf("bookgen: prune abandoned book %s: %w", id, err)
+		}
+		h.log.Info("bookgen: pruned an abandoned interview's empty book row", "book", id)
+		removed = append(removed, id)
+	}
+	return removed, nil
+}
+
 // storyFromStore rebuilds the structured story out of the rows the run
 // persisted. Every field the last three stages read is on those rows — the
 // page text and emotion narration speaks, the lines and text the film

@@ -85,6 +85,7 @@ type config struct {
 	exportBook   string        // T11 prewarm: export this book as a fixture and exit
 	completeBook string        // finish this book's narration, PDF and film, then exit ("all" for every filmless book)
 	completeMute bool          // complete without a music bed
+	pruneEmpty   bool          // delete book rows abandoned interviews left behind, then exit
 }
 
 type gmiVoiceCloner struct {
@@ -211,6 +212,7 @@ func parseFlags(args []string) (config, error) {
 	fs.StringVar(&cfg.exportBook, "prewarm-export", "", "export this book id as a prewarm fixture and exit")
 	fs.StringVar(&cfg.completeBook, "complete", "", `finish this book id's narration, PDF and film from its persisted pages, then exit ("all" completes every book with no film)`)
 	fs.BoolVar(&cfg.completeMute, "complete-no-music", false, "complete without a background music bed")
+	fs.BoolVar(&cfg.pruneEmpty, "prune-abandoned", false, "delete the empty book rows abandoned interviews left behind (no pages, no media), then exit")
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
 	}
@@ -602,7 +604,7 @@ func run(log *slog.Logger, args []string, sigs <-chan os.Signal) error {
 	// and that container is already sweeping. A second sweeper against the
 	// same media directory would be two processes deciding independently what
 	// is an orphan, so this one only watches when it is the one serving.
-	if cfg.completeBook == "" {
+	if cfg.completeBook == "" && !cfg.pruneEmpty {
 		sweeper.Start()
 		defer sweeper.Close() // run returns only at shutdown; nothing outlives it
 	}
@@ -662,6 +664,19 @@ func run(log *slog.Logger, args []string, sigs <-chan os.Signal) error {
 	// the store and exits, without serving. It never calls M3 or the image
 	// model, so it cannot give the child a different book than the one they
 	// already have. See internal/bookgen/complete.go.
+	// -prune-abandoned removes the book rows an abandoned interview leaves
+	// behind. A row is only touched when it has no pages AND no media, so a
+	// story somebody told is never in reach of it — that is -complete's to
+	// repair.
+	if cfg.pruneEmpty {
+		removed, err := generate.PruneAbandoned(context.Background())
+		if err != nil {
+			return fmt.Errorf("prune abandoned books: %w", err)
+		}
+		log.Info("abandoned book rows removed", "count", len(removed), "books", removed)
+		return nil
+	}
+
 	if cfg.completeBook != "" {
 		return completeBooks(context.Background(), log, generate, cfg.completeBook, !cfg.completeMute)
 	}

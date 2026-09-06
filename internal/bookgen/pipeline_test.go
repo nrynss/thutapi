@@ -1733,3 +1733,62 @@ func TestIncompleteBooks_NamesEveryBookMissingSound(t *testing.T) {
 		t.Errorf("IncompleteBooks = %v, want a book with a silent page named", silent)
 	}
 }
+
+// TestPruneAbandoned_RemovesEmptyRowsAndNothingElse pins the one rule that
+// makes deleting safe: a row goes only when it has no pages AND no media. A
+// story somebody told is never in reach of this, however unfinished it is.
+func TestPruneAbandoned_RemovesEmptyRowsAndNothingElse(t *testing.T) {
+	ph := newPipelineHarness(t)
+	ivID, finishedID := ph.makeEndedInterview("Mira")
+	srv := httptest.NewServer(ph.mux())
+	defer srv.Close()
+
+	// One book row an interview abandoned before it asked anything.
+	abandoned, err := ph.db.CreateBook(t.Context(), "Our story")
+	if err != nil {
+		t.Fatalf("create abandoned book: %v", err)
+	}
+	// And one that was structured but never illustrated: pages, no media.
+	// It is unfinished, not abandoned, and Complete is what it needs.
+	structured, err := ph.db.CreateBook(t.Context(), "Half a Story")
+	if err != nil {
+		t.Fatalf("create structured book: %v", err)
+	}
+	if err := ph.db.CreatePage(t.Context(), store.Page{BookID: structured.ID, N: 1, Text: "Once upon a time."}); err != nil {
+		t.Fatalf("create page: %v", err)
+	}
+
+	sub := ph.subscribe(finishedID)
+	code, res, _ := ph.postGenerate(srv, ivID)
+	if code != http.StatusAccepted {
+		t.Fatalf("POST generate status = %d, want 202", code)
+	}
+	for range fullStory().Pages {
+		ph.waitEvent(sub, "page_approved")
+	}
+	ph.waitEvent(sub, "book_ready")
+	if runRes := ph.waitJob(res.JobID); runRes.Status != job.StatusDone {
+		t.Fatalf("job = %+v, want done", runRes)
+	}
+
+	removed, err := ph.h.PruneAbandoned(t.Context())
+	if err != nil {
+		t.Fatalf("PruneAbandoned: %v", err)
+	}
+	if !slices.Equal(removed, []string{abandoned.ID}) {
+		t.Fatalf("pruned %v, want only the empty row %s", removed, abandoned.ID)
+	}
+	if _, err := ph.db.Book(t.Context(), abandoned.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("abandoned book still readable: %v", err)
+	}
+	for _, keep := range []string{finishedID, structured.ID} {
+		if _, err := ph.db.Book(t.Context(), keep); err != nil {
+			t.Errorf("book %s was deleted: %v", keep, err)
+		}
+	}
+	// And it is idempotent: a second pass has nothing left to take.
+	again, err := ph.h.PruneAbandoned(t.Context())
+	if err != nil || len(again) != 0 {
+		t.Fatalf("second prune = %v, %v; want nothing left", again, err)
+	}
+}
