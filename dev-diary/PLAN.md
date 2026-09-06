@@ -3108,5 +3108,31 @@ Reported from real-device generation run for book `58bc86ae81f116dc27979683722d8
      - Add a lightweight client script on `book.html` (or enhance `static/book/catchup.js`) when `data-book-state == "running"` to listen to the book's SSE stream (`/interviews/{id}/generate/events` or `/book/{id}/state` polling).
      - When `book_ready` arrives or status transitions to `ready`, dynamically reveal the PDF and video download buttons (or trigger a refresh).
 
+### Live bug report 4 — 2026-09-06
+
+Reported from real-device navigation to `https://thutapi.nryn.dev/`.
+
+1. **Cloudflare edge-caches stale `/static/app.js`, wiping out server-rendered shelf books:**
+   - **Symptom:** User opens `https://thutapi.nryn.dev/` and sees *"Pick a cozy book from the shelf, or make one with a grown-up"*, but no book cards appear on the screen.
+   - **Investigation:**
+     - The server-rendered HTML at `GET /` correctly contains the shelf books `<section class="shelf-books">...` with all available books.
+     - However, `cmd/thutapi/main.go:staticAssets()` does not set a `Cache-Control` header on served JS/CSS files.
+     - Cloudflare's proxy automatically applied a 4-hour cache header: `cache-control: max-age=14400` with `cf-cache-status: HIT` (`age: ~3400s`).
+     - Browsers visiting the site received the *old* cached `app.js` (from prior to T9b), where `function Shelf({ onStart })` had no book rendering logic.
+     - When the client-side Preact script mounted, `root.replaceChildren()` cleared the server-rendered HTML (which had the books!), replacing it with the old component that rendered no books.
+     - Verified: Requesting `/static/app.js?v=2` immediately bypasses the stale cache and returns the new `readShelfBooks()` implementation.
+   - **Fix direction:**
+     - In `staticAssets()`, send explicit `Cache-Control: no-cache, must-revalidate` for `.js` and `.css` files.
+     - In `internal/web/templates/shelf.html`, append a cache-busting version query string to `<script type="module" src="/static/app.js?v={{.Version}}"></script>`.
+
+2. **Prewarmed books fixture missing on host deployment volume:**
+   - **Symptom:** On a deployed instance, the prewarmed fixture `d625fd608be48227f08c33cf860e5de8` ("Bo and Pip's Moon Mango Dance") was not restored on container boot because `/srv/thutapi/data/prewarm` did not exist on the host bind-mount.
+   - **Resolution:**
+     - Copied `data/prewarm` to `/srv/thutapi/data/prewarm` on the host.
+     - Restarted container `thutapi`. Startup log confirmed: `"prewarmed books restored", "books": ["d625fd608be48227f08c33cf860e5de8"]`.
+     - Production database now contains all 3 books (`d625fd608be48227f08c33cf860e5de8`, `58bc86ae81f116dc27979683722d87a8`, `469e374bf0998aa96e11ca9aa8e876d0`).
+     - Ensure automated deployment scripts or the Docker build synchronize `data/prewarm` into the host's data directory.
+
+
 
 
