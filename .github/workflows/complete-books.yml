@@ -79,19 +79,49 @@ jobs:
             FLAGS="-complete-no-music"
           fi
 
+          SSH_OPTS=(-i ~/.ssh/id_deploy -o ServerAliveInterval=30 -o ServerAliveCountMax=10)
+
           if [[ "${PRUNE}" == "true" ]]; then
             echo "Removing abandoned book rows..."
-            ssh -i ~/.ssh/id_deploy "${DEPLOY_TARGET}" \
+            ssh "${SSH_OPTS[@]}" "${DEPLOY_TARGET}" \
               "docker exec thutapi /thutapi -data-dir /data -prune-abandoned" \
               2>&1 | tee /tmp/prune_out.log
           fi
 
           echo "Completing '${BOOK}' (music=${MUSIC})..."
-          # The repair runs inside the serving container, against the same
-          # /data it serves: one process, WAL, no second copy of the store.
-          ssh -i ~/.ssh/id_deploy "${DEPLOY_TARGET}" \
-            "docker exec thutapi /thutapi -data-dir /data -complete '${BOOK}' ${FLAGS}" \
-            2>&1 | tee /tmp/complete_out.log
+          # The repair is DETACHED on the box and polled, rather than held
+          # open over ssh. A patient retry makes the command silent for
+          # minutes at a time, and a silent connection is one the network
+          # drops: the first run of this died on "client_loop: send
+          # disconnect: Broken pipe" four minutes in, with the repair
+          # abandoned halfway. setsid+nohup outlives the connection, and
+          # `timeout` bounds the work whatever happens to this job — a
+          # detached process nobody can see must never be able to run
+          # forever.
+          LOG=/srv/thutapi/complete.log
+          ssh "${SSH_OPTS[@]}" "${DEPLOY_TARGET}" "
+            rm -f ${LOG}
+            setsid nohup timeout 3600 \
+              docker exec thutapi /thutapi -data-dir /data -complete '${BOOK}' ${FLAGS} \
+              > ${LOG} 2>&1 < /dev/null &
+            echo detached
+          "
+
+          echo "Waiting for the repair to finish (polling ${LOG})..."
+          while ssh "${SSH_OPTS[@]}" "${DEPLOY_TARGET}" \
+              "pgrep -f 'thutapi -data-dir /data -complete' > /dev/null"; do
+            sleep 30
+          done
+
+          ssh "${SSH_OPTS[@]}" "${DEPLOY_TARGET}" "cat ${LOG}" 2>&1 | tee /tmp/complete_out.log
+
+          # The detached process's own exit status is not this shell's, so
+          # the run is judged on what it wrote: any book it could not
+          # complete fails the job, exactly as the attached form did.
+          if grep -q '"msg":"could not complete book"' /tmp/complete_out.log; then
+            echo "at least one book could not be completed" >&2
+            exit 1
+          fi
 
       - name: Summary
         if: always()

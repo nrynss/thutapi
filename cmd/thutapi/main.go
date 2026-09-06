@@ -101,14 +101,18 @@ func (c gmiVoiceCloner) CloneVoice(ctx context.Context, request audio.VoiceClone
 }
 
 // completeThrottle is the retry budget for this process: the audio package
-// default when this process is serving, and a deliberately patient one when
-// it was started to repair books. The patient budget spends up to about
-// seven minutes on one page before giving it up as silent.
+// default when this process is serving, and a more patient one when it was
+// started to repair books. The patient budget spends about four and a half
+// minutes on one page before giving it up as silent — several times the
+// live budget, and still bounded, because waiting is only worth anything
+// against a cap that clears. A provider that is out of capacity for twenty
+// minutes (2026-09-06) is not waited out by any budget worth having; that
+// is a repair to run again later, not one to sit in.
 func completeThrottle(cfg config) audio.ThrottleConfig {
 	if cfg.completeBook == "" {
 		return audio.ThrottleConfig{}
 	}
-	return audio.ThrottleConfig{Attempts: 8, Backoff: 30 * time.Second}
+	return audio.ThrottleConfig{Attempts: 5, Backoff: 30 * time.Second}
 }
 
 // completeBooks runs bookgen.Complete over one book id, or over every book
