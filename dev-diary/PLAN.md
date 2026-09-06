@@ -220,7 +220,7 @@ routes anyway; not worth doing speculatively before then.**
 | **T8** | **DONE** 2026-09-05, closed at `8b7066b` — round 1 (0C/0H/0M/2L) → round 2 (0C/1H/0M/0L, the emotion-key evidence chain) → **round 3 APPROVE 0/0/0/0**. `NarrateBook` (one clip per page, in page order, blob-first then `MediaNarration` place, `ErrConflict` replaces the occupant) and `SynthesizeQuestion`; sanctioned contract row C1 gave `media.SynthesizeSpeech` an emotion parameter. **Rider (a) closed at `028efe4`** — the wire-contract-2 amendment (round 4, APPROVE 0/0/0/0): question audio persists as an **unplaced** media row and `SynthesizeQuestion` returns its id, because a `question_audio` event needs a URL that exists; supersedes round-1's D3. The `question_audio` SSE event half is the flow track's. **Rider (b) is T8b**: the emotion key is asserted-but-unverified live, settlement probe committed. |
 | **T8b** | **DONE** 2026-09-05 — **and it was never blocked on the TTS pool.** The 503 is on POST synthesis; the parameter schema is behind a GET that answered 200 throughout: `GET console.gmicloud.ai/api/v1/ie/requestqueue/apikey/models/{id}` — the exact route t8-round2.md H1 named, which the remediation replaced with a weaker catalog-membership check. **Placement CONFIRMED CORRECT** (`emotion` is top-level in GMI's flattened dialect; round 2's `voice_setting` worry was right about MiniMax, wrong about GMI). **`neutral` is NOT in the provider enum** (`auto, calm, happy, sad, angry, fearful, disgusted, surprised`) — H1's silent-ignore class, live, on the value a gentle book reaches for most; handed to **T5c**. Bonus: T13's cast knobs confirmed against the schema (`pitch` ±12, `timbre`/`intensity` ±100, `sound_effects` incl. `robotic`, `spacious_echo`). Cost $0.00. See t8b-live-record.md. |
 | **T8c** | **DONE** 2026-09-05. Closed at round 1: **APPROVE 0/0/0/0, zero residue** (t8c-round1.md). Consumer interface `QuestionSpeaker` declared in `internal/interview`, wired in `cmd/thutapi/main.go` delegating to `audio.SynthesizeQuestion`. Non-blocking background synthesis under detached 30s timeout publishes `question_audio {"turn":N,"audio_url":"/media/<id>"}`. Errors and empty IDs suppressed silently; text questions stream immediately. Coverage: interview 93.7%. |
-| **T9** | **DONE** 2026-09-06. Closed at round 6: **APPROVE 0/0/0/0, zero residue** (t9-round1.md → t9-remediation-round1.md → t9-round2.md → t9-remediation-round2.md → t9-round3.md → t9-remediation-round3.md → t9-round4.md → t9-remediation-round4.md → t9-round5.md → t9-remediation-round5.md → t9-round6.md). The real-phone HTTPS check is deferred operator evidence. |
+| **T9** | **DONE** 2026-09-06. Closed at round 6: **APPROVE 0/0/0/0, zero residue** (t9-round1.md → t9-remediation-round1.md → t9-round2.md → t9-remediation-round2.md → t9-round3.md → t9-remediation-round3.md → t9-round4.md → t9-remediation-round4.md → t9-round5.md → t9-remediation-round5.md → t9-round6.md). The real-phone HTTPS check is deferred operator evidence. **Re-opened briefly 2026-09-06: two defects escaped round 6 and are now fixed and verified live but NOT committed — see §T9 → Post-close fixes for the contract row and the one consequence other tracks must know (`/static/browser-test.html` now 404s).** |
 | **T9a** | **DONE** 2026-09-05. Closed after round-1 remediation and **round-2 APPROVE 0/0/0/0, zero residue** (t9a-round1.md, t9a-remediation-round1.md, t9a-round2.md). Delivered in `static/race/**`: standalone `race.html` and `index.html` with single-property `--done: 0..8` interface, 8 markers, composite-only `transform: scaleX(...)` progress bar, 5 distinct custom animal sprites (Hare, Tortoise, Fox, Duck, Mouse) with unique silhouettes at 64×44, `.runner svg{overflow:visible}` preventing ear clipping during `.bob`, non-overshooting deceleration curve `cubic-bezier(.25, 1, .5, 1)` preventing finish line clipping, full palette tokenization via CSS `var()`, and `prefers-reduced-motion` support. Suite passes in `race_test.go`. |
 | **T10c** | **DONE** 2026-09-05, closed at `61e4da5` — **round-1 APPROVE 0/0/0/0, zero residue** (t10c-round1.md; five reviewer mutations red, byte-identical restores). `internal/bookgen` joins every stage: `POST /interviews/{id}/generate` → job on the book's topic; 409-busy double-fire refusal, fresh run after terminal; stages in order (structure with byline/page-cast rows → illustrate with Judge+Persist → narrate → bookvideo → film persisted + attached); events `page_approved {n,image_url}` (drives T9a's `--done`) / `book_ready {video_url}` / `failed {}` exactly-once incl. panic; failure total + terminal, no auto retry; store-side catch-up pinned. Contract rows C1–C6 sanctioned. **Two cross-track deliverables ride on this:** C2 — mediastore's closed type set lacks `video/mp4`, so production film persist lands when its owner adds the type (lifecycle pinned via the filmStore seam meanwhile); C4 — the HTTP book-state catch-up read is T10b's. |
 | **T10a** | **DONE** 2026-09-05. Closed after round-1 remediation and **round-2 APPROVE 0/0/0/0, zero residue** (t10a-round1.md, t10a-remediation-round1.md, t10a-round2.md). Implemented video pipeline in `internal/bookvideo` (`types.go`, `command.go`, `video.go`, `bookvideo_test.go`): title card (blurred page 1 with title + byline via `textfile=`), page segments (`-shortest`, scale/pad/setsar 1080x1350 4:5 portrait, libx264/aac), end card (flat `0x1b1614` with domain attribution), and concat demuxer (`-c copy +faststart` with MP4 metadata tags). Bounded concurrency via `errgroup.SetLimit`. Added static ffmpeg 7.1 pinned by immutable sha256 digest to `Dockerfile`. Coverage 89.1%. |
@@ -1703,6 +1703,104 @@ link works without JS.
 * Render a speaker control that cannot speak. If no `question_audio` arrives at
   all, the interview is simply silent — **omit** the affordance rather than
   showing an inert one.
+
+### Post-close fixes — 2026-09-06, uncommitted
+
+**This is the declared contract row** the "Never" list above requires for
+editing a closed track. T9 closed at round 6 with APPROVE 0/0/0/0 and zero
+residue; these two defects escaped that review and were found by loading the
+running app in a browser rather than by reading the diff. Both are **fixed and
+verified live, and deliberately not committed** — the operator waived the
+review loop for them, so there is no `t9-round7.md`.
+
+| # | Defect | Fix | File |
+| --- | --- | --- | --- |
+| 1 | Every JS page also displayed its no-JS fallback. `render(vnode, root)` **appends** into a `#app` the server has already filled — only `hydrate` diffs existing DOM. The shelf showed its eyebrow, headline, copy and CTA **twice** (two `Make your own book` links, the lower one the plain `href` fallback); `/interview/{id}` stranded *"Preparing your story…"* under the card forever, so the page always looked mid-load | `root.replaceChildren()` immediately before the first `render` | `static/app.js`, mount site at the foot of the file |
+| 2 | The static file server published source: `/static/race/race_test.go` (Go test source), `/static/browser-test.html` and `/static/browser-test.js` all returned **200** with real contents | `http.FileServer(http.Dir("static"))` is now wrapped by a `staticAssets()` helper that `http.NotFound`s any basename ending `.go` or beginning `browser-test.` Files stay where they are | `cmd/thutapi/main.go` — route line, new helper after `ServeHTTP`, `path` + `strings` imports |
+| 3 | Fix 2 stopped the contents but not the **enumeration** — `http.FileServer` still rendered auto-generated directory listings, and `/static/` returned 200 with an index that *named* `browser-test.html` and `browser-test.js` plus the whole asset tree. `/static/book/` and `/static/vendor/` listed too | A `noDirFS` wrapper around the `http.FileSystem` whose `Open` returns `fs.ErrNotExist` for any directory. `/static/`, `/static/book/`, `/static/vendor/`, `/static/vendor/fonts/` and `/static/race/` now 404 | `cmd/thutapi/main.go` — same `staticAssets()` helper, `io/fs` import |
+| 4 | `static/race/index.html` and `static/race/race.html` were byte-identical copies (19972 b, both from `b658464`), kept in sync by a test that existed only to assert the duplication | `index.html` **deleted**; `race.html` is the only copy. Nothing referenced it — `static/app.js:131` embeds `/static/race/race.html?embed=1`, and its one incidental effect (shadowing the directory listing for that folder) is moot now that listings are off | `static/race/index.html` (deleted), `static/race/race_test.go` |
+| 5 | A failed turn left the headline claiming the app was still working. `<h1>` fell back to *"I'm thinking of a good question…"* whenever `question` was null — including after a turn failed — so it sat directly above the warm failure notice telling the child to try again. One line said wait, the other said act | The fallback now distinguishes the two states: `question ? question.text : notice ? "A little hiccup." : "I'm thinking of a good question…"`. The transient pre-question state is unchanged | `static/app.js`, the interview `<h1>` |
+
+**Not `hydrate`, and the templates are untouched.** The server tree and the
+client tree genuinely differ — the client wraps content in a `.card` /
+`.interview` element the fallback markup has no equivalent for — so hydration
+would mis-diff. The fallback stays in `shelf.html` and `interview.html`: the
+raw HTML still carries the eyebrow, `<h1>`, the `data-start` link and the
+`<noscript>` block, and the duplicate is removed at runtime by the client
+only. `curl … | grep -c "Make your own book"` → 1.
+
+**Why the files were not moved.** `static/race/race_test.go` is a real
+`package race_test` that `go test ./...` runs and passes (`ok
+thutapi/static/race`), and `static/browser-test.js` was under active edit by
+T13 at the time. Relocating either would have collided with in-flight work.
+
+**The one consequence for other tracks — read this.** The T9 and T10b review
+records describe driving the browser harness by serving the repo and opening
+`/static/browser-test.html`. **That path now 404s.** The harness is
+developer-only from here: open the file directly, or serve it from a separate
+dev-only root. Nothing else changed — `/static/app.css`, `/static/app.js`,
+`/static/book/**`, `/static/race/index.html`, `/static/race/race.html` and
+`/static/vendor/**` (including the Fredoka TTF, whose filename contains
+literal square brackets) all still serve 200, and the race widget is
+untouched.
+
+**Verification.** `gofmt` clean on both touched files; shelf and interview
+checked at desktop and 375×812 with exactly one CTA and no stranded fallback;
+Fredoka and the mint palette confirmed rendering; the three offending paths
+confirmed 404 and the asset paths above confirmed 200.
+
+**Why fix 5's headline states a condition instead of giving an instruction.**
+It has to sit above several different notices whose instructions disagree —
+*share your idea again*, *try once more*, *tap a choice or write it again*. An
+imperative headline endorses one and contradicts the others; a bare
+acknowledgement lets the notice own the instruction. It also drops the false
+progress claim: "thinking" asserts the app is still working, "hiccup" asserts
+it stopped.
+
+**The notice element was deliberately left alone.** `static/browser-test.js`
+asserts against `[role="status"]`, so the
+`${notice ? html`<p class="warm" role="status">${notice}</p>` : null}`
+structure is load-bearing for the harness and must not be folded into the
+headline.
+
+**A coupling worth knowing before anyone edits this screen.** The `not_found`
+notice variant is currently **unreachable** under that `<h1>`: all three sites
+that call `setNotice(warmError("not_found"))` also call `setMissing(true)` in
+the same breath, and `if (missing) return …` short-circuits to the separate
+"A tiny detour" card first. On that card *"That story wandered away."* is the
+`<h1>` and `[role="status"]` carries *"Start a new story…"* instead. So a
+future change that decouples `missing` from the `not_found` notice would
+newly expose this headline to that variant — the copy above was chosen to
+survive that, but the coupling is the thing to look at.
+
+**T9a's contract row for fix 4.** T9a is closed (round-2 APPROVE, zero
+residue) and owns `static/race/**`, so this is the declared row for editing
+it. `race_test.go` lost exactly two things: `"index.html"` from the
+`TestRaceHTML_SelfContained` filename slice, and `TestRaceHTML_IdenticalCopies`
+in full — it compared the two copies and has nothing left to compare. The
+other six tests are untouched and `go test ./static/race/` passes with seven
+tests. **If you ever restore a second copy of the widget, restore that test
+with it**; without it nothing keeps the copies in sync.
+
+**One deliberate deviation, easily reverted.** `/static/race/index.html`
+returned a stock **301** rather than 404 — Go redirects any `*/index.html` to
+`./` before it consults the filesystem, and does so identically for
+directories that never existed, so it disclosed nothing. It is now forced to
+404 by an `|| name == "index.html"` clause in the basename guard. The cost is
+that a future asset genuinely named `index.html` would 404; nothing under
+`static/` is named that. Delete that one clause to go back to the stock
+behaviour.
+
+**Two failures seen during this work that are NOT T9's** and were left alone:
+`internal/audio/clone.go` failed `gofmt` and intermittently failed to build
+(T13, mid-save), and `cmd/thutapi/main_test.go` did not compile because
+`bookgen.videoRenderer.Render` now returns `(time.Duration, error)` (T12's
+deterministic-duration threading). **Both were fixed by their own owners while
+this work ran — as of the second round `gofmt` is clean and `go test ./...`
+passes in full, `cmd/thutapi` included.** Also note the binary now refuses to boot
+without a `PUBLIC_ORIGIN` that parses as HTTPS — T13's clone.go added that
+requirement, and `.claude/launch.json` has an additive `thutapi-local` entry
+that supplies one for local runs.
 
 ---
 

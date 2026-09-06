@@ -516,6 +516,26 @@ func TestDeleteRemovesRowAndFile(t *testing.T) {
 	}
 }
 
+func TestPersistWithIDAndDeleteIfPresent(t *testing.T) {
+	s := openTestStore(t)
+	id := strings.Repeat("a", 32)
+	if err := s.PersistWithID(t.Context(), id, bytes.NewReader(blob(8)), "audio/mpeg"); err != nil {
+		t.Fatalf("persist with id: %v", err)
+	}
+	if _, err := s.db.Media(t.Context(), id); err != nil {
+		t.Fatalf("persist with id row: %v", err)
+	}
+	if err := s.DeleteIfPresent(t.Context(), id); err != nil {
+		t.Fatalf("delete if present: %v", err)
+	}
+	if err := s.DeleteIfPresent(t.Context(), id); err != nil {
+		t.Fatalf("delete if present missing: %v", err)
+	}
+	if err := s.PersistWithID(t.Context(), "../escape", bytes.NewReader(blob(8)), "audio/mpeg"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("malformed id error = %v, want ErrNotFound", err)
+	}
+}
+
 // TestOpenValidations: a store without a directory or without a
 // database is unusable and says so.
 func TestOpenValidations(t *testing.T) {

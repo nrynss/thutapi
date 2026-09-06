@@ -99,6 +99,15 @@ if [[ -z "${GMI_API_KEY:-}" ]]; then
   exit 1
 fi
 
+# Voice samples are fetched by GMI from this public HTTPS origin. Do not infer
+# it from Host: a forwarded or hostile header would turn a child's recording
+# into an incorrect provider URL. The Go process validates public HTTPS only.
+if [[ -z "${PUBLIC_ORIGIN:-}" ]]; then
+  echo "error: PUBLIC_ORIGIN is required (for example https://thutapi.nryn.dev)." >&2
+  echo "       Set it in ${ENV_FILE}; it is not a secret." >&2
+  exit 1
+fi
+
 # Generate an unguessable token for the voice-sample upload path (T13).
 # The Hetzner box exposes /upload for one-shot voice captures; GMI's
 # Speech 2.8 source_audio fetches the resulting URL. Short-lived and
@@ -107,7 +116,7 @@ UPLOAD_TOKEN="${UPLOAD_TOKEN:-$(openssl rand -hex 16)}"
 
 # Both secrets must be exported, not merely set: the name-only --env form
 # below tells docker to read them from this process's environment.
-export GMI_API_KEY UPLOAD_TOKEN
+export GMI_API_KEY UPLOAD_TOKEN PUBLIC_ORIGIN
 
 mkdir -p "${DATA_DIR}"
 printf '%s' "${UPLOAD_TOKEN}" > "${DATA_DIR}/upload-token"
@@ -154,6 +163,7 @@ DOCKER_ARGS=(
   # `--env "GMI_API_KEY=${GMI_API_KEY}"` here would undo that.
   --env GMI_API_KEY
   --env UPLOAD_TOKEN
+  --env PUBLIC_ORIGIN
 
   # --- Traefik v3 labels ---
   # traefik.enable: opt this container into routing.
@@ -190,4 +200,3 @@ echo "  docker logs -f ${NAME}"
 echo "  curl -fsS https://thutapi.nryn.dev/healthz"
 echo "  curl -fsS http://127.0.0.1:8080/healthz     # if HOST_PORT=8080"
 echo "Voice-sample bearer (UPLOAD_TOKEN) — see ${DATA_DIR}/upload-token for the token; not echoed to stdout."
-

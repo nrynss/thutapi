@@ -2,6 +2,8 @@ const results = document.querySelector("#results");
 const originalFetch = window.fetch;
 const originalAudio = window.Audio;
 const originalEventSource = window.EventSource;
+const originalMediaRecorder = window.MediaRecorder;
+const originalMediaDevices = navigator.mediaDevices;
 const originalPushState = window.history.pushState;
 const eventSources = [];
 const calls = [];
@@ -105,6 +107,11 @@ async function waitFor(checker, message) {
   throw new Error(message);
 }
 
+async function skipVoiceSample() {
+  await waitFor(() => document.querySelector("[data-voice-skip]"), "adult voice step did not render");
+  document.querySelector("[data-voice-skip]").click();
+}
+
 async function testOpeningErrorRecovery() {
   results.textContent = "opening error…";
   await configure({ status: "open", error: "internal", turns: [] });
@@ -186,6 +193,7 @@ async function testMissingCatchupRecovery() {
 async function testEndedCatchupClosesInterviewStream() {
   results.textContent = "terminal catch-up lifecycle…";
   await configure({ id: "ended", status: "ended", turns: [{ role: "closing", text: "Goodbye" }] });
+  await skipVoiceSample();
   await waitFor(() => eventSources.length >= 2 && calls.some(call => call.url.endsWith("/generate")), "ended interview did not start generation");
   check(eventSources[0].closed === true, "catch-up-ended interview EventSource remained open");
 }
@@ -202,6 +210,7 @@ async function testEndedReloadCatchesUpRunningGeneration() {
       "/interviews/reload/generate": response({ error: "busy" }, 409)
     }
   });
+  await skipVoiceSample();
   await waitFor(() => eventSources.length >= 2 && calls.some(call => call.url === "/book/book/state"), "reload did not subscribe then read C4 state");
   check(!calls.some(call => call.url === "/interviews/reload/generate"), "reload repeated generate despite a running C4 state");
   check(eventSources.at(-1).url === "/interviews/reload/generate/events", "reload subscribed to the wrong book stream");
@@ -221,6 +230,7 @@ async function testC4WaitsForOpenAndKeepsBoundaryEvent() {
     turns: [{ role: "closing", text: "Goodbye" }],
     responses: { "/book/book/state": state }
   });
+  await skipVoiceSample();
   await waitFor(() => eventSources.length >= 2, "reload did not create the book EventSource");
   const source = eventSources.at(-1);
   check(!calls.some(call => call.url === "/book/book/state"), "C4 read started before the book stream opened");
@@ -241,6 +251,7 @@ async function testC4StateFailureKeepsLiveStream() {
     turns: [{ role: "closing", text: "Goodbye" }],
     responses: { "/book/book/state": response({ error: "internal" }, 500) }
   });
+  await skipVoiceSample();
   await waitFor(() => eventSources.length >= 2 && calls.some(call => call.url === "/book/book/state"), "C4 state failure did not reach the synchronized read");
   const source = eventSources.at(-1);
   await waitFor(() => document.querySelector("h1")?.textContent.includes("checking on your book"), "C4 read failure did not render the recoverable state");
@@ -260,6 +271,7 @@ async function testC4UnknownStateIsRecoverable() {
     turns: [{ role: "closing", text: "Goodbye" }],
     responses: { "/book/book/state": response({ status: "unknown", pages: [{ n: 2 }] }) }
   });
+  await skipVoiceSample();
   await waitFor(() => eventSources.length >= 2 && calls.some(call => call.url === "/book/book/state"), "unknown C4 state did not reach the synchronized read");
   const source = eventSources.at(-1);
   await waitFor(() => document.querySelector("h1")?.textContent.includes("checking on your book"), "unknown C4 state did not render the recoverable state");
@@ -284,6 +296,7 @@ async function testC4ReconnectRepeatsSnapshot() {
       "/book/book/state": () => response(reads++ === 0 ? { status: "running", pages: [] } : { status: "ready", pages: [] })
     }
   });
+  await skipVoiceSample();
   await waitFor(() => eventSources.length >= 2 && calls.some(call => call.url === "/book/book/state"), "initial C4 snapshot did not complete");
   const source = eventSources.at(-1);
   check(!source.closed, "running initial C4 stream closed");
@@ -306,6 +319,7 @@ async function testC4ReconnectQueuesSnapshotDuringInflightRead() {
       "/book/book/state": () => reads++ === 0 ? initial : response({ status: "ready", pages: [] })
     }
   });
+  await skipVoiceSample();
   await waitFor(() => calls.filter(call => call.url === "/book/book/state").length === 1, "initial C4 snapshot did not start");
   const source = eventSources.at(-1);
   source.dispatch("error");
@@ -325,6 +339,7 @@ async function testFreshGenerationSynchronizesAfterOpen() {
     turns: [{ role: "closing", text: "Goodbye" }],
     responses: { "/book/book/state": response({ status: "running", pages: [{ n: 5 }] }) }
   });
+  await skipVoiceSample();
   await waitFor(() => calls.some(call => call.url === "/interviews/fresh/generate"), "fresh generation did not POST");
   await waitFor(() => calls.some(call => call.url === "/book/book/state"), "fresh generation did not synchronize C4 state");
   check(document.querySelector("iframe.race-frame")?.title === "1 of 8 pages finished", "fresh generation snapshot lost its approved page");
@@ -338,8 +353,18 @@ async function testShelfGestureAndGeneration() {
   check(audioCreated === 1, "shelf CTA did not create exactly one audio element");
   check(location.pathname === "/interview/new", "shelf CTA discarded the same document flow");
   await configure({ status: "ended", turns: [{ role: "closing", text: "Goodbye" }] });
-  await waitFor(() => calls.some(call => call.url.endsWith("/generate")), "ended interview did not take the no-sample generation path");
-  check(!document.querySelector("[data-voice-record], [data-voice-upload], [data-voice-capture]"), "T13 capture controls render before T13 mounts them");
+  await waitFor(() => document.querySelector("[data-voice-record]") && document.querySelector("[data-voice-upload]") && document.querySelector("[data-voice-skip]"), "T13 adult capture controls did not render");
+  check(document.querySelector("[data-voice-consent]")?.checked === false, "voice consent defaults to affirmative");
+  check(document.querySelector("[data-voice-record]").disabled, "recording was enabled without adult consent");
+  document.querySelector("[data-voice-consent]").click();
+  check(document.querySelector("[data-voice-record]").disabled, "recording was enabled without voice-sample authorization");
+  const uploadToken = document.querySelector("[data-voice-upload-token]");
+  uploadToken.value = "test-upload-token";
+  uploadToken.dispatchEvent(new Event("input", { bubbles: true }));
+  await settle();
+  check(!document.querySelector("[data-voice-record]").disabled, "recording stayed disabled after consent and authorization");
+  await skipVoiceSample();
+  await waitFor(() => calls.some(call => call.url.endsWith("/generate")), "voice-step skip did not start generation");
   check(document.querySelector("iframe.race-frame")?.src.includes("/static/race/race.html"), "generation screen did not consume the T9a race widget");
   const source = eventSources.at(-1);
   source.dispatch("page_approved", { n: 8, image_url: "/media/page-8" });
@@ -352,6 +377,48 @@ async function testShelfGestureAndGeneration() {
   await waitFor(() => frame.contentDocument?.querySelector(".race"), "race iframe did not load for bridge test");
   await settle();
   check(frame.contentDocument.querySelector(".race").style.getPropertyValue("--done") === "2", "parent progress did not reach the T9a iframe bridge");
+}
+
+async function testRecorderMimeNegotiation() {
+  results.textContent = "recorder MIME negotiation…";
+  const supportedCalls = [];
+  const created = [];
+  class FakeMediaRecorder {
+    static isTypeSupported(type) {
+      supportedCalls.push(type);
+      return type === "audio/mp4";
+    }
+    constructor(stream, options) {
+      this.stream = stream;
+      this.mimeType = options.mimeType;
+      this.state = "inactive";
+      created.push(this);
+    }
+    start() { this.state = "recording"; this.ondataavailable?.({ data: new Blob(["audio"], { type: this.mimeType }) }); }
+    stop() { this.state = "inactive"; this.onstop?.(); }
+  }
+  const fakeTracks = [{ stop() {} }];
+  Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: { getUserMedia: async () => ({ getTracks: () => fakeTracks }) } });
+  window.MediaRecorder = FakeMediaRecorder;
+  try {
+    await configure({ id: "recorder", status: "ended", turns: [{ role: "closing", text: "Goodbye" }], responses: { "/voice-sample": response({ media_url: "https://thutapi.nryn.dev/media/id", source_audio: "https://thutapi.nryn.dev/media/id", voice_id: "provider-voice" }, 201) } });
+    await waitFor(() => document.querySelector("[data-voice-record]"), "recorder surface did not render");
+    document.querySelector("[data-voice-consent]").click();
+    const uploadToken = document.querySelector("[data-voice-upload-token]");
+    uploadToken.value = "test-upload-token";
+    uploadToken.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    document.querySelector("[data-voice-record]").click();
+    await waitFor(() => created[0]?.state === "recording", "recorder did not start");
+    document.querySelector("[data-voice-stop]").click();
+    await waitFor(() => calls.some(call => call.url === "/voice-sample"), "recorder did not upload");
+    check(supportedCalls.length > 0 && created[0].mimeType === "audio/mp4", "recorder did not choose the supported MIME candidate");
+    check(calls.find(call => call.url === "/voice-sample").init.headers["X-Voice-Sample-Consent"] === "yes", "recorder upload omitted consent header");
+    check(calls.find(call => call.url === "/voice-sample").init.headers.Authorization === "Bearer test-upload-token", "recorder upload omitted bearer authorization");
+  } finally {
+    window.MediaRecorder = originalMediaRecorder;
+    Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: originalMediaDevices });
+  }
 }
 
 async function run() {
@@ -371,6 +438,7 @@ async function run() {
     await testC4ReconnectQueuesSnapshotDuringInflightRead();
     await testFreshGenerationSynchronizesAfterOpen();
     await testShelfGestureAndGeneration();
+    await testRecorderMimeNegotiation();
     results.innerHTML = "<h1>PASS</h1><pre>opening and terminal catch-up recovery\ncatch-up ordering, chips, and current-turn audio\nshelf unlock, no-sample route, distinct approval progress, and iframe bridge</pre>";
   } catch (error) {
     results.innerHTML = `<h1>FAIL</h1><pre>${String(error.stack || error)}</pre>`;

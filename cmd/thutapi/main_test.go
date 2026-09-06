@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"thutapi/internal/audio"
 	"thutapi/internal/bookgen"
 	"thutapi/internal/bookpdf"
 	"thutapi/internal/bookvideo"
@@ -55,6 +56,10 @@ func newTestServer(t *testing.T) *server {
 	if err != nil {
 		t.Fatalf("open media store: %v", err)
 	}
+	voiceSamples, err := audio.NewVoiceSampleHandler(audio.VoiceSampleConfig{Store: media, PublicOrigin: "https://thutapi.nryn.dev", TempDir: t.TempDir(), UploadToken: "test-upload-token", Cloner: failVoiceCloner{}})
+	if err != nil {
+		t.Fatalf("build voice sample handler: %v", err)
+	}
 	broker := stream.New(stream.Config{})
 	interviews, err := interview.New(interview.Config{
 		Chat:   echoChatter{},
@@ -83,7 +88,7 @@ func newTestServer(t *testing.T) *server {
 	if err != nil {
 		t.Fatalf("build generation handler: %v", err)
 	}
-	return newServer(log, media, interviews, generate, db)
+	return newServer(log, media, voiceSamples, interviews, generate, db)
 }
 
 // echoChatter answers every Chat call with a one-question reply that
@@ -120,10 +125,16 @@ func (failTTS) SynthesizeSpeech(context.Context, string, string, string, string)
 	return nil, fmt.Errorf("failTTS: unexpected SynthesizeSpeech in a cmd route test")
 }
 
+type failVoiceCloner struct{}
+
+func (failVoiceCloner) CloneVoice(context.Context, audio.VoiceCloneRequest) (audio.VoiceCloneResult, error) {
+	return audio.VoiceCloneResult{}, fmt.Errorf("failVoiceCloner: unexpected CloneVoice in a cmd route test")
+}
+
 type failRenderer struct{}
 
-func (failRenderer) Render(context.Context, bookvideo.Input) error {
-	return fmt.Errorf("failRenderer: unexpected Render in a cmd route test")
+func (failRenderer) Render(context.Context, bookvideo.Input) (time.Duration, error) {
+	return 0, fmt.Errorf("failRenderer: unexpected Render in a cmd route test")
 }
 
 type failFilmStore struct{}
@@ -202,6 +213,13 @@ func TestParseConfigDataDirEnv(t *testing.T) {
 	cfg := parseConfig()
 	if cfg.dataDir != "/var/lib/thutapi" {
 		t.Fatalf("dataDir = %q, want /var/lib/thutapi (DATA_DIR wins)", cfg.dataDir)
+	}
+}
+
+func TestParseConfigPublicOriginEnv(t *testing.T) {
+	t.Setenv("PUBLIC_ORIGIN", "https://thutapi.nryn.dev")
+	if cfg := parseConfig(); cfg.publicOrigin != "https://thutapi.nryn.dev" {
+		t.Fatalf("publicOrigin = %q, want configured PUBLIC_ORIGIN", cfg.publicOrigin)
 	}
 }
 
@@ -291,6 +309,28 @@ func TestMediaRouteServesThroughMux(t *testing.T) {
 	srv.ServeHTTP(rr, req)
 	if got, want := rr.Code, http.StatusMethodNotAllowed; got != want {
 		t.Fatalf("POST media id: status = %d, want %d", got, want)
+	}
+}
+
+// TestVoiceSampleRouteServesThroughMux pins T13's one POST route. The
+// transcode/persist pipe is tested in internal/audio; this test proves the
+// public endpoint reaches it and a non-POST cannot accidentally create media.
+func TestVoiceSampleRouteServesThroughMux(t *testing.T) {
+	srv := newTestServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/voice-sample", strings.NewReader("not audio"))
+	req.Header.Set("Content-Type", "text/plain")
+	req.Header.Set("X-Voice-Sample-Consent", "yes")
+	req.Header.Set("Authorization", "Bearer test-upload-token")
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("POST invalid voice sample = %d, want 415: %s", rr.Code, rr.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodGet, "/voice-sample", nil)
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	if rr.Code != http.StatusMethodNotAllowed || rr.Header().Get("Allow") != http.MethodPost {
+		t.Errorf("GET voice sample = %d Allow %q, want 405 POST", rr.Code, rr.Header().Get("Allow"))
 	}
 }
 
@@ -669,6 +709,8 @@ func TestParseFlagsAfterOperandIsNotSilentlyDropped(t *testing.T) {
 // ---------------------------------------------------------------------
 
 func TestShutdownLogRecordsSignalName(t *testing.T) {
+	t.Setenv("PUBLIC_ORIGIN", "https://thutapi.nryn.dev")
+	t.Setenv("UPLOAD_TOKEN", "test-upload-token")
 	// L2: pin run() to an ephemeral port so the test does not depend
 	// on port 8080 being free. Without this, any process holding
 	// 0.0.0.0:8080 makes run() return a bind error before the
@@ -721,5 +763,14 @@ func TestShutdownLogRecordsSignalName(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("no `shutdown signal received` log line in output:\n%s", logBuf.String())
+	}
+}
+
+func TestRunRejectsMissingVoiceSampleConfiguration(t *testing.T) {
+	t.Setenv("PUBLIC_ORIGIN", "")
+	t.Setenv("UPLOAD_TOKEN", "test-upload-token")
+	err := run(slog.New(slog.NewTextHandler(io.Discard, nil)), []string{"-data-dir=" + t.TempDir()}, make(chan os.Signal))
+	if err == nil || !strings.Contains(err.Error(), "no public voice sample origin") {
+		t.Fatalf("run without PUBLIC_ORIGIN = %v, want startup configuration error", err)
 	}
 }

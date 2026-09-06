@@ -1,0 +1,16 @@
+# T13 remediation round 4
+
+The user approved deferring both R4 live clone findings to operator
+verification. This is a documented disposition, not a claim that the clone
+capability is locally proven or closed. No implementation code, PLAN status, or
+review verdict is changed. The library narrator remains the safe default until
+the operator evidence below exists.
+
+| # | Severity | Where | What | Fix | Pin | Mutation |
+|---|---|---|---|---|---|---|
+| H1 | H | `cmd/thutapi/main.go:81-91`; `internal/audio/clone.go:283-324,481-489`; `internal/gmi/media/client.go:359-381` | The application fails closed because the real provider clone response identity has not been observed. Promoting a guessed response field would falsely create a usable clone identity. | **Deferred operator verification, user-approved.** Run the T13b live probe against a deployed public HTTPS origin using an operator-owned, consented sample at a short-lived, unguessable HTTPS URL. Capture the terminal raw clone response, redact secrets only, identify the clone result field from that response, and record the redacted response shape. Until then, retain `ErrVoiceCloneUnverified` for every unobserved or synthetic response; this is not a false claim of capability closure. | The required live probe must call the real clone model with the confirmed payload, preserve the terminal raw response identity in the T13b record, and show that synthetic JSON containing a guessed `voice_id` still fails `TestDecodeVoiceCloneResponse_FailsClosed` and the 502/no-id handler pin. | Removing the fail-closed guard or restoring a guessed root/`outcome.voice_id` decoder lets fabricated JSON create a usable clone ID before provider evidence exists. |
+| H2 | H | `static/app.js:549-553`; `internal/bookgen/bookgen.go:431-444`; `internal/audio/audio.go:258-263`; repository search for `thutapi:voice-id` | No verified clone ID reaches HD narration; the browser-only selected ID is intentionally inert while H1 is unverified, so generated books continue using the library narrator. | **Deferred operator verification, user-approved.** After H1's deployed public HTTPS probe records the actual clone identity, use that verified ID in the same operator run to call real `minimax-tts-speech-2.8-hd`; require a successful terminal HD response whose echoed `payload.voice_id` equals the clone ID, fetch and validate its audio URL, and record the redacted clone and HD response shapes. This missing live handoff is explicitly deferred and is not represented as code closure. | The operator probe must fail unless the exact observed clone ID is accepted by HD narration and the terminal HD record echoes that same ID. The existing repository search remains the local pin showing no production consumer for `thutapi:voice-id` until that evidence authorizes a future server-side contract. | Removing the fail-closed/operator check and accepting a browser-only or synthetic ID either leaves narration on `English_expressive_narrator` or treats an unverified provider field as a real voice. |
+
+No other R4 findings require remediation. C1, H3, and H4 have zero residue as
+stated in `t13-round4.md`; H1 and H2 remain explicit operator verification
+items by user decision.

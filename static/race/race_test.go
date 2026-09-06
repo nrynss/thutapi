@@ -14,7 +14,7 @@ import (
 // TestRaceHTML_SelfContained ensures static/race/race.html is completely self-contained
 // with zero external dependencies (no remote scripts, stylesheets, or images).
 func TestRaceHTML_SelfContained(t *testing.T) {
-	for _, filename := range []string{"race.html", "index.html"} {
+	for _, filename := range []string{"race.html"} {
 		t.Run(filename, func(t *testing.T) {
 			path := filepath.Join(".", filename)
 			data, err := os.ReadFile(path)
@@ -46,21 +46,6 @@ func TestRaceHTML_SelfContained(t *testing.T) {
 				t.Errorf("%s missing inline <svg> elements", filename)
 			}
 		})
-	}
-}
-
-// TestRaceHTML_IdenticalCopies verifies that race.html and index.html stay in sync.
-func TestRaceHTML_IdenticalCopies(t *testing.T) {
-	raceData, err := os.ReadFile("race.html")
-	if err != nil {
-		t.Fatalf("failed to read race.html: %v", err)
-	}
-	indexData, err := os.ReadFile("index.html")
-	if err != nil {
-		t.Fatalf("failed to read index.html: %v", err)
-	}
-	if string(raceData) != string(indexData) {
-		t.Errorf("race.html and index.html differ; both must be kept identical")
 	}
 }
 

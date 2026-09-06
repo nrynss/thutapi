@@ -158,6 +158,112 @@ function warmError(kind) {
   return "That question took a tiny tumble. Share your idea again and we’ll keep going.";
 }
 
+function VoiceSample({ onContinue }) {
+  const [state, setState] = useState("ready");
+  const [notice, setNotice] = useState("");
+  const [sampleURL, setSampleURL] = useState("");
+  const [voiceID, setVoiceID] = useState("");
+  const [consent, setConsent] = useState(false);
+  const [uploadToken, setUploadToken] = useState("");
+  const recorder = useRef(null);
+  const stream = useRef(null);
+  const timer = useRef(null);
+
+  function stopTracks() {
+    stream.current?.getTracks().forEach(track => track.stop());
+    stream.current = null;
+  }
+
+  async function upload(blob) {
+    if (!blob || !blob.size) throw new Error("empty sample");
+    if (blob.size > 5 * 1024 * 1024) throw new Error("too large");
+    if (!consent) throw new Error("consent required");
+    if (!uploadToken.trim()) throw new Error("upload authorization required");
+    setState("uploading");
+    setNotice("Preparing your short sample…");
+    const form = new FormData();
+    form.append("sample", blob, "voice-sample" + (blob.type.includes("mp4") ? ".mp4" : ".webm"));
+    const response = await fetch("/voice-sample", { method: "POST", headers: { "X-Voice-Sample-Consent": "yes", "Authorization": "Bearer " + uploadToken.trim() }, body: form });
+    if (!response.ok) throw new Error("upload failed");
+    const saved = await response.json();
+    if (!saved.media_url || !saved.source_audio || !saved.voice_id) throw new Error("voice service did not verify a voice id");
+    setSampleURL(saved.source_audio);
+    setVoiceID(saved.voice_id);
+    setState("saved");
+    setNotice("Your sample is ready as clone input. The library narrator stays selected until the adult completes the live GMI voice-clone check.");
+  }
+
+  async function startRecording() {
+    // getUserMedia is deliberately called only from this button's gesture.
+    setNotice("");
+    try {
+      if (!consent) throw new Error("consent required");
+      if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") throw new Error("recorder unavailable");
+      const mic = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.current = mic;
+      const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4;codecs=mp4a.40.2", "audio/mp4"];
+      const supported = typeof MediaRecorder.isTypeSupported === "function" ? candidates.find(type => MediaRecorder.isTypeSupported(type)) : "";
+      if (!supported) {
+        stopTracks();
+        throw new Error("recorder unavailable");
+      }
+      const next = new MediaRecorder(mic, { mimeType: supported });
+      const chunks = [];
+      next.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
+      next.onerror = () => {
+        stopTracks();
+        setState("ready");
+        setNotice("The microphone recording stopped early. You can try again or choose a file.");
+      };
+      next.onstop = async () => {
+        clearTimeout(timer.current);
+        stopTracks();
+        try {
+          await upload(new Blob(chunks, { type: next.mimeType || "audio/webm" }));
+        } catch (error) {
+          setState("ready");
+          setNotice(error.message === "too large" ? "That recording is too large. Please keep it to a short 8–15 second sample." : "We couldn’t prepare that sample. Try recording again or choose a webm, mp4, mp3, or wav file.");
+        }
+      };
+      recorder.current = next;
+      next.start();
+      setState("recording");
+      setNotice("Recording now. We’ll stop after 12 seconds.");
+      timer.current = setTimeout(() => { if (next.state === "recording") next.stop(); }, 12000);
+    } catch (error) {
+      setState("ready");
+      setNotice(error.name === "NotAllowedError" ? "Microphone permission is needed to record. You can choose a sample file instead." : error.message === "consent required" ? "An adult must agree to the voice-sample information first." : error.message === "upload authorization required" ? "Enter the adult voice-sample access code before recording." : "We couldn’t open the microphone in this browser. You can choose a prepared sample file instead.");
+    }
+  }
+
+  function stopRecording() {
+    if (recorder.current?.state === "recording") recorder.current.stop();
+  }
+
+  async function chooseFile(event) {
+    const file = event.currentTarget.files?.[0];
+    if (!file) return;
+    setNotice("");
+    if (!consent) {
+      setNotice("An adult must agree to the voice-sample information before uploading.");
+      event.currentTarget.value = "";
+      return;
+    }
+    try {
+      await upload(file);
+    } catch (error) {
+      setState("ready");
+      setNotice(error.message === "too large" ? "That file is too large. Please choose a short 8–15 second sample." : "We couldn’t prepare that file. Choose a webm, mp4, mp3, or wav sample.");
+    } finally {
+      event.currentTarget.value = "";
+    }
+  }
+
+  useEffect(() => () => { clearTimeout(timer.current); if (recorder.current?.state === "recording") recorder.current.stop(); stopTracks(); }, []);
+
+  return html`<section class="card voice-sample"><p class="eyebrow">Grown-up corner</p><h1>Would you like to add a short voice sample?</h1><p>With adult permission, record about 8–15 seconds or choose a prepared file. This is optional; your book can use our warm library narrator.</p><label><input data-voice-consent type="checkbox" checked=${consent} onChange=${event => setConsent(event.currentTarget.checked)} /> I’m an adult and I understand this sample is uploaded to this app’s public media URL so GMI can fetch it for voice cloning. The app deletes it after 15 minutes and it is never shared-cacheable. GMI may return generated voice audio at a public provider URL that we cannot delete.</label><label>Voice-sample access code<input data-voice-upload-token type="password" value=${uploadToken} onInput=${event => setUploadToken(event.currentTarget.value)} autocomplete="one-time-code" /></label><div class="doors"><button class="primary" data-voice-record onClick=${startRecording} disabled=${!consent || !uploadToken.trim() || state === "recording" || state === "uploading"}>${state === "recording" ? "Recording…" : "Record a sample"}</button><button class="secondary" data-voice-stop onClick=${stopRecording} disabled=${state !== "recording"}>Stop recording</button></div><label class="voice-upload">Choose a sample file<input data-voice-upload type="file" accept="audio/webm,video/webm,audio/mp4,video/mp4,audio/mpeg,audio/wav,.webm,.mp4,.m4a,.mp3,.wav" onChange=${chooseFile} disabled=${!consent || !uploadToken.trim() || state === "recording" || state === "uploading"} /></label>${notice ? html`<p class="warm" role="status">${notice}</p>` : null}${sampleURL ? html`<p class="warm">Sample is ready briefly while the voice service verifies it.</p>` : null}<div class="doors"><button class="secondary" data-voice-skip onClick=${onContinue} disabled=${state === "recording" || state === "uploading"}>Skip for now</button>${sampleURL ? html`<button class="primary" data-voice-continue onClick=${() => onContinue(voiceID)}>Continue to my book</button>` : null}</div></section>`;
+}
+
 function Interview({ id }) {
   const [question, setQuestion] = useState(null);
   const [answer, setAnswer] = useState("");
@@ -440,17 +546,17 @@ function applyRecoveredQuestion(q) {
     }
   }
 
-  useEffect(() => {
-    // T13 owns both capture controls. Until it mounts its complete interface,
-    // this is the meaningful no-sample path: end the interview and draw.
-    if (!ended || generationStarted.current) return;
+  function continueToGeneration(voiceID) {
+    if (generationStarted.current) return;
+    if (voiceID) sessionStorage.setItem("thutapi:voice-id", voiceID);
     generationStarted.current = true;
     generate();
-  }, [ended]);
+  }
 
   if (bookState) return html`<section class="card wait"><p class="eyebrow">Your book is on its way</p><h1>${bookState === "failed" ? "The animals need a little rest." : bookState === "checking" ? "We’re checking on your book." : "The animals are drawing your story."}</h1><${Race} done=${done} sitting=${bookState === "failed"} />${bookState === "checking" ? html`<p class="warm">We’re still listening for the next page.</p>` : null}${bookState === "quiet" ? html`<p class="warm">Your book will be beautifully captioned and quiet today.</p>` : null}${bookState === "failed" ? html`<div class="doors"><button class="primary" onClick=${generate}>Try again</button><a class="secondary" href="/">Look at other books</a></div>` : null}</section>`;
   if (missing) return html`<section class="card"><p class="eyebrow">A tiny detour</p><h1>That story wandered away.</h1><p class="warm" role="status">Start a new story and we’ll make a fresh little path together.</p><div class="doors"><a class="primary" href="/">Start a new story</a><a class="secondary" href="/">Look at other books</a></div></section>`;
-  return html`<section class="interview"><p class="eyebrow">Your story</p><div class="question"><h1>${question ? question.text : "I’m thinking of a good question…"}</h1>${audioURL ? html`<button class="speaker" onClick=${() => listen(audioURL, true)}>${needsTap ? "Tap to listen" : "Listen again"}</button>` : null}</div>${waiting ? html`<p class="warm">🐇 A little animal is thinking…</p>` : html`<div class="chips">${(question && question.chips || []).map(chip => html`<button onClick=${() => send(chip)}>${chip}</button>`)}</div>`}${notice ? html`<p class="warm" role="status">${notice}</p>` : null}<form class="answer" onSubmit=${event => { event.preventDefault(); send(answer); }}><input value=${answer} onInput=${e => setAnswer(e.currentTarget.value)} onFocus=${e => e.currentTarget.scrollIntoView({ block: "center" })} placeholder="Or write your own idea" autocomplete="off" /><button class="primary" disabled=${waiting}>Send</button></form></section>`;
+  if (ended) return html`<${VoiceSample} onContinue=${continueToGeneration} />`;
+  return html`<section class="interview"><p class="eyebrow">Your story</p><div class="question"><h1>${question ? question.text : notice ? "A little hiccup." : "I’m thinking of a good question…"}</h1>${audioURL ? html`<button class="speaker" onClick=${() => listen(audioURL, true)}>${needsTap ? "Tap to listen" : "Listen again"}</button>` : null}</div>${waiting ? html`<p class="warm">🐇 A little animal is thinking…</p>` : html`<div class="chips">${(question && question.chips || []).map(chip => html`<button onClick=${() => send(chip)}>${chip}</button>`)}</div>`}${notice ? html`<p class="warm" role="status">${notice}</p>` : null}<form class="answer" onSubmit=${event => { event.preventDefault(); send(answer); }}><input value=${answer} onInput=${e => setAnswer(e.currentTarget.value)} onFocus=${e => e.currentTarget.scrollIntoView({ block: "center" })} placeholder="Or write your own idea" autocomplete="off" /><button class="primary" disabled=${waiting}>Send</button></form></section>`;
 }
 
 function App({ initialRoute }) {
@@ -467,4 +573,10 @@ function App({ initialRoute }) {
 }
 
 const root = document.querySelector("#app");
+// #app arrives pre-filled with the server's no-JS fallback markup. render()
+// appends into a parent it does not own, so drop those children first or the
+// fallback headline, CTA and "Preparing your story…" stay on the page beside
+// the mounted app. hydrate() is wrong here: the client tree adds a .card /
+// .interview wrapper the server markup has no counterpart for.
+if (root) root.replaceChildren();
 if (root) render(html`<${App} initialRoute=${root.dataset.interviewId || "shelf"} />`, root);

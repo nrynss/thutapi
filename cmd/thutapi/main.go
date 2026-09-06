@@ -14,11 +14,14 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"path"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -55,8 +58,9 @@ var errUnexpectedOperand = errors.New("unexpected positional argument")
 // config holds the runtime configuration. T0 reads ADDR / PORT, the
 // shutdown-timeout flag, and the IdleTimeout knob; T3 adds the data
 // dir (DATA_DIR or -data-dir) the SQLite file and the media blobs
-// live under. Later tracks extend this struct and the parseFlags
-// surface, they do not replace it.
+// live under, and T13 adds PUBLIC_ORIGIN for public voice-sample URLs.
+// Later tracks extend this struct and the parseFlags surface, they do not
+// replace it.
 //
 // ReadTimeout and WriteTimeout are deliberately not part of config — they
 // are derived in newHTTPServer from the graceful-shutdown deadline so a
@@ -66,10 +70,24 @@ var errUnexpectedOperand = errors.New("unexpected positional argument")
 // audio lands asynchronously); a non-zero WriteTimeout would force-close
 // every long-lived stream.
 type config struct {
-	addr        string        // bind address, e.g. "0.0.0.0:8080"
-	timeout     time.Duration // graceful shutdown deadline
-	idleTimeout time.Duration // http.Server.IdleTimeout
-	dataDir     string        // SQLite file + media blobs live here (T3)
+	addr         string        // bind address, e.g. "0.0.0.0:8080"
+	timeout      time.Duration // graceful shutdown deadline
+	idleTimeout  time.Duration // http.Server.IdleTimeout
+	dataDir      string        // SQLite file + media blobs live here (T3)
+	publicOrigin string        // public HTTPS origin used for GMI source_audio (T13)
+	uploadToken  string        // bearer for the public T13 voice-sample route
+}
+
+type gmiVoiceCloner struct {
+	client *media.Client
+}
+
+func (c gmiVoiceCloner) CloneVoice(ctx context.Context, request audio.VoiceCloneRequest) (audio.VoiceCloneResult, error) {
+	raw, err := c.client.CloneVoice(ctx, request.SourceAudio, request.Text, request.VoiceID)
+	if err != nil {
+		return audio.VoiceCloneResult{}, err
+	}
+	return audio.DecodeVoiceCloneResponse(raw)
 }
 
 // resolveAddr is the ADDR/PORT resolution: ADDR wins if set, else
@@ -98,10 +116,12 @@ func resolveDataDir() string {
 // they don't re-register flag entries across invocations.
 func parseConfig() config {
 	return config{
-		addr:        resolveAddr(),
-		timeout:     10 * time.Second,
-		idleTimeout: 120 * time.Second,
-		dataDir:     resolveDataDir(),
+		addr:         resolveAddr(),
+		timeout:      10 * time.Second,
+		idleTimeout:  120 * time.Second,
+		dataDir:      resolveDataDir(),
+		publicOrigin: os.Getenv("PUBLIC_ORIGIN"),
+		uploadToken:  os.Getenv("UPLOAD_TOKEN"),
 	}
 }
 
@@ -135,20 +155,21 @@ func parseFlags(args []string) (config, error) {
 // dependencies they need: GET /healthz (T0), the media handler (T3),
 // the interview handler (T4) and the generation handler (T10c).
 type server struct {
-	mux        *http.ServeMux
-	log        *slog.Logger
-	start      time.Time
-	media      *mediastore.Store
-	interviews *interview.Handler
-	generate   *bookgen.Handler
-	book       *web.BookHandler
-	download   *web.DownloadHandler
+	mux          *http.ServeMux
+	log          *slog.Logger
+	start        time.Time
+	media        *mediastore.Store
+	voiceSamples *audio.VoiceSampleHandler
+	interviews   *interview.Handler
+	generate     *bookgen.Handler
+	book         *web.BookHandler
+	download     *web.DownloadHandler
 }
 
-// newServer wires the routes. media, interviews and generate must be
-// non-nil: they are live handlers, not optional dependencies.
-func newServer(log *slog.Logger, media *mediastore.Store, interviews *interview.Handler, generate *bookgen.Handler, db *store.DB) *server {
-	s := &server{mux: http.NewServeMux(), log: log, start: time.Now(), media: media, interviews: interviews, generate: generate, book: web.NewBookHandler(db, generate), download: web.NewDownloadHandler(db, media, generate)}
+// newServer wires the routes. media, voiceSamples, interviews and generate
+// must be non-nil: they are live handlers, not optional dependencies.
+func newServer(log *slog.Logger, media *mediastore.Store, voiceSamples *audio.VoiceSampleHandler, interviews *interview.Handler, generate *bookgen.Handler, db *store.DB) *server {
+	s := &server{mux: http.NewServeMux(), log: log, start: time.Now(), media: media, voiceSamples: voiceSamples, interviews: interviews, generate: generate, book: web.NewBookHandler(db, generate), download: web.NewDownloadHandler(db, media, generate)}
 	// /healthz is the one route T0 ships. Liveness only — no dependency
 	// checks, no probes. That distinction belongs to a later track.
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
@@ -158,11 +179,15 @@ func newServer(log *slog.Logger, media *mediastore.Store, interviews *interview.
 	s.mux.HandleFunc("GET /book/{id}", s.book.Book)
 	s.mux.HandleFunc("GET /book/{id}/state", s.book.State)
 	s.mux.HandleFunc("GET /book/{id}/download/{kind}", s.download.Download)
-	s.mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
+	s.mux.Handle("GET /static/", http.StripPrefix("/static/", staticAssets()))
 	// T3's one sanctioned route line (PLAN.md invariant 5): media
 	// blobs serve through the mediastore handler, which answers Range
 	// requests so narration can be scrubbed (PLAN.md §T3).
-	s.mux.Handle("GET /media/{id}", s.media)
+	s.mux.HandleFunc("GET /media/{id}", s.handleMedia)
+	// T13's two adult capture modes converge here. The handler bounds upload
+	// bytes, invokes the shipping static ffmpeg without a shell, then persists
+	// only audio/mpeg for the existing unguessable /media/{id} route.
+	s.mux.Handle("POST /voice-sample", s.voiceSamples)
 	// T4's sanctioned route lines (PLAN.md invariant 5): the interview
 	// loop — start, catch-up transcript, SSE events, answers. The loop
 	// itself lives in internal/interview.
@@ -180,6 +205,60 @@ func newServer(log *slog.Logger, media *mediastore.Store, interviews *interview.
 
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
+}
+
+func (s *server) handleMedia(w http.ResponseWriter, r *http.Request) {
+	if s.voiceSamples.ServeMedia(w, r, s.media) {
+		return
+	}
+	s.media.ServeHTTP(w, r)
+}
+
+// staticAssets serves the static/ tree but refuses the developer-only files
+// that live inside it: Go sources (static/race/race_test.go) and the
+// browser-test harness are not shippable assets, so publishing them over
+// HTTP would leak source. They 404 like any other missing path; every real
+// asset (app.css, app.js, book/**, race/*.html, vendor/**) still serves.
+//
+// noDirFS additionally suppresses http.FileServer's generated directory
+// listings, which would otherwise enumerate the whole asset tree — including
+// the names of the very files the basename rule refuses to serve.
+//
+// Directory indexes are off entirely, so "index.html" is refused here too:
+// http.FileServer would otherwise 301 any */index.html to its directory,
+// which now 404s anyway. No asset in static/ is named index.html.
+func staticAssets() http.Handler {
+	files := http.FileServer(noDirFS{http.Dir("static")})
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		name := strings.ToLower(path.Base(r.URL.Path))
+		if strings.HasSuffix(name, ".go") || strings.HasPrefix(name, "browser-test.") || name == "index.html" {
+			http.NotFound(w, r)
+			return
+		}
+		files.ServeHTTP(w, r)
+	})
+}
+
+// noDirFS is an http.FileSystem that opens files only. Refusing to open a
+// directory makes http.FileServer answer 404 instead of rendering an
+// auto-generated index of it.
+type noDirFS struct{ fsys http.FileSystem }
+
+func (n noDirFS) Open(name string) (http.File, error) {
+	file, err := n.fsys.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	stat, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return nil, err
+	}
+	if stat.IsDir() {
+		file.Close()
+		return nil, fs.ErrNotExist
+	}
+	return file, nil
 }
 
 func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -277,7 +356,6 @@ func run(log *slog.Logger, args []string, sigs <-chan os.Signal) error {
 	if err != nil {
 		return fmt.Errorf("open media store: %w", err)
 	}
-
 	// The two GMI clients are process-wide: one text client serves the
 	// interview turns, Phase-B structuring and T7's consistency judge
 	// (a *text.Client satisfies every seam); one request-queue client
@@ -285,6 +363,17 @@ func run(log *slog.Logger, args []string, sigs <-chan os.Signal) error {
 	// nothing outside internal/gmi talks to GMI).
 	textCli := text.New()
 	mediaCli := media.New()
+	voiceSamples, err := audio.NewVoiceSampleHandler(audio.VoiceSampleConfig{
+		Store:        blobs,
+		PublicOrigin: cfg.publicOrigin,
+		UploadToken:  cfg.uploadToken,
+		Cloner:       gmiVoiceCloner{client: mediaCli},
+		ExpiryFile:   filepath.Join(cfg.dataDir, "voice-sample-expiry.json"),
+	})
+	if err != nil {
+		return fmt.Errorf("build voice sample handler: %w", err)
+	}
+	defer voiceSamples.Close()
 
 	// T4/T10c: the interview loop and the generation pipeline stream
 	// over SSE and run off the request path (PLAN.md invariant 6 —
@@ -315,6 +404,7 @@ func run(log *slog.Logger, args []string, sigs <-chan os.Signal) error {
 		Judge:    textCli,
 		Imager:   mediaCli,
 		TTS:      mediaCli,
+		Music:    mediaCli,
 		Broker:   broker,
 		Jobs:     runner,
 		PDF:      bookpdf.NewRenderer(),
@@ -326,10 +416,12 @@ func run(log *slog.Logger, args []string, sigs <-chan os.Signal) error {
 		return fmt.Errorf("build generation handler: %w", err)
 	}
 
-	srvHTTP := newHTTPServer(cfg, newServer(log, blobs, interviews, generate, db))
+	srvHTTP := newHTTPServer(cfg, newServer(log, blobs, voiceSamples, interviews, generate, db))
 
 	errCh := make(chan error, 1)
+	serveDone := make(chan struct{})
 	go func() {
+		defer close(serveDone)
 		log.Info("thutapi listening", "addr", cfg.addr)
 		errCh <- srvHTTP.ListenAndServe()
 	}()
@@ -340,6 +432,7 @@ func run(log *slog.Logger, args []string, sigs <-chan os.Signal) error {
 		// than the context-cancel message.
 		log.Info("shutdown signal received", "signal", sig.String())
 	case err := <-errCh:
+		<-serveDone
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return err
 		}
@@ -351,6 +444,7 @@ func run(log *slog.Logger, args []string, sigs <-chan os.Signal) error {
 	if err := srvHTTP.Shutdown(shutdownCtx); err != nil {
 		return err
 	}
+	<-serveDone
 	log.Info("thutapi stopped cleanly")
 	return nil
 }

@@ -135,7 +135,8 @@ All configuration is read from environment (see `cmd/thutapi/main.go`
 | `PORT` | no | `8080` | Listen address inside the container. Must match `traefik.http.services.thutapi.loadbalancer.server.port`. |
 | `DATA_DIR` | no | `/data` | SQLite file and generated media live here. Bind-mount a host path, owned by **uid 65532** (the distroless `nonroot` user). |
 | `GMI_API_KEY` | **yes** | — | GMI Cloud inference key. **Never in the repo.** Read from `/etc/thutapi/env` and passed with docker's name-only `--env GMI_API_KEY`, so the value never enters the command line. |
-| `UPLOAD_TOKEN` | no | random | Bearer for the short-lived voice-sample upload path (T13). Regenerated per run. |
+| `PUBLIC_ORIGIN` | **yes** | — | Public HTTPS origin for GMI's temporary `source_audio` fetch, e.g. `https://thutapi.nryn.dev`. It is not secret; local, private, reserved and IP origins are rejected by the process. |
+| `UPLOAD_TOKEN` | no | random | Bearer for the short-lived voice-sample upload path (T13). Regenerated per run and written mode 0600 to `${DATA_DIR}/upload-token`; provide it to the consenting adult through a secure channel, never in a URL or browser bundle. |
 
 ## Persistence — where `data/` lives on the box
 
