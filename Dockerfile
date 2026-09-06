@@ -72,6 +72,17 @@ EXPOSE 8080
 COPY --from=ff /ffmpeg /usr/local/bin/ffmpeg
 COPY --from=builder /out/thutapi /thutapi
 
+# The frontend is served from DISK, not embedded: cmd/thutapi's staticAssets()
+# wraps http.Dir("static"), which resolves against the working directory. Only
+# internal/web's templates are go:embed'd. Without this COPY the binary runs,
+# /healthz answers, every page returns 200 -- and every stylesheet, script,
+# font and vendor file 404s, so the site serves its bare unstyled no-JS
+# fallback. That shipped to production undetected, because T9 was built and
+# tested on a workstation where static/ sits beside the process. WORKDIR is
+# explicit so the relative path is a decision, not an inherited default.
+WORKDIR /
+COPY --from=builder /src/static /static
+
 USER nonroot:nonroot
 
 ENTRYPOINT ["/thutapi"]
