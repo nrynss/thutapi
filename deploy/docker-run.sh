@@ -65,14 +65,21 @@ NETWORK="${NETWORK:-proxy}"
 # still works without touching the file.
 ENV_FILE="${ENV_FILE:-/etc/thutapi/env}"
 
-if [[ -z "${GMI_API_KEY:-}" && -r "${ENV_FILE}" ]]; then
+if [[ -r "${ENV_FILE}" ]]; then
   # Sourcing executes the file, so it must be operator-owned and 0600 --
   # checked immediately below. set -a exports what it defines, which is
-  # what the name-only --env form needs.
+  # what the name-only --env form needs. Existing environment variables
+  # still take precedence so one-off overrides work without modifying the file.
+  _SAVED_GMI_API_KEY="${GMI_API_KEY:-}"
+  _SAVED_PUBLIC_ORIGIN="${PUBLIC_ORIGIN:-}"
+  _SAVED_UPLOAD_TOKEN="${UPLOAD_TOKEN:-}"
   set -a
   # shellcheck source=/dev/null
   . "${ENV_FILE}"
   set +a
+  if [[ -n "${_SAVED_GMI_API_KEY}" ]]; then GMI_API_KEY="${_SAVED_GMI_API_KEY}"; fi
+  if [[ -n "${_SAVED_PUBLIC_ORIGIN}" ]]; then PUBLIC_ORIGIN="${_SAVED_PUBLIC_ORIGIN}"; fi
+  if [[ -n "${_SAVED_UPLOAD_TOKEN}" ]]; then UPLOAD_TOKEN="${_SAVED_UPLOAD_TOKEN}"; fi
 fi
 
 # A secrets file the whole box can read is not a secrets file. Warn rather
@@ -202,6 +209,10 @@ echo "Starting ${NAME} from ${IMAGE}..."
 # registry failure surfaces here rather than as a stale container.
 if [[ "${IMAGE}" == *"/"* ]]; then
   docker pull "${IMAGE}"
+fi
+if docker inspect "${NAME}" >/dev/null 2>&1; then
+  echo "Replacing existing container ${NAME}..."
+  docker rm -f "${NAME}" >/dev/null
 fi
 docker run "${DOCKER_ARGS[@]}" "${IMAGE}"
 

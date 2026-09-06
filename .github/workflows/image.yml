@@ -69,6 +69,7 @@ jobs:
             type=raw,value=latest,enable=${{ inputs.latest }}
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -79,9 +80,24 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Save build metadata
+        run: |
+          mkdir -p /tmp/image-metadata
+          echo "${{ steps.build.outputs.digest }}" > /tmp/image-metadata/digest.txt
+          echo "${{ github.sha }}" > /tmp/image-metadata/sha.txt
+          echo "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}" > /tmp/image-metadata/image-ref.txt
+
+      - name: Upload image metadata artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-metadata
+          path: /tmp/image-metadata/
+          retention-days: 1
+
       - name: Summary
         run: |
           echo "### Published" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "Image Digest: \`${{ steps.build.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,127 @@
+name: deploy
+
+on:
+  workflow_run:
+    workflows: ["image"]
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      image_ref:
+        description: 'Target image reference (tag or digest, e.g. ghcr.io/nrynss/thutapi:1a2b3c4 or @sha256:...)'
+        required: false
+        type: string
+      sha:
+        description: 'Expected commit SHA for health check verification'
+        required: false
+        type: string
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download metadata from image workflow
+        if: github.event_name == 'workflow_run'
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: image-metadata
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: /tmp/image-metadata
+
+      - name: Determine deployment image and SHA
+        id: deploy-meta
+        run: |
+          TARGET_IMAGE=""
+          EXPECTED_SHA=""
+
+          if [[ -f /tmp/image-metadata/image-ref.txt && -s /tmp/image-metadata/image-ref.txt ]]; then
+            TARGET_IMAGE="$(cat /tmp/image-metadata/image-ref.txt)"
+            EXPECTED_SHA="$(cat /tmp/image-metadata/sha.txt)"
+            echo "Resolved target from workflow artifact: ${TARGET_IMAGE}"
+          elif [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            EXPECTED_SHA="${{ github.event.workflow_run.head_sha }}"
+            SHORT_SHA="${EXPECTED_SHA:0:7}"
+            TARGET_IMAGE="ghcr.io/${{ github.repository }}:${SHORT_SHA}"
+            echo "Resolved target from workflow_run SHA: ${TARGET_IMAGE}"
+          elif [[ -n "${{ inputs.image_ref }}" ]]; then
+            TARGET_IMAGE="${{ inputs.image_ref }}"
+            EXPECTED_SHA="${{ inputs.sha }}"
+            echo "Resolved target from workflow_dispatch input: ${TARGET_IMAGE}"
+          else
+            TARGET_IMAGE="ghcr.io/${{ github.repository }}:latest"
+            EXPECTED_SHA="${{ inputs.sha }}"
+            echo "Defaulting target image to latest: ${TARGET_IMAGE}"
+          fi
+
+          echo "target_image=${TARGET_IMAGE}" >> $GITHUB_OUTPUT
+          echo "expected_sha=${EXPECTED_SHA}" >> $GITHUB_OUTPUT
+
+      - name: Deploy to production box
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          TARGET_IMAGE: ${{ steps.deploy-meta.outputs.target_image }}
+          EXPECTED_SHA: ${{ steps.deploy-meta.outputs.expected_sha }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          printf '%s\n' "${DEPLOY_SSH_KEY}" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+
+          printf '%s\n' "${DEPLOY_KNOWN_HOSTS}" >> ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+          DEPLOY_TARGET="${DEPLOY_HOST}"
+          if [[ "${DEPLOY_TARGET}" != *"@"* ]]; then
+            DEPLOY_TARGET="root@${DEPLOY_TARGET}"
+          fi
+
+          echo "Ensuring /srv/thutapi/deploy directory exists..."
+          ssh -i ~/.ssh/id_deploy "${DEPLOY_TARGET}" "mkdir -p /srv/thutapi/deploy"
+
+          echo "Shipping deploy scripts to production..."
+          scp -i ~/.ssh/id_deploy deploy/docker-run.sh deploy/redeploy.sh "${DEPLOY_TARGET}:/srv/thutapi/deploy/"
+          ssh -i ~/.ssh/id_deploy "${DEPLOY_TARGET}" "chmod 0755 /srv/thutapi/deploy/docker-run.sh /srv/thutapi/deploy/redeploy.sh"
+
+          echo "Executing /srv/thutapi/deploy/redeploy.sh on remote..."
+          ssh -i ~/.ssh/id_deploy "${DEPLOY_TARGET}" "/srv/thutapi/deploy/redeploy.sh '${TARGET_IMAGE}' '${EXPECTED_SHA}'" | tee /tmp/deploy_out.log
+
+      - name: Deployment Summary
+        if: always()
+        run: |
+          TARGET_IMAGE="${{ steps.deploy-meta.outputs.target_image }}"
+          EXPECTED_SHA="${{ steps.deploy-meta.outputs.expected_sha }}"
+
+          echo "### Production Deployment" >> $GITHUB_STEP_SUMMARY
+          echo "- **Target Image:** \`${TARGET_IMAGE}\`" >> $GITHUB_STEP_SUMMARY
+          if [[ -n "${EXPECTED_SHA}" ]]; then
+            echo "- **Expected Commit SHA:** \`${EXPECTED_SHA}\`" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [[ -f /tmp/deploy_out.log ]]; then
+            if grep -q "=== Deployment Successful ===" /tmp/deploy_out.log; then
+              echo "- **Status:** :white_check_mark: Success" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              sed -n '/=== Deployment Successful ===/,$p' /tmp/deploy_out.log >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+            else
+              echo "- **Status:** :x: Failed" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              tail -n 25 /tmp/deploy_out.log >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "- **Status:** :grey_question: Deployment did not produce a log (cancelled or pre-deploy step failed)" >> $GITHUB_STEP_SUMMARY
+          fi

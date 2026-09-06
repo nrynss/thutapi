@@ -72,6 +72,69 @@ The Dockerfile is multi-stage: a `golang:1.27.1-bookworm` builder compiles
 with `CGO_ENABLED=0`, `-trimpath`, `-ldflags="-s -w"`, and the distroless
 stage ships the resulting static binary as the nonroot user.
 
+## Automated deployment (T1c)
+
+Deployments are automated end-to-end after image publication. While building
+and publishing an image remains a manual human decision via `image.yml`,
+deploying that image to the Hetzner box does not require human SSH or manual
+steps.
+
+### How it works
+
+1. **Trigger:**
+   - **Automatic trigger (`workflow_run`):** When `.github/workflows/image.yml`
+     completes with conclusion `success`, `.github/workflows/deploy.yml` starts
+     automatically. It resolves the exact image digest produced by the build.
+   - **Manual trigger (`workflow_dispatch`):** Run `deploy.yml` manually from
+     the Actions tab (or `gh workflow run deploy.yml`) with optional `image_ref`
+     and `sha` inputs. This serves as the production rollback button.
+2. **Concurrency:**
+   - The workflow uses `concurrency: production-deploy` (`cancel-in-progress: false`)
+     to guarantee deployments never interleave.
+3. **SSH & Script delivery:**
+   - Connects using repository secrets `DEPLOY_SSH_KEY`, `DEPLOY_HOST`, and
+     `DEPLOY_KNOWN_HOSTS`. Secrets stay strictly inside Actions secrets and are
+     never output to logs or step summaries.
+   - Copies the repository's `deploy/docker-run.sh` and `deploy/redeploy.sh` to
+     `/srv/thutapi/deploy/` before running, ensuring a stale copy on the box
+     never dictates the deploy.
+4. **Execution (`deploy/redeploy.sh`):**
+   - Invokes `/srv/thutapi/deploy/redeploy.sh "<target_image>" "<expected_sha>"`.
+   - **Preflight inspection:** validates `/etc/thutapi/env` exists, has mode 600
+     or 400, and verifies `GMI_API_KEY`, `UPLOAD_TOKEN`, and `PUBLIC_ORIGIN` are
+     non-empty. Aborts with exit 1 if anything is missing.
+   - Records the running container ID and image digest for rollback.
+   - Resolves the target image to its exact immutable RepoDigest.
+   - Replaces the container via `docker-run.sh`.
+   - **Health Gate:**
+     - Reads the container IP on the Docker network (`docker inspect`).
+     - Polls `http://${CONTAINER_IP}:8080/healthz` (up to 30s) verifying
+       `"status":"ok"` and matching the deployed commit SHA (when provided).
+     - Asserts `GET http://${CONTAINER_IP}:8080/` returns HTTP 200 (verifies
+       the shelf page is actually serving, preventing the silent 404 failure mode).
+     - **Rollback:** If any health gate check fails, `redeploy.sh` logs the
+       failure, immediately restores the previous container image via
+       `docker-run.sh`, and exits 1.
+   - **Prune:** Runs `docker image prune -f` to clean up dangling layers.
+   - Emits a deployment summary with container ID, image digest, and health status.
+5. **Step Summary:**
+   - Actions logs the deployment result and running digest to `$GITHUB_STEP_SUMMARY`.
+
+### Manual redeploy on the box
+
+To run a redeploy directly on the Hetzner host:
+
+```bash
+# Redeploy latest published image:
+./deploy/redeploy.sh
+
+# Deploy a specific tag and verify the commit SHA:
+./deploy/redeploy.sh ghcr.io/nrynss/thutapi:1a2b3c4 1a2b3c4
+
+# Deploy by digest:
+./deploy/redeploy.sh ghcr.io/nrynss/thutapi@sha256:abcd...
+```
+
 ## Starting the container
 
 One-time setup on the box — create the secrets file:

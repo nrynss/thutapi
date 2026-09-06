@@ -235,9 +235,9 @@ routes anyway; not worth doing speculatively before then.**
 | **T11** | **DONE** 2026-09-06 at `bcc7ceb`. Gate, retention sweep and prewarm all shipped and verified live. **Two corrections to what this row used to say:** the gate covers four money routes, not one — `POST /interviews/{id}/generate` plus `POST /interviews`, `POST /interviews/{id}/answers` and `POST /voice-sample` — because each of those spends model time too; and the shelf, `/book/{id}`, both SSE streams and `GET /media/{id}` are ungated by construction, as this row always required. Open decision 9 settled: per-client **and** global token buckets always on, with an optional `GATE_PASSCODE` as the operator's lever if the URL is abused mid-judging. Sweep coexists with T13's 15-minute voice-sample sweeper by age **and** an explicit `Retain` veto. Prewarm exports/restores with ids preserved; **the screen-1 landing it was meant to feed is NOT done — see §T9b**. |
 | **T12** | **DONE** 2026-09-06 at `f933638`, round-2 APPROVE 0/0/0/0. The `lyrics` problem was solved by directing a gibberish vocalise rather than a sung lyric. Narration length is measured from declared MP3 frames in Go — never probed, no `ffprobe` in production — and the bed's fade anchors to that deterministic total, same code path trimmed or looped. **Two defects found afterwards by running it** (both fixed in `bcc7ceb`): any non-transient music failure discarded an already-rendered book, and the deterministic total under-counted by 1.168 s because `-shortest` bounds the looped image at the encoder rather than at the clip. Residual after the fix is one AAC frame, 23.2 ms, for the whole film. |
 | **T13** | **DONE** 2026-09-06. Closed at round 5: **APPROVE 0/0/0/0, zero residue** (t13-round1.md → t13-remediation-round1.md → t13-round2.md → t13-remediation-round2.md → t13-round3.md → t13-remediation-round3.md → t13-round4.md → t13-remediation-round4.md → t13-round5.md). Capture/upload, consent, bounded MP3 transcode and fail-closed clone submission ship; the consented deployed-HTTPS clone response and HD identity handoff are deferred operator verification. |
-| **T9b** | Not started. Split out of T11 on 2026-09-06: prewarmed books become the shelf landing, and the fixture book is completed from the already-rendered film and PDF rather than by paying for a second generation. Touches two closed tracks (T9, T10b), which is why T11 raised it instead of taking it. |
-| **T1c** | Not started. Automated deployment, added 2026-09-06 after a manual deploy found production 68 commits behind with `/` returning 404 while `/healthz` stayed green, `/etc/thutapi/env` absent, and the box's deploy script two days stale. Publishing stays manual; the deploy follows it. **Blocked on an operator decision**: push-based SSH from Actions (needs `DEPLOY_SSH_KEY`/`DEPLOY_HOST`/`DEPLOY_KNOWN_HOSTS`, and today the only account is root on a shared box) versus pull-based on the box (zero secrets, polls the already-public GHCR digest). |
-| **T14** | Not started. Never cut. Now blocked only by **T9b**. |
+| **T9b** | **DONE** 2026-09-06 at `7054a00`. Closed at round 2: **APPROVE 0/0/0/0, zero residue** (t9b-round1.md → t9b-remediation-round1.md → t9b-round2.md). Prewarmed books become screen 1 (SSR fallback + Preact), fixture `d625fd608be48227f08c33cf860e5de8` completed with 9-page PDF and 1080×1620 MP4 film (20 blobs restored on boot). |
+| **T1c** | **DONE** 2026-09-06. Closed at round 1: **APPROVE 0/0/0/0, zero residue** (t1c-round1.md). Automated Hetzner deployment pipeline: `deploy.yml` triggered via `workflow_run` on `image.yml` or manual dispatch; `deploy/redeploy.sh` with strict preflight `/etc/thutapi/env`, immutable `RepoDigest` pinning, `/healthz` + `/` (shelf 200) gating, automatic rollback, and dangling image pruning; hermetic unit test suite (`deploy/redeploy_test.sh`, 39 passing tests). |
+| **T14** | Not started. Never cut. Now blocked only by live verification and polish. |
 
 ---
 
@@ -3059,4 +3059,25 @@ Reported from real-device run on live deployment. Two defects observed:
    - **Fix direction:**
      - Detect insecure context via `window.isSecureContext` and `navigator.mediaDevices?.getUserMedia`. Display an explicit, actionable message: *"Microphone recording requires a secure HTTPS connection or localhost. Please use the file upload below or open via HTTPS."*
      - Disambiguate error messages in `static/app.js` for permission denied, insecure context, and missing access code.
+
+### Live bug report 2 — 2026-09-06
+
+Reported from real-device generation run for book `58bc86ae81f116dc27979683722d87a8` ("Leopold the Purple Dragon").
+
+- **Symptom:** User was stuck on *"Your book is on its way / The animals are drawing your story"* for ~10–12 minutes with 8/8 pages illustrated.
+- **Investigation:**
+  - Stage 1 (Structure) and Stage 2 (Illustrations, 8/8) completed quickly (~1-2 minutes).
+  - Stage 3 (Narration) fanned out 8 TTS calls via `minimax-tts-speech-2.8-hd`.
+  - Pages 5, 6, 7, 8 completed. However, pages 1, 2, 3, 4 stalled in GMI Cloud's request queue in state `processing`.
+  - In `cmd/thutapi/main.go`, `media.NewWithPoll(media.PollConfig{Timeout: 10 * time.Minute})` allows up to 10 minutes per request-queue poll.
+  - While waiting for `g.Wait()` in `audio.NarrateBook`, no intermediate progress events were emitted to the client. The UI therefore sat on *"The animals are drawing your story"* with progress frozen at 8/8.
+  - At 09:00:17Z, the 10-minute poll timeout fired for pages 1-4.
+  - Hardening from T11 (`bcc7ceb`) kicked in: narration failure did NOT fail the book; instead, pages 1-4 degraded to captioned-silent and `narration_unavailable` was emitted.
+  - Stage 4 (PDF) generated the 9-page PDF at 09:01:01Z.
+  - Stage 5 (Film) attempted music generation; MiniMax Music returned 429 RPM rate limit, so film degraded to silent/speech-only. ffmpeg completed the 1080x1620 video at 09:01:25Z.
+  - Terminal status transitioned to `ready` with both PDF and MP4 video served at `https://thutapi.nryn.dev/book/58bc86ae81f116dc27979683722d87a8`.
+- **UX Defect:**
+  - While narration is in progress, the UI has no intermediate state or progress indicator ("The animals are giving your characters voices"), leading the user to think the illustration stage is frozen.
+  - 10 minutes is excessive for a user to wait if upstream TTS stalls. A progress event or shorter per-clip timeout with early degradation would improve perceived responsiveness.
+
 
