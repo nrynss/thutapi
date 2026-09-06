@@ -16,6 +16,8 @@ Built for MiniMax Week and GMI Cloud, Multimodality track.
 short interview, optionally add a grown-up-approved voice sample, and come
 back to a shareable picture book with a PDF and captioned film.
 
+**Demo video:** [Watch the Thutapi demo on YouTube](https://www.youtube.com/watch?v=SEMcJHynnzw).
+
 > **Thutapi** (തുത്താപ്പി) is what Kunjupaathumma affectionately calls Aisha
 > in Vaikom Muhammad Basheer's *Ntuppuppakkoranendarnnu*. It is a term of
 > endearment for a small girl, on a product where a small girl tells the
