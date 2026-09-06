@@ -12,10 +12,46 @@ assembles a book you can watch, read and share.
 
 Built for MiniMax Week and GMI Cloud, Multimodality track.
 
+**Try it live:** [thutapi.nryn.dev](https://thutapi.nryn.dev). Start with a
+short interview, optionally add a grown-up-approved voice sample, and come
+back to a shareable picture book with a PDF and captioned film.
+
 > **Thutapi** (തുത്താപ്പി) is what Kunjupaathumma affectionately calls Aisha
 > in Vaikom Muhammad Basheer's *Ntuppuppakkoranendarnnu*. It is a term of
 > endearment for a small girl, on a product where a small girl tells the
 > story.
+
+## Why this project
+
+Children have big story ideas before they can reliably type a whole story.
+Thutapi keeps their role small and expressive: they answer one warm question
+at a time, while the system turns those answers into a complete book. Spoken
+questions, an optional music bed, and an optional consented voice sample make
+the result more accessible without making the child do more work.
+
+### Hackathon notes
+
+- **Why MiniMax M3:** M3 conducts the interview, structures the transcript,
+  and judges each illustrated page against its cast reference. It also helped
+  write a substantial portion of this codebase; the product design, prompts,
+  tests, review, and final decisions remained human-directed.
+- **Why GMI Cloud:** one integration makes M3, Speech 2.8, Music 3.0, and the
+  supporting image workflow practical in one production app. Thank you to
+  **GMI Cloud** and **MiniMax** for the platform and models that made Thutapi
+  possible.
+- **What was hard:** TTS capacity failures and Music 3.0 rate limits were real
+  integration problems. Thutapi degrades gracefully to a captioned-silent
+  film when narration is unavailable, and background music is now opt-in so a
+  rate-limited music request never blocks a book.
+- **Image choice:** the MiniMax image models available to us did not meet the
+  reference-image workflow needed for reliable character consistency. We use
+  `seedream-5.0-lite` through GMI Cloud for reference sheets and illustrated
+  pages, while M3 performs the consistency review.
+- **What is next:** we planned to explore MiniMax H3 for generated video, but
+  spent the hackathon making the interview, image consistency, TTS, music, and
+  book assembly reliable first. H3 integration is post-hackathon work; today’s
+  film is a deliberately dependable captioned MP4 assembled from the finished
+  illustrations and narration.
 
 ## How it works
 
@@ -98,8 +134,9 @@ curl -s localhost:18080/healthz
 always traceable back to its source.
 
 Open `http://localhost:8080/` and click **Make your own book**. Answer a few
-questions, skip or record the optional voice sample, and wait. A full
-generation takes about six minutes and costs roughly $0.35.
+questions, skip or record the optional voice sample, choose whether to include
+a background music bed, and wait. A full generation takes about six minutes
+and costs roughly $0.35.
 
 ## Configuration
 
