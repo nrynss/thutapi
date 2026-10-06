@@ -418,6 +418,18 @@ type Config struct {
 	// (audio/throttle.go). The zero value is audio's default; tests
 	// shrink the wait so the degrade paths stay quick.
 	Throttle audio.ThrottleConfig
+	// ImageThrottle paces the image stage: how many image submissions
+	// per minute the model allows and the wait-and-retry a throttled
+	// call gets (illustrate/throttle.go). The zero value keeps
+	// illustrate's production default (the default model's two per
+	// minute, so an N-image book spends at least N-1 intervals
+	// pacing, and the pacer is shared by every book in the process
+	// because the cap is per account); tests set RequestsPerMinute
+	// negative to run unpaced.
+	ImageThrottle illustrate.ThrottleConfig
+	// ReferenceLimit bounds how many reference sheets render at once
+	// (illustrate.Config.ReferenceLimit). Zero is illustrate's default.
+	ReferenceLimit int
 	// Broker carries the book-topic events and serves the SSE route.
 	Broker broadcaster
 	// Jobs runs the pipeline off the request path.

@@ -51,6 +51,18 @@ type Config struct {
 	// negative means DefaultLimit.
 	Limit int
 
+	// ReferenceLimit bounds how many reference sheets render at once,
+	// separately from Limit. It bounds work in flight, not the request
+	// rate (Throttle.RequestsPerMinute does that), and is independent
+	// of the model. Zero or negative means DefaultReferenceLimit; it is
+	// never wider than Limit.
+	ReferenceLimit int
+
+	// Throttle paces image submissions to the model's per-minute cap and
+	// sets the wait-and-retry every image call gets on
+	// gmi.ErrRateLimited and gmi.ErrTransient. The zero value is usable.
+	Throttle ThrottleConfig
+
 	// HTTPClient fetches an image when the request queue answers with
 	// a URL instead of inline bytes. Nil means a client with
 	// defaultFetchTimeout. It never talks to GMI — that stays behind

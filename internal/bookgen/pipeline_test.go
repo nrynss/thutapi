@@ -1,6 +1,7 @@
 package bookgen
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,11 +10,15 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"thutapi/internal/audio"
 	"thutapi/internal/gmi"
+	"thutapi/internal/gmi/media"
+	"thutapi/internal/illustrate"
 	"thutapi/internal/interview"
 	"thutapi/internal/job"
 	"thutapi/internal/store"
@@ -1790,5 +1795,205 @@ func TestPruneAbandoned_RemovesEmptyRowsAndNothingElse(t *testing.T) {
 	again, err := ph.h.PruneAbandoned(t.Context())
 	if err != nil || len(again) != 0 {
 		t.Fatalf("second prune = %v, %v; want nothing left", again, err)
+	}
+}
+
+// TestPipeline_ZeroImageThrottleKeepsTheDefaultPacing pins the production
+// default: a bookgen Config that sets no ImageThrottle rate must reach
+// illustrate with its default pacing, so a live book spaces its image
+// submissions under the model's per-minute cap (nrynss/thutapi#1). Only the
+// clock is injected — Sleep records the wait and returns at once, Now is
+// frozen — so each image after the first must be asked to wait one full
+// default interval. If the plumbing ever turned the zero value into
+// "unpaced", no wait would be recorded and this fails.
+func TestPipeline_ZeroImageThrottleKeepsTheDefaultPacing(t *testing.T) {
+	var mu sync.Mutex
+	var waits []time.Duration
+	frozen := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
+	ph := newPipelineHarnessWith(t, func(c *Config) {
+		c.ImageThrottle = illustrate.ThrottleConfig{ // RequestsPerMinute left zero
+			Sleep: func(_ context.Context, d time.Duration) error {
+				mu.Lock()
+				defer mu.Unlock()
+				waits = append(waits, d)
+				return nil
+			},
+			Now: func() time.Time { return frozen },
+		}
+	})
+	ivID, bookID := ph.makeEndedInterview("Mira")
+	sub := ph.subscribe(bookID)
+	srv := httptest.NewServer(ph.mux())
+	defer srv.Close()
+
+	code, res := postGenerateJSON(t, srv, ivID, `{"music":false}`)
+	if code != http.StatusAccepted {
+		t.Fatalf("POST generate status = %d, want 202", code)
+	}
+	for range fullStory().Pages {
+		ph.waitEvent(sub, "page_approved")
+	}
+	ph.waitEvent(sub, "book_ready")
+	if runRes := ph.waitJob(res.JobID); runRes.Status != job.StatusDone {
+		t.Fatalf("job = %+v, want done", runRes)
+	}
+
+	gen, edit := ph.imager.kinds()
+	images := gen + edit
+	mu.Lock()
+	defer mu.Unlock()
+	if len(waits) < images-1 {
+		t.Fatalf("pacer waited %d times for %d image calls, want at least %d: the zero ImageThrottle is not paced", len(waits), images, images-1)
+	}
+	// Two per minute is 30 s a slot; the pacer adds a margin on top.
+	floor := time.Minute / time.Duration(illustrate.DefaultRequestsPerMinute)
+	slices.Sort(waits)
+	for i, d := range waits[len(waits)-(images-1):] {
+		if d < floor {
+			t.Errorf("wait %d = %v, want at least the default interval %v", i, d, floor)
+		}
+	}
+}
+
+// peakSheetImager wraps the harness imager and records the most reference
+// sheets (text-to-image calls) ever in flight at once.
+type peakSheetImager struct {
+	*fakeImager
+	inFlight, peak atomic.Int32
+}
+
+func (p *peakSheetImager) GenerateImage(ctx context.Context, prompt, model string, opts media.ImageOptions) ([]byte, error) {
+	n := p.inFlight.Add(1)
+	defer p.inFlight.Add(-1)
+	for {
+		cur := p.peak.Load()
+		if n <= cur || p.peak.CompareAndSwap(cur, n) {
+			break
+		}
+	}
+	time.Sleep(40 * time.Millisecond) // hold the slot so a second sheet, if allowed, overlaps
+	return p.fakeImager.GenerateImage(ctx, prompt, model, opts)
+}
+
+// TestPipeline_ReferenceLimitReachesIllustrate pins the pass-through of
+// Config.ReferenceLimit: with a limit of one, a two-sheet book never has two
+// sheets in flight. Dropping the field from the illustrate.Config literal
+// restores illustrate's default of two and the peak becomes two.
+func TestPipeline_ReferenceLimitReachesIllustrate(t *testing.T) {
+	var peaky *peakSheetImager
+	ph := newPipelineHarnessWith(t, func(c *Config) {
+		peaky = &peakSheetImager{fakeImager: c.Imager.(*fakeImager)}
+		c.Imager = peaky
+		c.ReferenceLimit = 1
+	})
+	ivID, bookID := ph.makeEndedInterview("Mira")
+	sub := ph.subscribe(bookID)
+	srv := httptest.NewServer(ph.mux())
+	defer srv.Close()
+
+	code, res := postGenerateJSON(t, srv, ivID, `{"music":false}`)
+	if code != http.StatusAccepted {
+		t.Fatalf("POST generate status = %d, want 202", code)
+	}
+	for range fullStory().Pages {
+		ph.waitEvent(sub, "page_approved")
+	}
+	ph.waitEvent(sub, "book_ready")
+	if runRes := ph.waitJob(res.JobID); runRes.Status != job.StatusDone {
+		t.Fatalf("job = %+v, want done", runRes)
+	}
+	if got := peaky.peak.Load(); got != 1 {
+		t.Fatalf("peak reference sheets in flight = %d, want 1 (Config.ReferenceLimit did not reach illustrate)", got)
+	}
+}
+
+// rateLimitedImager answers every image call with a 429 carrying a
+// retry_after_ms, the shape GMI sends.
+type rateLimitedImager struct{}
+
+func (rateLimitedImager) GenerateImage(context.Context, string, string, media.ImageOptions) ([]byte, error) {
+	return nil, fmt.Errorf("%w: {\"rate_limit\":{\"retry_after_ms\":29970}}", gmi.ErrRateLimited)
+}
+
+func (rateLimitedImager) EditImage(context.Context, string, string, []string, media.ImageOptions) ([]byte, error) {
+	return nil, fmt.Errorf("%w: {\"rate_limit\":{\"retry_after_ms\":29970}}", gmi.ErrRateLimited)
+}
+
+// TestPipeline_CancelDuringAnImageThrottleWaitIsCancelled is round-1 M2's
+// end-to-end pin. job.Runner calls a run cancelled only when
+// errors.Is(err, context.Canceled) holds on what the pipeline returns, so
+// the cancel that interrupts a throttle wait must survive illustrate's
+// error and bookgen's own wrap (the %w in runBook). A %v there, or an
+// illustrate that returned only the provider's 429, lands the job as failed:
+// the operator cancelled and the child is told to try again.
+func TestPipeline_CancelDuringAnImageThrottleWaitIsCancelled(t *testing.T) {
+	waiting := make(chan struct{})
+	var once sync.Once
+	ph := newPipelineHarnessWith(t, func(c *Config) {
+		c.Imager = rateLimitedImager{}
+		c.ImageThrottle = illustrate.ThrottleConfig{
+			RequestsPerMinute: -1,
+			Sleep: func(ctx context.Context, _ time.Duration) error {
+				once.Do(func() { close(waiting) })
+				<-ctx.Done() // the throttle wait: ends only when the job is cancelled
+				return ctx.Err()
+			},
+		}
+	})
+	ivID, bookID := ph.makeEndedInterview("Mira")
+	srv := httptest.NewServer(ph.mux())
+	defer srv.Close()
+
+	code, res := postGenerateJSON(t, srv, ivID, `{"music":false}`)
+	if code != http.StatusAccepted {
+		t.Fatalf("POST generate status = %d, want 202", code)
+	}
+	jobSub := ph.broker.Subscribe(t.Context(), job.Topic(res.JobID))
+	t.Cleanup(jobSub.Cancel)
+	bookSub := ph.subscribe(bookID)
+
+	select {
+	case <-waiting:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the run never reached a throttle wait")
+	}
+	if err := ph.runner.Cancel(res.JobID); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	got := ph.waitJob(res.JobID)
+	if got.Status != job.StatusCancelled {
+		t.Fatalf("job status = %q (err %v), want %q: a cancel during a throttle wait must not read as a failure", got.Status, got.Err, job.StatusCancelled)
+	}
+	if !errors.Is(got.Err, context.Canceled) {
+		t.Fatalf("job err = %v, want it to wrap context.Canceled", got.Err)
+	}
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case ev, ok := <-jobSub.Events:
+			if !ok {
+				t.Fatal("job subscription closed before the terminal event")
+			}
+			if ev.Name == string(job.StatusError) {
+				t.Fatalf("job published %q, want %q", ev.Name, job.StatusCancelled)
+			}
+			if ev.Name == string(job.StatusCancelled) {
+				goto terminal
+			}
+		case <-deadline:
+			t.Fatal("no terminal event on the job topic")
+		}
+	}
+terminal:
+	// The book topic still tells the child the book did not finish.
+	for {
+		select {
+		case ev := <-bookSub.Events:
+			if ev.Name == "failed" {
+				return
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("no failed event on the book topic")
+		}
 	}
 }

@@ -84,6 +84,10 @@ func pngBytes(tag string) []byte {
 var fixtureMedia = newMediaFixture()
 
 func TestMain(m *testing.M) {
+	// Every un-configured throttle in this package's tests would sleep
+	// for tens of seconds; tests that assert on waits inject their own
+	// Config.Throttle.Sleep instead.
+	defaultSleep = func(ctx context.Context, d time.Duration) error { return ctx.Err() }
 	defer fixtureMedia.Close()
 	os.Exit(m.Run())
 }
@@ -821,40 +825,6 @@ func TestIllustrate_GMISentinelsSurvive(t *testing.T) {
 	}
 }
 
-// TestIllustrate_NoSecondRetryLayer pins internal/gmi/errors.go's
-// contract: the media client already retries once internally, and
-// this package must not stack a second layer on top of it. One
-// failure per page is one call, not two.
-func TestIllustrate_NoSecondRetryLayer(t *testing.T) {
-	var gens, edits atomic.Int32
-	fake := &fakeImager{
-		generate: func(ctx context.Context, prompt, model string, opts media.ImageOptions) ([]byte, error) {
-			gens.Add(1)
-			return nil, fmt.Errorf("boom: %w", gmi.ErrTransient)
-		},
-	}
-	if _, err := Illustrate(context.Background(), Config{Imager: fake, Limit: 1}, twoCastStory()); !errors.Is(err, gmi.ErrTransient) {
-		t.Fatalf("err = %v, want gmi.ErrTransient", err)
-	}
-	if got := gens.Load(); got > 2 {
-		t.Errorf("GenerateImage called %d times for 2 cast members; this package must add no retry of its own", got)
-	}
-
-	gens.Store(0)
-	fake2 := &fakeImager{
-		edit: func(ctx context.Context, prompt, model string, refImages []string, opts media.ImageOptions) ([]byte, error) {
-			edits.Add(1)
-			return nil, fmt.Errorf("boom: %w", gmi.ErrTransient)
-		},
-	}
-	if _, err := Illustrate(context.Background(), Config{Imager: fake2, Limit: 1}, twoCastStory()); !errors.Is(err, gmi.ErrTransient) {
-		t.Fatalf("err = %v, want gmi.ErrTransient", err)
-	}
-	if got := edits.Load(); got > 2 {
-		t.Errorf("EditImage called %d times for 2 pages; this package must add no retry of its own", got)
-	}
-}
-
 // TestIllustrate_FirstFailureCancelsTheRest pins the errgroup
 // contract: a failed render must stop the fan-out, not let the rest
 // of the book keep spending.
@@ -883,7 +853,7 @@ func TestIllustrate_FirstFailureCancelsTheRest(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, err := Illustrate(ctx, Config{Imager: fake, Limit: 1}, s); !errors.Is(err, gmi.ErrBadRequest) {
+	if _, err := Illustrate(ctx, Config{Imager: fake, Limit: 1, Throttle: ThrottleConfig{RequestsPerMinute: -1}}, s); !errors.Is(err, gmi.ErrBadRequest) {
 		t.Fatalf("err = %v, want gmi.ErrBadRequest", err)
 	}
 	if sawCancel.Load() == 0 {

@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"strings"
 
-	"thutapi/internal/gmi/media"
 	"thutapi/internal/gmi/text"
 )
 
@@ -224,7 +223,7 @@ func refImages(locked []Reference) [][]byte {
 func (r *renderer) closePage(ctx context.Context, page *Illustration, locked []Reference) error {
 	for attempt := 0; ; attempt++ {
 		if attempt > 0 {
-			raw, err := r.imager.EditImage(ctx, page.Prompt, r.model, refURLs(locked), media.ImageOptions{})
+			raw, err := r.edit(ctx, page.Prompt, refURLs(locked))
 			if err != nil {
 				return fmt.Errorf("regenerate: %w", err)
 			}
@@ -261,9 +260,9 @@ func (r *renderer) closePage(ctx context.Context, page *Illustration, locked []R
 // judgePage sends one page's verdict request to the configured judge
 // and decodes the match answer. The judge's own errors — every
 // internal/gmi sentinel, including ErrTransient — are wrapped and
-// surfaced as they are: this package adds no retry layer of its own,
-// so a transport failure costs the page (and the run) rather than
-// burning the regeneration cap.
+// surfaced as they are: the throttle retry (throttle.go) covers image
+// calls only, not the judge, so a judge transport failure costs the
+// page (and the run) rather than burning the regeneration cap.
 func (r *renderer) judgePage(ctx context.Context, page *Illustration, locked []Reference) (bool, error) {
 	resp, err := r.judge.Chat(ctx, judgeRequest(DefaultJudgeModel, locked, page.Image, page.ContentType))
 	if err != nil {

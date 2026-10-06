@@ -57,10 +57,12 @@ func (h *Handler) runBook(ctx context.Context, bookID, ivID string, opts runOpti
 	bridge := newApprovalBridge(ctx, h, bookID)
 	writer := illustrate.NewBookWriter(h.cfg.DB, h.cfg.Blobs, bookID)
 	if _, err := illustrate.Illustrate(ctx, illustrate.Config{
-		Imager:   h.cfg.Imager,
-		Judge:    h.cfg.Judge,
-		Persist:  writer,
-		Progress: bridge.progress,
+		Imager:         h.cfg.Imager,
+		Judge:          h.cfg.Judge,
+		Persist:        writer,
+		Progress:       bridge.progress,
+		Throttle:       h.cfg.ImageThrottle,
+		ReferenceLimit: h.cfg.ReferenceLimit,
 	}, st); err != nil {
 		return "", "", fmt.Errorf("bookgen: illustrate: %w", err)
 	}

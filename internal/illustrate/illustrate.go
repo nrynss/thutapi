@@ -72,8 +72,39 @@
 // internal/gmi/media (invariant 3), so every path below is testable
 // without HTTP. Errors cross the boundary as the sentinels below or
 // as internal/gmi's, matched with errors.Is and never by substring
-// (invariant 8); the one retry inside the media client is the only
-// retry — this package adds no second layer (internal/gmi/errors.go).
+// (invariant 8).
+//
+// # Retry
+//
+// Every image call — reference sheets, pages and T7's regenerations —
+// goes through the pacer and then retryThrottled (throttle.go). The
+// pacer spaces submissions 60s/ThrottleConfig.RequestsPerMinute apart
+// (DefaultRequestsPerMinute, the default model's two per minute), so
+// fan-out width does not set the request rate. GMI's cap is per model
+// per account, so one pacer per (model, rate) is shared by every
+// Illustrate run in the process: concurrent books, and a re-POST after
+// a failed run, queue behind one another instead of each assuming an
+// empty window. A run that fails or is cancelled gives back the slots
+// it reserved but never used; only slots that were really spent delay
+// the next run. A book of N images takes at least (N-1) intervals,
+// which is the cap's price, not a defect. The pacer does not make a
+// 429 impossible: internal/gmi/media resubmits at once inside a slot on
+// a transient failure, and another process on the same account is
+// invisible to it, so the retry below stays as the backstop.
+// gmi.ErrRateLimited and gmi.ErrTransient are then waited on and
+// retried — rate limits up to Config.Throttle.Attempts times
+// (DefaultThrottleAttempts), transient failures up to
+// Config.Throttle.TransientAttempts (DefaultTransientAttempts), at most
+// Config.Throttle.MaxWait of waiting per call — sleeping for the
+// provider's retry_after_ms when its 429 body carries one and a
+// jittered doubling backoff otherwise.
+// Any other error surfaces on the first attempt. This sits on top of
+// the media client's own single immediate resubmit on ErrTransient,
+// which cannot help against a per-minute cap. Reference sheets also
+// render at most Config.ReferenceLimit at once
+// (DefaultReferenceLimit), a bound on work in flight that is
+// independent of the rate cap. The clock is injectable
+// (ThrottleConfig.Sleep, ThrottleConfig.Now).
 //
 // Illustrate renders bytes first and writes nothing on its own: T7's
 // consistency loop (Config.Judge) may regenerate a page that drifted,
@@ -253,6 +284,9 @@ type renderer struct {
 	imager   Imager
 	model    string
 	limit    int
+	refLimit int
+	throttle ThrottleConfig
+	pacer    *pacer
 	http     *http.Client
 	progress func(Progress)
 
@@ -286,11 +320,38 @@ func (cfg Config) resolve() (*renderer, error) {
 	if limit <= 0 {
 		limit = DefaultLimit
 	}
+	refLimit := cfg.ReferenceLimit
+	if refLimit <= 0 {
+		refLimit = DefaultReferenceLimit
+	}
+	refLimit = min(refLimit, limit)
 	hc := cfg.HTTPClient
 	if hc == nil {
 		hc = &http.Client{Timeout: defaultFetchTimeout, CheckRedirect: safeRedirectPolicy}
 	}
-	return &renderer{imager: cfg.Imager, model: model, limit: limit, http: hc, progress: cfg.Progress, judge: cfg.Judge, persist: cfg.Persist}, nil
+	tc := cfg.Throttle.withDefaults()
+	return &renderer{imager: cfg.Imager, model: model, limit: limit, refLimit: refLimit, throttle: tc, pacer: pacerFor(model, cfg.Throttle, tc), http: hc, progress: cfg.Progress, judge: cfg.Judge, persist: cfg.Persist}, nil
+}
+
+// generate runs one text-to-image call: every attempt takes a pacer slot
+// first, and a throttle is waited out.
+func (r *renderer) generate(ctx context.Context, prompt string) ([]byte, error) {
+	return retryThrottled(ctx, r.throttle, func() ([]byte, error) {
+		if err := r.pacer.wait(ctx); err != nil {
+			return nil, err
+		}
+		return r.imager.GenerateImage(ctx, prompt, r.model, media.ImageOptions{})
+	})
+}
+
+// edit runs one image-to-image call, paced and retried like generate.
+func (r *renderer) edit(ctx context.Context, prompt string, refs []string) ([]byte, error) {
+	return retryThrottled(ctx, r.throttle, func() ([]byte, error) {
+		if err := r.pacer.wait(ctx); err != nil {
+			return nil, err
+		}
+		return r.imager.EditImage(ctx, prompt, r.model, refs, media.ImageOptions{})
+	})
 }
 
 // report publishes one Progress event. Calls are serialised under the
@@ -315,8 +376,8 @@ func (r *renderer) report(stage, name string, n int) {
 // cannot be illustrated costs nothing. Reference sheets then all
 // complete before any page starts, because a page render has nothing
 // to lock against until its sheet exists. Each phase fans out through
-// errgroup bounded to Config.Limit, and the first error cancels the
-// rest of that phase.
+// errgroup (bounded to Config.ReferenceLimit and Config.Limit
+// respectively), and the first error cancels the rest of that phase.
 //
 // With Config.Judge or Config.Persist set, each page then runs T7's
 // closing loop (PLAN.md §T7): the echo guard, the judge verdict with
@@ -387,11 +448,11 @@ func Illustrate(ctx context.Context, cfg Config, s story.Story) (Book, error) {
 func (r *renderer) renderReferences(ctx context.Context, members []story.CastMember) ([]Reference, error) {
 	refs := make([]Reference, len(members))
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(r.limit)
+	g.SetLimit(r.refLimit)
 	for i, m := range members {
 		g.Go(func() error {
 			prompt := ReferencePrompt(m)
-			raw, err := r.imager.GenerateImage(gctx, prompt, r.model, media.ImageOptions{})
+			raw, err := r.generate(gctx, prompt)
 			if err != nil {
 				return fmt.Errorf("illustrate: reference sheet for %q: %w", m.Name, err)
 			}
@@ -459,7 +520,7 @@ func (r *renderer) renderPages(ctx context.Context, pages []story.Page, prompts 
 		}
 		lead := locked[0]
 		g.Go(func() error {
-			raw, err := r.imager.EditImage(gctx, prompts[i], r.model, refURLs(locked), media.ImageOptions{})
+			raw, err := r.edit(gctx, prompts[i], refURLs(locked))
 			if err != nil {
 				return fmt.Errorf("illustrate: page %d: %w", p.N, err)
 			}

@@ -1,0 +1,78 @@
+# T-IllustrateThrottle round 5 — adversarial review
+
+| | |
+|---|---|
+| **Target** | Full uncommitted delta for nrynss/thutapi#1 after remediation round 4: `internal/illustrate/{illustrate,types,verify,throttle}.go` + `illustrate_test.go`, `verify_test.go`, `throttle_test.go`, `pacer_test.go`; `internal/bookgen/{bookgen,pipeline}.go`, `harness_test.go`, `pipeline_test.go`; `dev-diary/PLAN.md`. |
+| **Reviewer** | Review Agent, round 5 (fresh: did not implement, review rounds 1-4, or remediate). 2026-10-06. |
+| **Method** | Read AGENTS.md, the review README, issue #1, PLAN's T-IllustrateThrottle entry incl. Contract row C1, and rounds 1-4 with remediations 1-4. Reviewed the whole diff from scratch against the full `Done when` and the original problem (a live book dying on seedream's 2 req / 60 s per-account cap). Ran every gate, then CPU-load runs with bounded hogs, then mutations on a scratch copy (`rsync` into the scratchpad; the repo tree was not edited, only this file was written). |
+| **Verdict** | **REMEDIATE — 0 C / 0 H / 2 M / 2 L.** |
+
+## Gates (run by the reviewer, real tree)
+
+| Check | Result |
+|---|---|
+| `go vet ./...` | clean |
+| `gofmt -l .` | clean |
+| `go test ./... -race -cover -count=1` | all green. `illustrate` 96.1, `bookgen` 82.5, `gmi/media` 92.3, `gmi/text` 90.4 (85% tier), `audio` 85.7, `cmd/thutapi` 78.8; every package at or above its floor |
+| `go test ./internal/illustrate ./internal/bookgen -race -shuffle=on -count=5` | green (75 s / 27 s) |
+| Owns | Every touched path is inside the declared `Owns` (+ Contract row C1 for the bookgen paths); nothing in `cmd/`, `static/`, `internal/audio`, `internal/gmi`. |
+| Go style (added lines) | no `**T`, `*[]T`, `*map`, `interface{}`, `panic`, `log.Fatal`, `context.TODO`, `os.Setenv`; no new unannotated `_ =` |
+
+## CPU-load runs (bounded hogs: `timeout N sh -c 'while :; do :; done' &`, no trailing kill)
+
+`/proc/pressure/cpu` `some avg10` before: 0.0-0.1; during: 20-86. After each batch I waited for the `timeout` wrappers to expire; `pgrep -x timeout` and the hog pattern both returned 0 at the end (nothing of mine leaked).
+
+| Run | Result |
+|---|---|
+| 12 hogs, `-race` test binary, `-test.cpu 1,3 -test.count=10`, `ConcurrentBooksShare\|PacingKeeps\|RePost\|SimulationFails\|ConcurrentBooksFail` | PASS (5 m 32 s); repeated with the hogs mostly gone: PASS |
+| 12 hogs, `TestPacer_*`, `TestRetryThrottled*`, `TestPacerFor*`, `TestResolve_*`, `TestPacerRegistry*`, `TestIllustrate_(Default\|Pacing\|Reference\|Cancel)*`, and bookgen `TestPipeline_(Zero\|Reference\|CancelDuring)*`, `-count=10 -test.cpu 1,3` | PASS, PASS |
+| 24 hogs, `TestIllustrate_TheSimulationFailsWithoutPacing`, `-count=40 -test.cpu 1,3` (80 runs) | **2 red**: "only 5 of 12 unpaced runs failed" (distribution of failed seeds 5-12, mean ~8.5) |
+| **No hogs**, same test, `-count=60 -test.cpu 1,3` (120 runs) | **2 red** (5 of 12 twice; distribution 5-12) |
+
+So the round-4 pin `TestIllustrate_ConcurrentBooksShareOneRateWindow` is now stable under load (see (b) below), but the negative control is **not**, and it is not a load problem at all: it flakes on an idle machine at about 1.7% per run.
+
+## Findings
+
+| # | Sev | Where | What | Pin (failing probe or test) | Mutation |
+|---|---|---|---|---|---|
+| M1 | M | `pacer_test.go` `TestIllustrate_TheSimulationFailsWithoutPacing` (`seeds = 12`, `failed < seeds/2`), its doc comment ("the reviewer measured 472 of 500"), and `simulate`/backoff jitter in `throttle.go` (`jitter` and the `retry_after_ms` spread use the global `math/rand/v2` source) | **A CI test that goes red on an idle machine.** The negative control requires at least 6 of 12 unpaced seeds to exhaust their retries, but the outcome depends on the unseeded global RNG used for retry jitter, so the count is random with mean about 8.5 and a standard deviation of about 1.5: measured 2 reds in 120 quiet runs and 2 in 80 runs under 24 hogs (the remediator's "7-12 on a quiet machine, mean 9.5" is not reproduced; 5 and 6 are common). That is roughly one red `verify.yml` in 60 runs from a test whose only job is to prove another test is load-bearing. AGENTS §Testing 5 ("an upstream outage must not redden a build") and round 3 M3 (a probabilistic gate) are the same class; round 4 disclosed it and left it unassigned, and "disclosed" is not "closed". The doc's "472 of 500" (94%) is also not what this test measures (about 70% per seed), so the comment misdescribes the experiment. | `go test -race -c ./internal/illustrate && ./illustrate.test -test.run SimulationFails -test.count=120 -test.cpu 1,3` on an idle box: 2 of 120 fail with `only 5 of 12 unpaced runs failed`. Fix shape: make the jitter deterministic under test (an injectable `Rand`/seeded source in `ThrottleConfig`, or draw jitter from the simulation's own seed), or assert on something that is not a coin flip (every unpaced seed that failed is `ErrRateLimited`, and unpaced draws strictly more 429s than paced), then re-run 500x. | Leave the test as is: red about 1.7% of runs. |
+| M2 | M | `throttle.go` `var defaultSleep = realSleep`; `illustrate_test.go` `TestMain` (replaces `defaultSleep` with an instant stub for every test in the package); `bookgen/pipeline_test.go` `TestPipeline_ZeroImageThrottleKeepsTheDefaultPacing` | **The production wiring that makes the pacer actually wait is unpinned.** `TestMain` overwrites `defaultSleep` process-wide, and every test of the zero-config path (`TestResolve_ZeroThrottleSharesTheProcessPacer`, `TestIllustrate_DefaultPacingOnTheWire`) therefore runs against the stub, while `realSleep` is tested only by calling it directly. Changing `var defaultSleep = realSleep` to a function that returns nil, which makes production completely unpaced and reintroduces issue #1 exactly, leaves `go test ./internal/illustrate ./internal/bookgen -race` **green** (verified on a scratch copy). That is the shape of `t2-round3.md` H1: the one statement carrying the decision is never exercised, because every test supplies its own value. AGENTS §Testing 2: "every default value is exercised through its default path". | New test that captures the original value before `TestMain` runs (a test-file `init()` storing `reflect.ValueOf(defaultSleep).Pointer()`, which runs before `TestMain`) and asserts it equals `reflect.ValueOf(realSleep).Pointer()`; or assert on a zero-`Config` `resolve()`'s pacer sleep after restoring the original. | `var defaultSleep = func(ctx context.Context, d time.Duration) error { return nil }` in `throttle.go`: suite green today. |
+| L1 | L | `throttle.go` doc of `type pacer` ("so the interval between any two submissions is never below the pacer's interval") and doc of `type pacerRegistry` ("a pacer holds ... only the next free slot, and its mutex covers arithmetic alone") | **Two docs misdescribe the code.** (a) The pacer guarantees slots at least an interval apart, not submissions: a waiter's submission happens after its sleep returns and any scheduling delay, and the 5% margin is what absorbs that. Round 4 M1 flagged this overclaim; the remediation reworded only the `vclock` comment. (b) The pacer holds a slice of slots (`slots []time.Time`), not "the next free slot", and since round 4 its mutex covers a call to the injected clock, not "arithmetic alone". AGENTS §Docs about behaviour. Severity L because the behaviour is safe: the margin holds and no lock is held across a sleep. | Read the two comments against `reserve`, `release` and `pacer.slots`. | Leave the sentences as written. |
+| L2 | L | `dev-diary/PLAN.md` heading "Contract row C1 (sanctioned widening of `Owns` onto `internal/bookgen`, ...)" versus its own last sentence ("*Sanction:* none recorded ... no separate, explicit operator sign-off") | **The row calls itself sanctioned and then says it is not.** A reader of the heading, or of a grep for "sanctioned", is told the widening was approved; the body says nobody approved it. Round 4 judged the "none recorded" clause truthful, and it is, but the heading was not reconciled with it. A contract-change record should not contradict itself on the one fact it exists to record. | `grep -n "sanctioned widening" dev-diary/PLAN.md` returns the heading next to a "none recorded" sanction. Reword the heading to "declared widening ... (operator sanction pending)". | Restore the current heading. |
+
+## (a) `reserve()` reading the clock under the lock — verdict: correct
+
+- One critical section covers `p.now()`, the prune, the slot search and the insert, so slots are issued in clock order and the pruning cannot see a time older than a previous caller's. Mutation (clock above the lock) is red (`TestPacer_ReadsItsClockUnderItsLock`, only that test).
+- Lock ordering: `pacerRegistry.mu` is released before any `pacer.mu`; `pacer.mu` is taken only by `reserve` and `release`, never held across `p.sleep`, never re-entered (`wait` calls `reserve`, then sleeps with the lock dropped, then `release`). The injected clocks take only their own lock (`vclock.mu`), and `vclock.drive` never takes `pacer.mu`, so `pacer.mu -> vclock.mu` has no reverse edge. No re-entrancy.
+- Cancelled contexts: the `ctx.Err()` pre-check gives no slot to a dead context (pinned: mutation red); a sleep that returns an error releases the slot, only if it has not arrived (pinned: dropping `release` is red in three tests; dropping the arrival check is red). A context that wins the `select` after the timer fired leaves a spent slot, the safe direction. When `d <= 0` a context that dies between the pre-check and the call goes on to the imager; harmless (the imager returns the context error).
+- Other `reserve` mutations (no pruning, no margin, no gap fill) are red.
+
+## (b) `vclock.drive` + `otherGoroutinesRunnable` — verdict: sound enough; not a finding
+
+- `runtime.Stack(all)` stops the world, so the snapshot is atomic: if every other goroutine is parked, none can run until an external event arrives, so virtual time cannot jump past a woken goroutine (a woken goroutine is `runnable` from the instant its channel is closed). That is exactly the hole round 4 diagnosed, and the pin that exposed it, `TestIllustrate_ConcurrentBooksShareOneRateWindow`, passed in every run above (about 330 executions across 12 and 24 hogs). Cost: a stop-the-world dump per millisecond of driver time; the whole `illustrate` package stays at 16-18 s in a quiet `-race` run, so not slow.
+- Residual limits, none grave: a goroutine parked in `[IO wait]` for the `fixtureMedia` image fetch (the fake returns a URL, so `decodeImage` really fetches) can have a response sitting in the kernel while the snapshot says "all parked", so time can advance across one fetch; that goroutine is not between a wake-up and a submission, and its next `reserve` reads the (later) clock under the lock, so the guarantee is unaffected. The simulation is also deliberately jitter-free: it proves slot arithmetic and the sliding-window claim, not tolerance to the late wake-ups the 5% margin exists for (the margin itself is pinned arithmetically). The header comment's strict wording ("must not let it be late") is slightly stronger than IO wait allows; not worth a row.
+- It does not hide pacer bugs: the "ignore arrival check", "no gap fill", "no margin" and "clock outside lock" mutations still go red, and the unpaced control still fails its seeds.
+
+## (c) the disclosed flake — graded M1 above
+
+The remediator was right that it is a negative control and does not hide a bug, and wrong that it is a load problem: it flakes about 1.7% on an idle machine. A test that can redden CI is a defect regardless of what it controls; M1 stands, and it needs a row.
+
+## (d) the rest of the design — probed and found sound
+
+- **Slot arithmetic / sliding window.** Three consecutive slots span at least 2 x 31.5 = 63 s > 60 s; `TestPacer_NoTwoSlotsCloserThanTheInterval` (2,000 random steps) and the eight-page simulation (24 seeds, prior 0-2, `maxIn <= 2`) agree. A retry re-enters `pacer.wait`, so a retried call takes a fresh slot; no retry sleeps while holding one.
+- **Registry.** Keyed on (model, rpm); production's zero `ThrottleConfig` shares `processPacers` (`resolve` wiring pinned, mutation red); injected clocks get a private pacer; first creator's clock wins is documented and harmless in production. No pacer holds a goroutine or timer; slots are pruned (pinned now).
+- **Retry.** Separate budgets for `ErrRateLimited` (6) and `ErrTransient` (2); `retry_after_ms` honoured, jittered, clamped before multiplying; the default backoff schedule (15, 30, 60, 90, 90 = 285 s) fits `DefaultThrottleWait` = 300 s, pinned (backoff 20 s is red in three tests); a context that ends surfaces as `context.Canceled` through `%w` all the way through `bookgen` (the `%v` mutation is red). Sentinels matched with `errors.Is`; the only text read is the `retry_after_ms` field of the 429 body, never the wording.
+- **bookgen seam.** Two forwarded fields; dropping `ReferenceLimit` is red (`TestPipeline_ReferenceLimitReachesIllustrate`); dropping `Throttle` makes the bookgen suite sleep on real pacing and fail broadly. Production needs no `cmd/thutapi` edit; every touched path is in `Owns` (the widening itself is L2).
+- **Mutations re-run (scratch copy, restored between runs):** clock outside lock RED; drop `release` RED (3 tests); ignore arrival check RED; private pacer in `resolve` RED; bookgen `%w` -> `%v` RED; drop `ReferenceLimit` RED; drop `Throttle` pass-through RED; backoff 20 s RED (3 tests); no pruning RED (`TestPacer_ExpiredSlotsArePruned`); no ctx pre-check RED (`TestPacer_AnAlreadyCancelledContextGetsNoSlot`); no 5% margin RED (6 tests); **`defaultSleep` instant: GREEN (M2)**.
+
+## Process note (not counted)
+
+Two Claude Code tool shells older than an hour are still alive (`ps ... shell-snapshots/snapshot- | awk '$2 > 3600'`: pids 234011 and 235862, adopted by the Claude parent 86550). Their command lines are the round-4 remediation agent's `until [ "$(pgrep -fc 'while :; do') -le 1 ]; do sleep 5; done` loops, which can never finish because `pgrep -fc` matches their own command text. They burn no measurable CPU but are the leak class `~/.claude/CLAUDE.md` describes. I did not kill them (not mine); the orchestrator should.
+
+## Residue against prior rounds
+
+Not claimed: two M and two L are open, so no zero-residue statement is made. For the record, every earlier row was re-checked this round and is **still closed**: round 1 H1, M1-M4, L1-L3; round 2 H1 (registry), M1, L1-L4 (Contract row C1 exists; see L2 for its heading); round 3 M1 (resolve wiring), M2 (slot list: release, arrival check, gap fill all red under mutation), M3 (backoff constants pinned; 20 s red), L1; round 4 M1 (clock under lock: pinned, mutation red; and the harness hole it uncovered is closed by `otherGoroutinesRunnable`, load-verified), L1 (ctx pre-check pinned), L2 (pruning pinned), L3 (PLAN status now current as of round 4). Round 4's disclosed negative-control flake was never a row; it is M1 here.
+
+## Verdict
+
+**REMEDIATE — 0 C / 0 H / 2 M / 2 L.** The pacer, registry and retry design are correct and the production default does solve issue #1 arithmetically; every round 1-4 mutation, and the new ones, go red. What fails the bar: a CI test that is red about 1.7% of the time on an idle machine (M1), the production default sleep being the one decision no test sees (M2), and two docs and one contract heading that say more than the code or the record supports (L1, L2). Each needs a row in `t-illustrate-throttle-remediation-round5.md` and a fresh round-6 reviewer; no exemption applies (M1/M2 are test logic; L1 misdescribes behaviour; L2 is a contract record).

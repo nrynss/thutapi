@@ -22,6 +22,7 @@ import (
 	"thutapi/internal/bookvideo"
 	"thutapi/internal/gmi/media"
 	"thutapi/internal/gmi/text"
+	"thutapi/internal/illustrate"
 	"thutapi/internal/interview"
 	"thutapi/internal/job"
 	"thutapi/internal/mediastore"
@@ -659,6 +660,16 @@ func (s *syncBuffer) String() string {
 
 func newPipelineHarness(t *testing.T) *pipelineHarness {
 	t.Helper()
+	return newPipelineHarnessWith(t, nil)
+}
+
+// newPipelineHarnessWith is newPipelineHarness with a hook that edits the
+// handler Config before New. The default image throttle is unpaced (the
+// fake imager has no per-minute cap, and illustrate's real pacing would
+// sleep ~31 s between its calls); a test of the production default clears
+// or replaces it in mutate.
+func newPipelineHarnessWith(t *testing.T, mutate func(*Config)) *pipelineHarness {
+	t.Helper()
 	ctx := t.Context()
 	db, err := store.Open(ctx, store.Config{Path: filepath.Join(t.TempDir(), "thutapi.db")})
 	if err != nil {
@@ -690,7 +701,7 @@ func newPipelineHarness(t *testing.T) *pipelineHarness {
 	// TestPipeline_FailedRunLogsTheError.
 	logs := &syncBuffer{}
 	log := slog.New(slog.NewTextHandler(logs, nil))
-	h, err := New(Config{
+	cfg := Config{
 		DB:       db,
 		Blobs:    blobs,
 		MediaDir: mediaDir,
@@ -708,7 +719,13 @@ func newPipelineHarness(t *testing.T) *pipelineHarness {
 		// pass THROUGH it, so it is shrunk rather than switched off:
 		// three attempts, microseconds apart.
 		Throttle: audio.ThrottleConfig{Backoff: time.Microsecond},
-	})
+		// Negative is illustrate's "unpaced": the fake imager has no cap.
+		ImageThrottle: illustrate.ThrottleConfig{RequestsPerMinute: -1},
+	}
+	if mutate != nil {
+		mutate(&cfg)
+	}
+	h, err := New(cfg)
 	if err != nil {
 		t.Fatalf("new bookgen handler: %v", err)
 	}

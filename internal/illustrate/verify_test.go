@@ -353,7 +353,7 @@ func TestIllustrate_JudgeTransportErrorSurfacesUnretried(t *testing.T) {
 	assertZeroBook(t, book)
 	assertSameRenderArgs(t, fake, 1)
 	if got := judge.calls(); got != 1 {
-		t.Fatalf("judge calls = %d, want 1 — no second retry layer in this package", got)
+		t.Fatalf("judge calls = %d, want 1 — the throttle retry covers image calls only, never the judge", got)
 	}
 }
 
@@ -408,7 +408,8 @@ func TestIllustrate_JudgeErrorMidLoopSurfacesUnretried(t *testing.T) {
 // regeneration's EditImage error branch (verify.go's "regenerate: %w"
 // return): a false verdict fires a regeneration, the regeneration's
 // render call itself fails, and the run surfaces the wrapped error
-// with a zero Book and NO third render — a render failure is not a
+// with a zero Book and NO third render (throttle retry disabled with
+// TransientAttempts: 1 so only the loop is under test) — a render failure is not a
 // false verdict, so it must not burn another retry or spin the loop.
 func TestIllustrate_RegenerationRenderFailureSurfacesUnretried(t *testing.T) {
 	fake := &fakeImager{}
@@ -421,7 +422,7 @@ func TestIllustrate_RegenerationRenderFailureSurfacesUnretried(t *testing.T) {
 		return queueEnvelope(fixtureMedia.url(fmt.Sprintf("regen-render-%d", edits))), nil
 	}
 	judge := &scriptedJudge{out: []bool{false}} // drift the first render
-	book, err := Illustrate(context.Background(), Config{Imager: fake, Judge: judge}, oneCastStory())
+	book, err := Illustrate(context.Background(), Config{Imager: fake, Judge: judge, Throttle: ThrottleConfig{TransientAttempts: 1}}, oneCastStory())
 	if !errors.Is(err, gmi.ErrTransient) {
 		t.Fatalf("err = %v, want errors.Is(.., gmi.ErrTransient)", err)
 	}
