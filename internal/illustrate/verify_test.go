@@ -74,15 +74,20 @@ type scriptedJudge struct {
 	out   []bool
 	err   error
 	errOn int // 1-based call that errors; 0 errors on every call
-	seen  int
-	reqs  []text.ChatRequest
+	// maxErrs, when positive, caps how many calls return err: later
+	// calls answer from the script, so a test can model one wobble.
+	maxErrs int
+	errored int
+	seen    int
+	reqs    []text.ChatRequest
 }
 
 func (j *scriptedJudge) Chat(ctx context.Context, req text.ChatRequest) (*text.ChatResponse, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	j.reqs = append(j.reqs, req)
-	if j.err != nil && (j.errOn == 0 || j.seen+1 == j.errOn) {
+	if j.err != nil && (j.errOn == 0 || j.seen+1 == j.errOn) && (j.maxErrs == 0 || j.errored < j.maxErrs) {
+		j.errored++
 		return nil, j.err
 	}
 	v := j.out[len(j.out)-1] // the last scripted verdict repeats
@@ -334,13 +339,12 @@ func TestIllustrate_ZeroValueConfigKeepsTheT6Pipeline(t *testing.T) {
 // judge failures: transport and malformed replies
 // ------------------------------------------------------------------
 
-// TestIllustrate_JudgeTransportErrorSurfacesUnretried pins that a
-// judge transport failure — any internal/gmi sentinel, ErrTransient
-// included — reaches the caller classified as itself and is NEVER
-// retried by this package: one render, one judge call, zero
-// regenerations, zero Book. Regeneration is a verdict-driven retry,
-// not a transport retry layer.
-func TestIllustrate_JudgeTransportErrorSurfacesUnretried(t *testing.T) {
+// TestIllustrate_JudgeTransportErrorSurfacesAfterItsAttempts pins that a
+// judge that fails transiently on every call is asked judgeAttempts
+// times and then reaches the caller classified as itself: one render,
+// judgeAttempts judge calls, zero regenerations, zero Book. The retry
+// re-asks the same page; it never regenerates it.
+func TestIllustrate_JudgeTransportErrorSurfacesAfterItsAttempts(t *testing.T) {
 	fake := scriptedImager()
 	judge := &scriptedJudge{err: fmt.Errorf("judge upstream: %w", gmi.ErrTransient)}
 	book, err := Illustrate(context.Background(), Config{Imager: fake, Judge: judge}, oneCastStory())
@@ -352,14 +356,15 @@ func TestIllustrate_JudgeTransportErrorSurfacesUnretried(t *testing.T) {
 	}
 	assertZeroBook(t, book)
 	assertSameRenderArgs(t, fake, 1)
-	if got := judge.calls(); got != 1 {
-		t.Fatalf("judge calls = %d, want 1 — the throttle retry covers image calls only, never the judge", got)
+	if got := judge.calls(); got != judgeAttempts {
+		t.Fatalf("judge calls = %d, want judgeAttempts (%d)", got, judgeAttempts)
 	}
 }
 
 // TestIllustrate_JudgementGarbageIsABadVerdict pins that a judge
 // reply carrying no usable verdict — here prose instead of JSON —
-// fails the run with ErrBadVerdict rather than guessing.
+// fails the run with ErrBadVerdict rather than guessing, after the
+// judge has been asked judgeAttempts times.
 func TestIllustrate_JudgementGarbageIsABadVerdict(t *testing.T) {
 	fake := scriptedImager()
 	book, err := Illustrate(context.Background(), Config{Imager: fake, Judge: garbageJudge{}}, oneCastStory())
@@ -374,33 +379,83 @@ func TestIllustrate_JudgementGarbageIsABadVerdict(t *testing.T) {
 // the regeneration path's never-fire error branches (round-1 M1)
 // ------------------------------------------------------------------
 
-// TestIllustrate_JudgeErrorMidLoopSurfacesUnretried pins the
-// no-second-retry rule where the loop is actually dangerous: the
-// judge answers the first render (false — a regeneration fires) and
-// dies with a transport error on the regeneration's verdict. The
-// retry cap counts FALSE VERDICTS, not errors, so a `continue` here
-// would be an unbounded spin — the return path is what bounds the
-// loop (round-1 M4: the mutant hung past 8 s). The sentinel after
-// exactly two renders and two judge calls pins that the mid-loop
-// error is surfaced, never turned into another regeneration.
-func TestIllustrate_JudgeErrorMidLoopSurfacesUnretried(t *testing.T) {
+// TestIllustrate_JudgeErrorMidLoopIsReAskedNotRegenerated pins where the
+// judge retry is actually dangerous: the judge answers the first render
+// (false — a regeneration fires) and fails transiently on the
+// regeneration's first verdict request. The retry re-asks the judge about
+// the SAME regenerated page — two renders, three judge calls, a Book —
+// and never turns the error into another regeneration (the cap counts
+// FALSE VERDICTS, not errors; a `continue` that skipped the attempt
+// bound would spin, round-1 M4).
+func TestIllustrate_JudgeErrorMidLoopIsReAskedNotRegenerated(t *testing.T) {
 	fake := scriptedImager()
 	judge := &scriptedJudge{
 		out:   []bool{false, true},
 		err:   fmt.Errorf("judge upstream: %w", gmi.ErrTransient),
 		errOn: 2,
+		// one wobble only
+		maxErrs: 1,
 	}
 	book, err := Illustrate(context.Background(), Config{Imager: fake, Judge: judge}, oneCastStory())
-	if !errors.Is(err, gmi.ErrTransient) {
-		t.Fatalf("err = %v, want errors.Is(.., gmi.ErrTransient)", err)
+	if err != nil {
+		t.Fatalf("err = %v, want the re-asked judge to approve the regenerated page", err)
 	}
-	if errors.Is(err, ErrConsistency) || errors.Is(err, ErrDecodeEcho) || errors.Is(err, ErrBadVerdict) {
-		t.Fatalf("err = %v misclassifies a transport failure as a verdict condition", err)
+	if book.Pages == nil {
+		t.Fatalf("no book returned")
 	}
-	assertZeroBook(t, book)
 	assertSameRenderArgs(t, fake, 2)
-	if got := judge.calls(); got != 2 {
-		t.Fatalf("judge calls = %d, want 2 (the first verdict answered, the regeneration's verdict errored)", got)
+	if got := judge.calls(); got != 3 {
+		t.Fatalf("judge calls = %d, want 3 (false, transient error, then the re-asked verdict)", got)
+	}
+}
+
+// flakyVerdictJudge answers its first n replies with the live
+// 2026-10-06 malformed reply, then a valid match verdict.
+type flakyVerdictJudge struct {
+	mu    sync.Mutex
+	bad   int
+	calls int
+}
+
+func (j *flakyVerdictJudge) Chat(ctx context.Context, req text.ChatRequest) (*text.ChatResponse, error) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.calls++
+	reply := `{"match": true}`
+	if j.calls <= j.bad {
+		reply = "{\"match\": true, \"reason\": \"\u0000\"\u0000}" // the raw reply the live judge sent; not JSON
+	}
+	return &text.ChatResponse{Choices: []text.Choice{{Message: text.AssistantMessage{TextBody: reply}}}}, nil
+}
+
+// TestIllustrate_MalformedJudgeReplyIsReAsked pins the 2026-10-06 live
+// failure: a malformed judge reply costs a re-ask, not the book. One bad
+// reply then a good one succeeds with one render; judgeAttempts bad
+// replies still fail with ErrBadVerdict.
+func TestIllustrate_MalformedJudgeReplyIsReAsked(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		bad     int
+		wantErr bool
+	}{
+		{name: "one bad reply then a verdict", bad: 1},
+		{name: "every attempt bad but the last", bad: judgeAttempts - 1},
+		{name: "every attempt bad", bad: judgeAttempts, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := scriptedImager()
+			judge := &flakyVerdictJudge{bad: tc.bad}
+			book, err := Illustrate(context.Background(), Config{Imager: fake, Judge: judge}, oneCastStory())
+			if tc.wantErr {
+				if !errors.Is(err, ErrBadVerdict) {
+					t.Fatalf("err = %v, want errors.Is(.., ErrBadVerdict)", err)
+				}
+				assertZeroBook(t, book)
+			} else if err != nil {
+				t.Fatalf("err = %v, want success after the re-ask", err)
+			}
+			assertSameRenderArgs(t, fake, 1) // a bad reply never regenerates the page
+		})
 	}
 }
 

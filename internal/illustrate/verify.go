@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 
+	"thutapi/internal/gmi"
 	"thutapi/internal/gmi/text"
 )
 
@@ -209,9 +210,10 @@ func refImages(locked []Reference) [][]byte {
 //     false verdict regenerates the page — the SAME prompt and the
 //     SAME sheet URLs — up to maxPageRegenerations times; a page
 //     still drifting after the second regeneration is ErrConsistency
-//     and fails the run. A judge error (any internal/gmi sentinel,
-//     including ErrTransient) also fails the page: it is surfaced,
-//     never retried here.
+//     and fails the run. A judge that cannot answer — a reply with
+//     no usable verdict, or ErrTransient — is asked again, up to
+//     judgeAttempts calls (see judgePage); any other judge error, or
+//     the last attempt's, fails the page and is surfaced.
 //  3. With no Judge, a render that decodes is the approval — a caller
 //     can persist without spending a model call.
 //
@@ -257,13 +259,43 @@ func (r *renderer) closePage(ctx context.Context, page *Illustration, locked []R
 	return nil
 }
 
+// judgeAttempts is how many times the judge is asked for one verdict,
+// including the first. A judge reply that is not JSON, or a judge call
+// that fails transiently, is a wobble in a quality check, not evidence
+// about the page: live on 2026-10-06 a book died at page 6 because the
+// judge answered {"match": true, "reason": "\u0000"\u0000}. Asking
+// again is not guessing — the page still needs a real verdict — and a
+// judge that never gives one still fails the run.
+const judgeAttempts = 3
+
 // judgePage sends one page's verdict request to the configured judge
-// and decodes the match answer. The judge's own errors — every
-// internal/gmi sentinel, including ErrTransient — are wrapped and
-// surfaced as they are: the throttle retry (throttle.go) covers image
-// calls only, not the judge, so a judge transport failure costs the
-// page (and the run) rather than burning the regeneration cap.
+// and decodes the match answer. A reply with no usable verdict
+// (ErrBadVerdict) or a transient judge failure (gmi.ErrTransient) is
+// asked again, up to judgeAttempts calls in total, without waiting: the
+// judge is a text model and its call is not what GMI's per-minute image
+// cap governs. Every other error — and the last attempt's error — is
+// wrapped and surfaced as it is, so the sentinels survive. The image
+// throttle (throttle.go) does not cover the judge.
 func (r *renderer) judgePage(ctx context.Context, page *Illustration, locked []Reference) (bool, error) {
+	var err error
+	for attempt := 1; attempt <= judgeAttempts; attempt++ {
+		var ok bool
+		ok, err = r.askJudge(ctx, page, locked)
+		if err == nil {
+			return ok, nil
+		}
+		if !errors.Is(err, ErrBadVerdict) && !errors.Is(err, gmi.ErrTransient) {
+			return false, err
+		}
+		if ctx.Err() != nil {
+			return false, err
+		}
+	}
+	return false, err
+}
+
+// askJudge makes one verdict request and decodes its reply.
+func (r *renderer) askJudge(ctx context.Context, page *Illustration, locked []Reference) (bool, error) {
 	resp, err := r.judge.Chat(ctx, judgeRequest(DefaultJudgeModel, locked, page.Image, page.ContentType))
 	if err != nil {
 		return false, fmt.Errorf("consistency judge: %w", err)
