@@ -141,10 +141,18 @@ func dataURI(contentType string, b []byte) string {
 // and project.md §2b). Anything else is ErrBadVerdict: a judge that
 // answers with prose or an empty object gave no verdict, and guessing
 // one would be how a drifted page ships.
+//
+// The judge's reply is first stripped of NUL bytes. Live on 2026-10-06
+// MiniMax-M3 scattered U+0000 through its replies — inside the
+// "reason" string, and between tokens — which makes an otherwise valid
+// {"match": true|false, ...} object unparseable. A NUL carries no
+// meaning, so removing it is sanitising the transport, not guessing a
+// verdict: a reply that is still not JSON afterwards is ErrBadVerdict.
 func parseVerdict(reply string) (bool, error) {
 	var v struct {
 		Match *bool `json:"match"`
 	}
+	reply = strings.ReplaceAll(reply, "\x00", "")
 	if err := json.Unmarshal([]byte(strings.TrimSpace(reply)), &v); err != nil {
 		return false, fmt.Errorf("%w: judge reply is not JSON: %s", ErrBadVerdict, excerpt([]byte(reply)))
 	}
@@ -260,12 +268,13 @@ func (r *renderer) closePage(ctx context.Context, page *Illustration, locked []R
 }
 
 // judgeAttempts is how many times the judge is asked for one verdict,
-// including the first. A judge reply that is not JSON, or a judge call
-// that fails transiently, is a wobble in a quality check, not evidence
-// about the page: live on 2026-10-06 a book died at page 6 because the
-// judge answered {"match": true, "reason": "\u0000"\u0000}. Asking
-// again is not guessing — the page still needs a real verdict — and a
-// judge that never gives one still fails the run.
+// including the first. A judge reply that carries no verdict, or a judge
+// call that fails transiently, is a wobble in a quality check, not
+// evidence about the page: a model answering in prose once does not
+// make the page wrong. Asking again is not guessing — the page still
+// needs a real verdict — and a judge that never gives one still fails
+// the run. (NUL bytes inside an otherwise valid reply are not a wobble;
+// parseVerdict strips them.)
 const judgeAttempts = 3
 
 // judgePage sends one page's verdict request to the configured judge

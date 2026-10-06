@@ -409,8 +409,8 @@ func TestIllustrate_JudgeErrorMidLoopIsReAskedNotRegenerated(t *testing.T) {
 	}
 }
 
-// flakyVerdictJudge answers its first n replies with the live
-// 2026-10-06 malformed reply, then a valid match verdict.
+// flakyVerdictJudge answers its first n replies with prose that carries
+// no verdict, then a valid match verdict.
 type flakyVerdictJudge struct {
 	mu    sync.Mutex
 	bad   int
@@ -423,7 +423,7 @@ func (j *flakyVerdictJudge) Chat(ctx context.Context, req text.ChatRequest) (*te
 	j.calls++
 	reply := `{"match": true}`
 	if j.calls <= j.bad {
-		reply = "{\"match\": true, \"reason\": \"\u0000\"\u0000}" // the raw reply the live judge sent; not JSON
+		reply = "the page looks consistent to me" // prose: no verdict, so ErrBadVerdict
 	}
 	return &text.ChatResponse{Choices: []text.Choice{{Message: text.AssistantMessage{TextBody: reply}}}}, nil
 }
@@ -681,6 +681,11 @@ func TestParseVerdict(t *testing.T) {
 		{name: "match true", reply: `{"match":true}`, want: true},
 		{name: "match false with reason", reply: `{"match":false,"reason":"hair is the wrong colour"}`, want: false},
 		{name: "surrounding whitespace", reply: "  {\"match\": true} \n", want: true},
+		// the two raw replies MiniMax-M3 sent live on 2026-10-06: NUL bytes
+		// scattered through otherwise valid JSON (pinned as raw bytes)
+		{name: "NULs around an empty reason", reply: "{\"match\": true, \"reason\": \"\x00\"\x00}", want: true},
+		{name: "NULs inside the reason", reply: "{\"match\": false, \"reason\": \"Sam and Jack appear swapped\x00Sam (\x00\x00\x00with\x00teal eyes) is on the left.\"}", want: false},
+		{name: "NUL still not JSON", reply: "yes\x00 it matches", err: ErrBadVerdict},
 		{name: "not JSON", reply: "yes it matches", err: ErrBadVerdict},
 		{name: "no match field", reply: `{"reason":"looks fine"}`, err: ErrBadVerdict},
 		{name: "match is a string", reply: `{"match":"true"}`, err: ErrBadVerdict},
