@@ -1,7 +1,10 @@
 # Thutapi Agent Protocol
 
-Binding for every human or coding agent working in this repository. It governs
-how work runs. What the product is lives in
+Binding for every coding agent working in this repository. It governs how agent
+work runs. The operator is not bound by the issue, branch and pull request flow
+below: they may commit straight to `main`, and may ask an agent to do the same.
+Everything else in this file (Go style, testing, safety, CI) describes the code
+and applies to whoever writes it. What the product is lives in
 [`dev-diary/project.md`](dev-diary/project.md).
 
 The old structure of phases, numbered tracks, `Owns` lists and a frozen stack is
@@ -10,9 +13,12 @@ history: read them for the reasons behind the code, but they no longer say what
 you may touch or what counts as done. Nothing is frozen. A change to the stack,
 a package boundary or this file is an ordinary change, made on an issue.
 
-## How work runs
+## How agent work runs
 
-One issue, one branch, one pull request.
+For a coding agent: one issue, one branch, one pull request. An agent does not
+push to `main` on its own initiative. The operator can say otherwise for a
+change, in words, and then that change goes straight to `main` (the gate still
+runs).
 
 1. **Issue.** Every change starts from an issue on `nrynss/thutapi`. It says
    what is wrong or missing, why now, the shape of the fix, and what is out of
