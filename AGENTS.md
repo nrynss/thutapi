@@ -1,390 +1,266 @@
 # Thutapi Agent Protocol
 
-This file is binding for every human or coding agent working in this repository.
-It governs the workflow. The product spec is
-[`dev-diary/project.md`](dev-diary/project.md); the build plan with per-track
-status is [`dev-diary/PLAN.md`](dev-diary/PLAN.md); the review loop is defined
-in [`dev-diary/adversarial-review/README.md`](dev-diary/adversarial-review/README.md).
+Binding for every human or coding agent working in this repository. It governs
+how work runs. What the product is lives in
+[`dev-diary/project.md`](dev-diary/project.md).
 
-## Process — implement → review → remediate → re-review → APPROVE
+The old structure of phases, numbered tracks, `Owns` lists and a frozen stack is
+over. `dev-diary/PLAN.md` and `dev-diary/adversarial-review/t*-round*.md` are
+history: read them for the reasons behind the code, but they no longer say what
+you may touch or what counts as done. Nothing is frozen. A change to the stack,
+a package boundary or this file is an ordinary change, made on an issue.
 
-Every track runs through this loop until **APPROVE** with **zero findings
-(0/0/0/0)** across all severities. There are no exceptions.
+## How work runs
 
-1. **Implement.** Edit only paths listed in the track's `Owns` section of
-   `dev-diary/PLAN.md`. Stay inside the seam. Every track has an `Owns` line;
-   if one does not, that is a defect in `PLAN.md` — fix it before you start
-   rather than guessing your boundary.
-2. **Review.** A reviewer reads the diff against the spec and writes
-   `dev-diary/adversarial-review/t<N>-round<K>.md` with verdict
-   (`REMEDIATE` / `APPROVE`), findings counted by severity (C / H / M / L),
-   and per-row **Where / What / Pin (failing probe or test) / Mutation (what
-   breaks if reverted)**. Reviewers do not remediate their own findings.
-3. **Remediate.** For each finding, write the fix into
-   `dev-diary/adversarial-review/t<N>-remediation-round<K>.md` with one row
-   per finding. **No severity is exempt.** Only truly trivial L-severity fixes (a one-line doc typo or type annotation that needs no review) may be committed in-line with the track and recorded as a note in the round's review file.
-4. **Re-review.** Re-run the same review against the new commit. Repeat 2–4
-   until verdict is **APPROVE** with an explicit "zero residue" claim against
-   all prior rounds.
-5. **Commit.** Land the APPROVE'd track on `main` as one focused commit
-   (or a small sequence if the track spanned several seams).
+One issue, one branch, one pull request.
 
-**Severities.** C = breaks the demo. H = real defect the demo survives.
-M = real defect with workaround. L = polish. Per
-`dev-diary/adversarial-review/README.md`.
+1. **Issue.** Every change starts from an issue on `nrynss/thutapi`. It says
+   what is wrong or missing, why now, the shape of the fix, and what is out of
+   scope. A failure seen in production is an issue before it is a patch.
+2. **Branch.** Work on `issue-<N>-<slug>` off `main`. Push as you go.
+3. **Gate.** Every commit passes the same checks CI runs (see CI and images
+   below) in a clean checkout of the branch. A commit that fails its own gate
+   does not exist.
+4. **Review.** A pull request is reviewed by an agent or human who did not write
+   it. The reviewer reads the diff against `main` and the issue, runs the gate
+   and every pin it cites, and writes the findings in the pull request (or a
+   file under `dev-diary/reviews/` for anything worth keeping). The review opens
+   with the commit hash it reviewed.
+5. **Verdict.** APPROVE or REMEDIATE, with a count of findings per severity and
+   one row per finding. On REMEDIATE the author fixes every finding as new
+   commits and a reviewer who did not write the fix looks again. Repeat until a
+   round returns APPROVE with zero findings.
+6. **Land.** Merge with `Closes #<N>`. One change, one landing. Do not land two
+   approved changes in one commit.
 
-**Lambo memory MCP is mandatory.** `lambo_recall` before starting a track,
-`lambo_derive` / `lambo_record_action` after each meaningful change. Use one
-stable `agent_id` for the session so locks and attribution are coherent.
+A reviewer does not fix what they find, and an author does not review their own
+change: an agent that does both narrows the finding until its own fix is enough.
 
-## Agentic development — the orchestrator and its agents
+**Severities.**
 
-The loop above is executed by **four distinct roles**. They are separate on
-purpose: an agent that reviews its own work is not adversarial, and an agent
-that both finds and fixes a defect will quietly narrow the finding until the
-fix it already wrote is sufficient.
+| Level | Meaning |
+|---|---|
+| **C** | Breaks the product, loses data, leaks spend, or exposes a child's media. |
+| **H** | A real defect the product survives. |
+| **M** | A real defect with a workaround. |
+| **L** | Polish. |
 
-| Role | Does | Never does |
-| --- | --- | --- |
-| **Orchestrator** | Picks the track. Dispatches the other three. Gates the loop and refuses to advance on a non-clean verdict. Lands the commit. Fixes trivially-exempt defects itself (below). | Implement a track. Write a review verdict. Decide that a finding "isn't worth it". |
-| **Implementation agent** | Implements the track inside its `Owns` paths (PLAN.md). Stays in the seam. Raises a contract change in the review file rather than reaching outside it. | Review its own work. Mark the track done. |
-| **Review agent** | Reads the diff against the spec. Writes `t<N>-round<K>.md` with a verdict, findings counted by severity, and Where / What / Pin / Mutation per finding. | Fix anything it found. Soften a finding because the fix looks expensive. |
-| **Remediation agent** | Fixes every finding. Writes `t<N>-remediation-round<K>.md`, one row per finding. | Change the verdict. Fix things nobody found (that is scope creep, and it arrives unreviewed). |
+Every severity gets fixed. "It is only an L" is not a disposition. A reviewer may
+record a finding as a false positive; that is a judgement about whether the
+defect is real, never about whether a real defect deserves a fix. The one
+exemption: a doc typo or comment fix that cannot change behaviour may be fixed
+inline by the author and noted in the review. A comment that misdescribes
+behaviour is not that: it carries the severity of the behaviour it misdescribes.
 
-**A fresh agent per role per round.** The round-2 reviewer should not be the
-round-1 reviewer, and neither should have been the implementer. Re-using an
-agent across roles is how a review round becomes a formality — and T2 is the
-worked example: rounds 1 and 2 were sound within the scope they took, but
-nobody re-opened the full `Done when`, and two H-severity defects sat behind an
-APPROVE for a day (`adversarial-review/t2-round3.md`).
+**A finding carries two things.**
 
-**The cycle does not end early.** implement → review → remediate → review →
-… → **APPROVE with 0/0/0/0 and an explicit zero-residue claim against every
-prior round**. A verdict of REMEDIATE always costs another full round; there is
-no "fixed it, close it out" path.
+- **A pin**: an independent measurement of the defect, or a failing test. `curl`
+  a running server, query the SQLite file with a fresh connection, hash the
+  stored blob. Software reporting its own success is the thing under review, not
+  evidence for it. A pasted console transcript is not a pin.
+- **A mutation**: the one- or two-line edit that reintroduces the defect and
+  turns the pin red. It proves the pin is load-bearing. Run mutations on a
+  scratch copy, never on the branch under review.
 
-**Every severity gets fixed.** C, H, M and L all land a row in the remediation
-file. "It's only an L" is not a disposition. A reviewer may record a finding as
-a **false positive** — round 1's L1 was, correctly — but that is a judgement
-about whether the defect is real, not about whether a real defect is worth
-fixing.
+A real defect outside the paths the pull request touches is recorded as
+`OUT_OF_SCOPE` with its severity and pin, never blocks the verdict, and gets its
+own issue.
 
-*(If you are working in P0–P3 vocabulary: P0 = C, P1 = H, P2 = M, P3 = L.
-This repo writes C/H/M/L; use it in review files so the counts stay
-comparable across rounds.)*
+**Waiving review.** Only the operator can waive review or a round of it, and only
+in the issue or pull request, in words. A waiver is recorded where the work is
+recorded, with what was not reviewed. It is never assumed from urgency.
 
-### The one exemption — the orchestrator's fast path
+## Live verification
 
-An **L (P3)** finding that is a doc typo, a comment fix, or a similar triviality
-**that cannot change behaviour** may be fixed by the orchestrator directly, in
-the same commit, without a remediation agent and without another review round.
-The orchestrator then closes the track and moves on.
+Work that needs credentials, an operator or the world is verified with a probe,
+not a transcript.
 
-Conditions, all four required:
+- Probes live behind `//go:build live` in the package they exercise
+  (`live_test.go`). They never run in CI and never gate a build: a live call is
+  evidence, and a red build caused by someone else's outage teaches nothing.
+- Commit the probe, not a transcript. A pasted console log cannot be re-run.
+  Paste the transcript into the issue as well, because the interesting part is
+  usually the response shape rather than pass or fail.
+- Guessing a response format and building on it is the expensive option. Paid
+  calls are fine when the paid call is the one that settles the shape. Where a
+  probe only needs auth and routing, prefer a path that rejects a bad id before
+  doing any billable work.
 
-1. The finding is **L**. Never M or above, whatever the fix looks like.
-2. The fix **cannot alter behaviour** — prose, a comment, a name in a doc. If
-   the change touches a value, a branch, or a signature, it is not exempt.
-3. It is **recorded by name and file** in that round's review file, so the
-   audit trail shows who fixed what without a remediation round.
-4. **If it is arguable, it is not trivial.** The exemption is for cases with no
-   judgement in them at all.
+## Stack
 
-**A comment that misdescribes behaviour is not a doc defect.** It carries the
-severity of the behaviour it misdescribes, because the next agent will code
-against it — see §Go style, "Docs about behaviour must match the behaviour". A
-docstring claiming a retry that does not exist is an H, not an exempt typo,
-and it goes through the full cycle like anything else.
+Go, standard library first: `net/http`, `encoding/json`, `html/template`, `sync`,
+`golang.org/x/sync/errgroup`. `CGO_ENABLED=0 go build -trimpath -ldflags="-s -w"`.
+Ship on `gcr.io/distroless/base-debian12:nonroot`, `EXPOSE 8080`, listen on
+`0.0.0.0:${PORT}`.
 
-### Live verification splits into a `b` track
+The direction is Keel for the backend building blocks and Chaaya with Svelte 5
+for the UI, with Vertex AI and FAL as providers behind per-role config (issues
+#2, #3, #4). Until each move lands, the code you are editing is what is on
+`main`: a Preact shell vendored into `static/vendor/` with no build step, a
+server-rendered `html/template` page so a cold link works without JS, and the
+GMI clients. Adding a build step, a dependency or a framework is allowed when
+an issue calls for it and a reviewer agrees.
 
-Work that needs credentials, an operator, or the world does not belong in the
-track that writes the code. Split it into a `b`-suffixed track — T1/T1b is the
-precedent, T2b and T5b follow it.
+Defaults that still hold because they are cheap to keep: no Tailwind; htm
+templates use backticks and `${}`, never `<>` or `{}`; hooks before signals.
 
-* **A `b` track owns the `live_test.go` in each package its parent owns**, and
-  nothing else. A parent owning no Go package leaves its `b` track owning no
-  repo paths (T1b).
-* **Probes live behind `//go:build live`.** They never run in CI and never gate
-  a build. A live call is evidence, never a CI gate (§Testing rule 5) — it
-  needs a real key, it costs real money on the paid paths, and a red build
-  caused by someone else's outage teaches nothing.
-* **Commit the probe, not a transcript.** A pasted console log cannot be re-run;
-  §Definition of done item 4 requires a cited check to pass from a clean tree.
-  Paste the transcript into the record file *as well*, because the interesting
-  part is often the response shape rather than the pass/fail.
-* **Spend the cent.** Free paths first where they answer the question, but do
-  not contort a probe to avoid a ~$0.01 image when the paid call is the one
-  that settles the shape. Guessing a response format and building on it is the
-  expensive option — that is what H1 cost T6. Where a probe only needs auth and
-  routing, model resolution rejects a bad id before rendering and verifies both
-  for free.
+## Go style, enforced
 
-## Read order
-
-Before changing a file, read these in order:
-
-1. This file in full.
-2. The track's section in `dev-diary/PLAN.md`.
-3. Any decisions and open questions in `dev-diary/project.md` that touch the
-   track.
-4. The relevant `dev-diary/adversarial-review/t<N>-round*.md` history.
-5. The current code paths you will edit and their tests.
-
-Pre-flight assertion: *I own every path I will edit, the cross-package shapes
-I need already exist, and I can validate this track independently.* If any
-part is false, stop and propose a contract change in the review file.
-
-## Stack and ground rules
-
-These are frozen and reviewed on sight:
-
-- **Backend: Go 1.27.1, stdlib-first.** `net/http`, `encoding/json`,
-  `html/template`, `sync`, `golang.org/x/sync/errgroup`. Build with
-  `CGO_ENABLED=0 go build -trimpath -ldflags="-s -w"`. Ship on
-  `gcr.io/distroless/base-debian12:nonroot`, `EXPOSE 8080`, listen on
-  `0.0.0.0:${PORT}`.
-- **Frontend: Preact + `htm` + hooks, vendored into `static/vendor/`, no build
-  step.** Not Svelte 5 (runes thin in training data, fails silently). Not
-  vanilla JS (same silent DOM-sync class of bug).
-- **htm pinning.** Tagged-template JSX with backticks and `${}`:
-  ``html`<div class=${cls}>${kids}</div>` `` — never `<>` / `{}`. Drift is a
-  common model failure mode.
-- **Hooks, not signals.** `useState` / `useEffect`; reach for
-  `@preact/signals` only if hook prop-drilling actually hurts.
-- **Server-rendered shell.** Go's `html/template` renders the page so a cold
-  link works without JS.
-- **No Tailwind.** Reintroduces a build step we don't want.
-
-## Go style — enforced, not suggested
-
-Three different models write Go here. These rules exist so a reviewer can
-reject drift mechanically instead of arguing taste. `gofmt` and `go vet` catch
-none of them, which is exactly why they are written down.
+`gofmt` and `go vet` catch none of these, which is exactly why they are written
+down. A reviewer rejects drift against them mechanically.
 
 **Types and pointers**
 
-* **No pointer to a pointer.** `**T` never appears. If you think you need one,
-  you want to return a value, or the caller wants a different type.
-* **No pointer to a slice, map, channel, or func.** `*[]T` and `*map[K]V` are
-  already-reference types behind a second indirection; they are a bug or a
-  sign the function should return the value.
-* **No pointer to an interface.** `*io.Reader` is almost always a mistake —
-  interfaces hold pointers already.
-* **`any`, not `interface{}`.** Go 1.18 renamed it; keep one spelling.
-* **`any` is not a data model.** Every GMI response shape is a named struct in
-  `internal/gmi` — never `map[string]any` at a call site. If a union genuinely
-  needs `any` on the wire, give the type an `UnmarshalJSON` that resolves it
-  into typed fields, and never document a field as holding a named struct that
-  `encoding/json` cannot actually produce. (Cost of getting this wrong:
-  `t2-round3.md` L1.)
-* **Small structs go by value.** Below ~64 bytes a pointer parameter buys
-  nothing and costs nil-checks.
-* **Zero value usable, or a constructor that makes it so.** Not both halves
+- No `**T`. No pointer to a slice, map, channel, func or interface.
+- `any`, not `interface{}`. `any` is not a data model: every provider response
+  shape is a named struct, never `map[string]any` at a call site. If a union
+  genuinely needs `any` on the wire, give the type an `UnmarshalJSON` that
+  resolves it into typed fields, and never document a field as holding a named
+  struct that `encoding/json` cannot actually produce.
+- Small structs go by value (below about 64 bytes a pointer buys nothing).
+- The zero value is usable, or a constructor makes it so. Not both halves
   optional.
 
 **Functions and APIs**
 
-* **`ctx context.Context` is the first parameter of anything that does I/O.**
-  Never stored in a struct field. Never `context.TODO()` in committed code.
-* **Accept interfaces, return concrete types** — and the interface is declared
-  by the *consumer*, one or two methods wide. A package does not export a
-  `Client` interface for its own struct. (See PLAN.md §Architectural
-  invariants 3.)
-* **Never return a non-nil value alongside a non-nil error.** A caller must be
-  able to trust that `err != nil` means the rest is meaningless.
-  (`t2-round3.md` L3.)
-* **No naked returns.** Named results only when a deferred function assigns to
-  them.
-* **Every exported identifier has a doc comment starting with its own name.**
-* **No `panic` and no `log.Fatal` outside `func main`.** A library returns
-  errors.
+- `ctx context.Context` is the first parameter of anything that does I/O. Never
+  stored in a struct field. Never `context.TODO()` in committed code.
+- Accept interfaces, return concrete types. The consumer declares the interface,
+  one or two methods wide. A package does not export an interface for its own
+  struct.
+- Never return a non-nil value alongside a non-nil error.
+- No naked returns. Named results only when a deferred function assigns to them.
+- Every exported identifier has a doc comment starting with its own name.
+- No `panic` and no `log.Fatal` outside `func main`. A library returns errors.
 
 **Errors**
 
-* One sentinel per distinct condition; wrap with `%w`; compare with
-  `errors.Is` / `errors.As`. **Never match a substring of a provider's error
-  message.**
-* Error strings are lowercase, no trailing period, no error code the user sees
-  (child-facing strings are governed separately, below).
-* `_ = f()` requires a comment on the same line saying why the error cannot
-  matter.
-* **A retry classification is part of the error's contract.** If a sentinel
-  says "retryable" in its doc comment, every status mapped to it must actually
-  be safe to retry — mapping unknown 4xx to a retryable sentinel is a defect,
-  not a default. (`t2-round3.md` M1.)
+- One sentinel per distinct condition; wrap with `%w`; compare with `errors.Is`
+  or `errors.As`. Never match a substring of a provider's error message.
+- Error strings are lowercase with no trailing period and no error code the user
+  sees. Child-facing strings are governed separately, below.
+- `_ = f()` needs a comment on the same line saying why the error cannot matter.
+- A retry classification is part of the error's contract. If a sentinel says
+  "retryable", every status mapped to it must actually be safe to retry. Mapping
+  an unknown 4xx to a retryable sentinel is a defect, not a default.
 
 **Concurrency**
 
-* Every goroutine has a defined exit path. Fan-out uses
-  `golang.org/x/sync/errgroup` with `SetLimit`, never an unbounded `go` loop.
-* `go test -race` is mandatory and non-negotiable; a race is a C-severity
-  finding.
+- Every goroutine has a defined exit path, named in a comment.
+- Fan-out uses `errgroup` with `SetLimit`, never an unbounded `go` loop.
+- `go test -race` is mandatory. A race is a C.
 
-**Docs about behaviour must match the behaviour.** A comment that describes a
-retry, a fallback, or a default that the code does not implement is a defect at
-the severity of the behaviour it misdescribes — not a typo. Two docstrings in
-the same package contradicting each other is an automatic finding.
-(`t2-round3.md` H2.)
+**Comments describe behaviour.** A comment that describes a retry, a fallback or
+a default the code does not implement is a defect at the severity of the
+behaviour it misdescribes, because the next agent will code against it. Two
+docstrings in one package that contradict each other is an automatic finding.
 
-## Testing — what "enough" means
+## Testing: what "enough" means
 
-Statement coverage is a floor, not the target. T2 sat at 85.1% on
-`internal/gmi/media` while shipping the wrong model constant, because the two
-statements that carried it were the `if model == "" { ... }` defaults and every
-test passed an explicit model. Coverage counted the lines and missed the
-decision.
+Statement coverage is a floor, not the target. A package once sat at 85% while
+shipping the wrong model constant, because the two statements that carried it
+were `if model == "" { ... }` defaults and every test passed an explicit model.
 
-So, per track:
-
-1. **Every exported function has at least one test.**
-2. **Every default value is exercised through its default path.** If a
-   function substitutes a value when an argument is empty, a test calls it with
-   that argument empty and asserts what reached the wire. This is the single
-   rule that would have caught `t2-round3.md` H1 two rounds earlier.
-3. **Every error branch has a test asserting the sentinel** with `errors.Is` —
+1. Every exported function has at least one test.
+2. **Every default is exercised through its default path.** If a function
+   substitutes a value when an argument is empty, a test calls it with that
+   argument empty and asserts what reached the wire. A zero-value config reaching
+   production behaviour (a pacer, a limit, a timeout) gets the same treatment: a
+   test that fails if the zero value silently becomes something else.
+3. Every error branch has a test asserting the sentinel with `errors.Is`,
    including the branches you expect never to fire, which are where the wrong
    classification hides.
 4. **Every documented upstream quirk gets a raw-wire pin test, named for the
-   quirk.** `TestSynthesizeSpeech_TypoPinnedInRawJSON` is the model: it asserts
-   against the marshalled JSON bytes, not against a Go struct, so a rename
-   cannot silently unfix it. The `MiniMaxAI/` prefix, the `thinking` body
-   field, the `need_volumn_normalization` typo and the five Traefik labels all
-   need one.
-5. **Table-driven past two cases.** `t.Setenv`, never `os.Setenv`. The unit
-   suite is `httptest` — a live call never runs under `go test ./...` and
-   never gates CI, because CI has no key and an upstream outage must not
-   redden a build.
-   **But live calls are expected, and paid ones are fine.** Operator policy,
-   2026-09-05: prove it against the real API rather than against a fake whose
-   shape you guessed. An image is ~$0.01 and M3 and Speech 2.8 are free —
-   discovering a wire shape now is far cheaper than discovering it after two
-   tracks are built on the wrong assumption. T6's H1 (every page decoding to
-   its own reference sheet) is exactly the bug a single paid call would have
-   pre-empted. Put live probes behind `//go:build live` in the owning `b`
-   track and spend the cent.
-6. **A `Done when` line must be mechanically checkable from a clean tree.**
-   If it says "an integration test does X", such a test exists and runs. If the
-   check can only be performed by an operator, it goes in a `b`-suffixed track
-   (the T1/T1b split is the precedent), not in prose.
-7. **Coverage floor: 75% of statements per package, 85% for
-   `thutapi/internal/gmi/*`**, enforced in `verify.yml`. The floor
-   exists to catch an untested *package*; rules 1–4 are what catch an untested
-   *decision*.
+   quirk.** It asserts against the marshalled bytes (or the raw reply), not a Go
+   struct, so a rename cannot silently unfix it. Examples already in the tree:
+   the `MiniMaxAI/` model prefix, the `thinking` body field, the
+   `need_volumn_normalization` typo, and a judge reply with NUL bytes scattered
+   through otherwise valid JSON.
+5. Table-driven past two cases. `t.Setenv`, never `os.Setenv`. The unit suite
+   uses `httptest`; no live call runs under `go test ./...`.
+6. **Tests must not be flaky by construction.** Anything that depends on random
+   draws, goroutine order or the wall clock injects a seed or a clock. A test
+   that can redden CI on a loaded runner is a defect. Run new concurrency tests
+   with `-race -shuffle=on -count=5` and under CPU load before you call them done.
+7. A done condition is mechanically checkable from a clean tree. If it says "a
+   test does X", that test exists and runs. If only an operator can check it, it
+   is a live probe (above), not prose.
+8. **Coverage floor: 75% of statements per package, 85% for
+   `thutapi/internal/gmi/*`**, enforced in `verify.yml`. The floor exists to
+   catch an untested package; rules 1 to 6 are what catch an untested decision.
 
-## GMI endpoints — both clients must live
+## Providers today: GMI
 
-- **Text.** `https://api.gmi-serving.com/v1/chat/completions`,
-  OpenAI-compatible. Model id is the full **`MiniMaxAI/MiniMax-M3`**. The bare
-  `MiniMax-M3` 404s. Reasoning is enabled only by body field
-  `thinking:{"type":"enabled"}`; `reasoning_effort` is ignored by MiniMax
-  models.
-- **Image and audio.** `https://console.gmicloud.ai/api/v1/ie/requestqueue/apikey/requests`,
+The code currently talks to GMI. These facts stay until the provider move
+(issue #3) lands; the provider layer will carry them as per-role config.
+
+- **Text.** `https://api.gmi-serving.com/v1/chat/completions`, OpenAI-compatible.
+  The model id is the full **`MiniMaxAI/MiniMax-M3`**; the bare `MiniMax-M3`
+  404s. Reasoning is enabled only by the body field `thinking:{"type":"enabled"}`;
+  `reasoning_effort` is ignored by MiniMax models.
+- **Image and audio.**
+  `https://console.gmicloud.ai/api/v1/ie/requestqueue/apikey/requests`, with a
   `{model, payload}` envelope.
+- **Rate limits are per model per account.** The image model allows 2 requests
+  per 60 seconds. Pace and retry (`internal/illustrate`); do not rely on
+  concurrency caps to stay under a per-minute rate.
 - **TTS typo.** `need_volumn_normalization: true` (spelled `volumn`) and
-  `need_noise_reduction: true` — match the typo or it is silently ignored.
-- **`source_audio`** for voice clone must be a public URL GMI can fetch;
-  images take inline base64 in the text client.
+  `need_noise_reduction: true`. Match the typo or it is silently ignored.
+- **`source_audio`** for voice clone must be a public URL GMI can fetch; images
+  take inline base64 in the text client.
 
 ## CI and images
 
-* **`verify.yml` runs on code pushes and PRs** — `go vet ./...`,
-  `go test ./... -race -cover`, a **two-tier coverage floor** (75% per
-  package, 85% for `thutapi/internal/gmi/*`),
-  **`gofmt -l .` across the whole tree**, and `bash -n` on the deploy script.
-  It ignores doc-only changes; the dev-diary moves far more often than the code
-  and a green tick on prose is noise.
-  * The gofmt step was scoped to `cmd/` until 2026-09-04, which meant every
-    line under `internal/` — i.e. every remaining track — went unchecked by
-    the mechanism §Stack relies on to remove drift between three agents. If
-    you narrow it again, you switch that off (`t2-round3.md` M4).
-  * The coverage floor catches an untested *package*. It does not catch an
-    untested *decision* — T2 shipped the wrong model constant at 85.1%. See
-    §Testing for the rules that do.
-* **`image.yml` is `workflow_dispatch` only.** Publishing an image is a
-  deliberate act, never a side effect of committing — otherwise the
-  registry fills with builds nobody asked for and `latest` drifts under the
-  running box. `gh workflow run image.yml -f latest=true`.
-* **Deploy a SHA tag, not `latest`**, for anything you need to reproduce.
-* **Secrets never enter the repo or an image layer.** `GMI_API_KEY` flows
-  `/etc/thutapi/env` (root, 0600) → the deploy script's environment →
-  docker's **name-only** `--env GMI_API_KEY` → container. The name-only form
-  (no `=value`) is deliberate: docker inherits the value from the script's
-  environment, so the secret never enters the argument list and is not
-  visible to `ps`. Never `export` it in an interactive shell — that writes it
-  to `~/.zsh_history` in plaintext, which is the realistic leak path. Its
-  presence in `docker inspect` is accepted; see `deploy/README.md` §Safety. The origin IP of the box is in
-  the gitignored `.env` as `ORIGIN_IP`; the repo is public.
+- **`verify.yml` runs on code pushes and pull requests:** `go vet ./...`,
+  `go test ./... -race -cover`, the two-tier coverage floor, `gofmt -l .` across
+  the whole tree (never narrowed to a subtree: that switches off the mechanism
+  that removes drift between agents), and `bash -n` on the deploy script. It
+  ignores doc-only changes. The workstation runs the same checks.
+- **`image.yml` is `workflow_dispatch` only.** Publishing an image is a
+  deliberate act, never a side effect of committing. A successful image run
+  triggers `deploy.yml`, which has a health gate and rolls back on failure.
+  `gh workflow run image.yml -f latest=true`.
+- **Deploy a SHA tag, not `latest`,** for anything you need to reproduce.
+- **Container logs reset on every deploy.** Capture what you need from them
+  before shipping, or it is gone.
+- **Secrets never enter the repo or an image layer.** `GMI_API_KEY` flows
+  `/etc/thutapi/env` (root, 0600) to the deploy script's environment to docker's
+  name-only `--env GMI_API_KEY` to the container. The name-only form is
+  deliberate: the secret never enters the argument list and is not visible to
+  `ps`. Never `export` it in an interactive shell; that writes it to shell
+  history in plaintext. The origin IP of the box is in the gitignored `.env` as
+  `ORIGIN_IP`.
 
 ## Safety and data rules
 
-- `GMI_API_KEY` is **never in the repo.** Pass by `docker run -e`. The repo
-  is public for the whole judging period; sweep history before going public.
-- The demo uses synthetic / child-generated content. No real PII, no real
-  voices uploaded to the repo, no real voice clones stored alongside source.
-- Voice samples are short-lived and unguessable URLs, not stable paths — it is
-  a child's voice.
+- No API key in the repo. Sweep history before making anything public.
+- Content is synthetic or child-generated. No real PII, no real voices in the
+  repo, no real voice clones stored alongside source. Issues and pull requests
+  name no children and quote no stories.
+- Voice samples are short-lived and unguessable URLs, not stable paths. It is a
+  child's voice.
 - Generated media accumulates on disk; cap retention.
-- A public generate button is an open wallet at ~$0.01 an image. Gate behind
-  a passcode or per-IP cap.
+- A public generate button is an open wallet. Gate it behind a passcode, a
+  per-IP cap and, as it lands, a budget that refuses before the paid call.
+- Do not leave background processes behind. Bound every load-test child with
+  `timeout`, and do not write `until pgrep` loops that match themselves.
 
-## Two-day cut list
-
-**Cut first:** music (T12), voice clone (T13), multi-character voices, page
-count down to 6, controlnet.
-
-**Do not cut:** the interview (T4 — it is the entry's reason to exist) and
-character consistency (T6 — without it there is no book).
-
-**Never cut:** submission (T14). An unsubmitted project scores zero.
-
-## Definition of done (per track)
-
-A track is done when **all** of the following are true:
-
-1. `dev-diary/PLAN.md` shows the track's status as `DONE`.
-2. `dev-diary/adversarial-review/t<N>-round<K>.md` ends in **APPROVE** with
-   an explicit zero-residue claim against every prior round.
-3. The track's `Done when` line in `dev-diary/PLAN.md` is met end-to-end.
-4. The acceptance test or smoke test cited in the review's `Pin` column
-   passes from a clean tree on a fresh checkout.
-5. `go vet ./...`, `go test ./... -race`, `gofmt -l .` and the coverage floor
-   are all green — i.e. `verify.yml` would pass on the track's own paths.
-6. The track's new code satisfies §Go style and §Testing: default paths
-   exercised, every error branch asserted with `errors.Is`, and a raw-wire pin
-   test for every upstream quirk the track encodes.
-7. Every path the track touched is inside its `Owns` list in `PLAN.md`, with
-   the single sanctioned exception of one route line in `newServer`
-   (PLAN.md §Architectural invariants 5).
-8. The track is committed to `main`.
-
-## File layout
+## Repository layout
 
 ```
 /
-├── AGENTS.md                            ← this file
-├── README.md                            ← public-facing; what this is
-├── Dockerfile                           ← distroless static, multi-stage
-├── .env.example                         ← copy to .env (gitignored)
-├── .github/workflows/
-│   ├── verify.yml                       ← vet/test/gofmt on code changes
-│   └── image.yml                        ← GHCR publish, MANUAL only
-├── deploy/
-│   ├── docker-run.sh                    ← the five Traefik labels + proxy net
-│   └── README.md                        ← operator notes for the box
-├── go.mod / go.sum
-├── cmd/thutapi/                         ← process entry
-├── internal/                            ← packages (stream, gmi, store, …)
-├── static/                              ← Preact shell + vendored vendor/
-│   ├── vendor/preact.{js,mjs,hooks.js,htm.js,…}
-│   └── …
-├── data/                                ← gitignored: SQLite, generated media
-└── dev-diary/
-    ├── project.md                       ← product spec
-    ├── PLAN.md                          ← tracks, status, decisions
-    └── adversarial-review/
-        ├── README.md                    ← loop definition
-        ├── t<N>-round<K>.md              ← review
-        ├── t<N>-remediation-round<K>.md ← fixes
-        └── …
+├── AGENTS.md                ← this file
+├── README.md                ← public-facing
+├── Dockerfile               ← distroless static, multi-stage
+├── .env.example             ← copy to .env (gitignored)
+├── .github/workflows/       ← verify.yml, image.yml (manual), deploy.yml
+├── deploy/                  ← docker-run.sh, redeploy.sh, operator notes
+├── cmd/thutapi/             ← process entry
+├── internal/                ← packages (stream, gmi, store, illustrate, ...)
+├── static/                  ← the UI shell and vendored vendor/
+├── data/                    ← gitignored: SQLite, generated media
+└── dev-diary/               ← product spec, history, review records
 ```
+
+Anything that points at `PLAN.md`, a track number, or an `Owns` line in code,
+comments or tests is stale: rewrite it so it states the reason itself.
